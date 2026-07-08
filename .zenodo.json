@@ -1,7 +1,7 @@
 {
   "upload_type": "software",
   "title": "TENIR-Gov: Governance Middleware for AI-Enabled Operational Systems",
-  "description": "<p>TENIR-Gov is an open-source governance middleware that sits between decision-producing AI agents and downstream execution environments. It enforces explicit policies, validates operational intents through a neuro-symbolic grammar layer, and persists every governance decision in a cryptographically verifiable Merkle-based audit ledger — independently of any underlying AI model.</p><p>Release R5.0.0 (IRON OMEGA R5) provides: neuro-symbolic validation (LALR(1) grammar + optional LLM fine-tuning), a deterministic policy engine (frozen dataclass contract), a graph-based policy store (Neo4j 5.x), a Merkle epoch audit ledger, an administrative governance plane, a polymorphic UI surface contract, and ledger migration tooling.</p>",
+  "description": "<p>TENIR-Gov is an open-source governance middleware that sits between decision-producing AI agents and downstream execution environments. It enforces explicit policies, validates operational intents through a neuro-symbolic grammar layer, and persists every governance decision in a cryptographically verifiable Merkle-based audit ledger \u2014 independently of any underlying AI model.</p><p>Release R5.0.0 (IRON OMEGA R5) provides: neuro-symbolic validation (LALR(1) grammar + optional LLM fine-tuning), a deterministic policy engine (frozen dataclass contract), a graph-based policy store (Neo4j 5.x), a Merkle epoch audit ledger, an administrative governance plane, a polymorphic UI surface contract, and ledger migration tooling.</p>",
   "version": "5.0.0",
   "license": "Apache-2.0",
   "creators": [
@@ -27,14 +27,6 @@
   ],
   "language": "eng",
   "access_right": "open",
-  "related_identifiers": [
-    {
-      "relation": "isDocumentedBy",
-      "identifier": "[DOI_PENDING]",
-      "scheme": "doi",
-      "resource_type": "publication-article"
-    }
-  ],
   "communities": [],
   "notes": "Release R5.0.0 (IRON OMEGA R5). Validation suite: 557 automated tests (555 passing, 2 intentionally skipped). Statement coverage: 96% on tenir_governance. Policy fingerprint (default): cb96dd8d35197ab0."
 }
