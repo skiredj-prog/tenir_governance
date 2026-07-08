@@ -1,0 +1,286 @@
+{
+  "schema_version": "partner_b-sovereignty-pilot-v1",
+  "pilot": {
+    "pilot_id": "partner_b-sovereignty-amplified-loop",
+    "title": "partner_b Sovereignty Pilot - Amplified Maintenance Override Loop",
+    "institution": "partner_b Sovereignty",
+    "workflow": "sense-adjudicate-decide-act",
+    "reporting_mode": "dual"
+  },
+  "tau_profile": {
+    "tau_id": "TAU-partner_b-SOV-01",
+    "protected_identity_statement": "Protect sovereign decision continuity without sacrificing human legibility or bounded intervention.",
+    "invariants": [
+      "Bounded authority",
+      "Verifiable truth path",
+      "Continuity under consequence",
+      "Human answerability"
+    ],
+    "thresholds": {
+      "evidence_gate_enforce_min": 70,
+      "tau_exposure_control_enforce_max": 40
+    }
+  },
+  "loop": {
+    "incoming_pressure": {
+      "summary": "An outage-driven override request enters with plant-wide urgency.",
+      "realm": "industrial-operations",
+      "organ_tags": [
+        "perception",
+        "membrane"
+      ],
+      "system_tags": [
+        "maintenance",
+        "governance"
+      ],
+      "magnitude_raw": 4.7,
+      "confidence_raw": 4.5,
+      "evidence_refs": [
+        "event:e-017",
+        "telemetry:cluster-9"
+      ]
+    },
+    "system_response": {
+      "summary": "The first response accelerates approval routing before authority is fully settled.",
+      "realm": "authority",
+      "organ_tags": [
+        "transmission",
+        "membrane"
+      ],
+      "system_tags": [
+        "workflow",
+        "governance"
+      ],
+      "magnitude_raw": 3.9,
+      "confidence_raw": 4.1,
+      "evidence_refs": [
+        "ledger:l-090",
+        "message:chain-12"
+      ]
+    },
+    "outgoing_imprint": {
+      "summary": "The accelerated posture amplifies environmental expectation for more exceptions.",
+      "realm": "institutional",
+      "organ_tags": [
+        "transmission",
+        "memory"
+      ],
+      "system_tags": [
+        "authority",
+        "compliance"
+      ],
+      "magnitude_raw": 4.2,
+      "confidence_raw": 3.9,
+      "evidence_refs": [
+        "memo:exception-spread"
+      ]
+    },
+    "feedback_return": {
+      "summary": "The environment returns with a second override demand and degraded confidence.",
+      "realm": "information",
+      "organ_tags": [
+        "perception",
+        "memory"
+      ],
+      "system_tags": [
+        "evidence",
+        "governance"
+      ],
+      "magnitude_raw": 4.4,
+      "confidence_raw": 4.2,
+      "evidence_refs": [
+        "event:e-018",
+        "audit:delta-risk-1"
+      ]
+    },
+    "loop_lag": {
+      "summary": "The loop closes within hours, before review discipline catches up.",
+      "realm": "time",
+      "organ_tags": [
+        "memory"
+      ],
+      "system_tags": [
+        "temporal-governance"
+      ],
+      "magnitude_raw": 3.7,
+      "confidence_raw": 4.0,
+      "evidence_refs": [
+        "timeline:t-4h"
+      ]
+    },
+    "tau_exposure": {
+      "summary": "TAU exposure rises because the system is teaching the environment to demand bypasses.",
+      "realm": "identity",
+      "organ_tags": [
+        "membrane",
+        "conscience"
+      ],
+      "system_tags": [
+        "governance"
+      ],
+      "magnitude_raw": 4.5,
+      "confidence_raw": 4.4,
+      "evidence_refs": [
+        "ledger:l-091",
+        "audit:delta-risk-1"
+      ]
+    }
+  },
+  "scores": {
+    "raw_dimensions": {
+      "sovereignty": {
+        "boundary_integrity": 3.1,
+        "authority_legibility": 3.3,
+        "forensic_verifiability": 4.0,
+        "runtime_resilience": 3.8
+      },
+      "adjudication": {
+        "tension_clarity": 4.3,
+        "tau_alignment": 2.2,
+        "option_space_preservation": 2.4,
+        "reversibility_containment": 2.8,
+        "industrial_consequence_fit": 4.5
+      },
+      "systemic_loop": {
+        "incoming_pressure_legibility": 4.2,
+        "response_fitness": 2.0,
+        "outgoing_imprint_visibility": 3.8,
+        "feedback_return_visibility": 4.1,
+        "loop_lag_awareness": 3.6,
+        "tau_exposure_control": 1.4
+      },
+      "evidence_coverage": {
+        "provenance": 4.0,
+        "timeliness": 4.2,
+        "completeness": 3.8,
+        "cross_signal_consistency": 3.9
+      }
+    },
+    "normalized_dimensions": {
+      "sovereignty": {
+        "boundary_integrity": {
+          "raw": 3.1,
+          "normalized": 62
+        },
+        "authority_legibility": {
+          "raw": 3.3,
+          "normalized": 66
+        },
+        "forensic_verifiability": {
+          "raw": 4.0,
+          "normalized": 80
+        },
+        "runtime_resilience": {
+          "raw": 3.8,
+          "normalized": 76
+        }
+      },
+      "adjudication": {
+        "tension_clarity": {
+          "raw": 4.3,
+          "normalized": 86
+        },
+        "tau_alignment": {
+          "raw": 2.2,
+          "normalized": 44
+        },
+        "option_space_preservation": {
+          "raw": 2.4,
+          "normalized": 48
+        },
+        "reversibility_containment": {
+          "raw": 2.8,
+          "normalized": 56
+        },
+        "industrial_consequence_fit": {
+          "raw": 4.5,
+          "normalized": 90
+        }
+      },
+      "systemic_loop": {
+        "incoming_pressure_legibility": {
+          "raw": 4.2,
+          "normalized": 84
+        },
+        "response_fitness": {
+          "raw": 2.0,
+          "normalized": 40
+        },
+        "outgoing_imprint_visibility": {
+          "raw": 3.8,
+          "normalized": 76
+        },
+        "feedback_return_visibility": {
+          "raw": 4.1,
+          "normalized": 82
+        },
+        "loop_lag_awareness": {
+          "raw": 3.6,
+          "normalized": 72
+        },
+        "tau_exposure_control": {
+          "raw": 1.4,
+          "normalized": 28
+        }
+      },
+      "evidence_coverage": {
+        "provenance": {
+          "raw": 4.0,
+          "normalized": 80
+        },
+        "timeliness": {
+          "raw": 4.2,
+          "normalized": 84
+        },
+        "completeness": {
+          "raw": 3.8,
+          "normalized": 76
+        },
+        "cross_signal_consistency": {
+          "raw": 3.9,
+          "normalized": 78
+        }
+      }
+    },
+    "family_totals": {
+      "sovereignty_score": 70,
+      "adjudication_score": 64,
+      "systemic_loop_score": 64,
+      "evidence_coverage_score": 79
+    },
+    "pilot_admissibility_score": 68,
+    "evidence_gate": "FULL_ACTION"
+  },
+  "adjudication": {
+    "verdict": "REJECT",
+    "next_action": "ENFORCE",
+    "rationale": "REJECT was selected from the relationship between sovereignty posture, adjudication quality, loop visibility, and evidence gate FULL_ACTION.",
+    "contradictions": [
+      "Short-term industrial relief is increasing long-term authority exposure.",
+      "Evidence is sufficient, but the current response is worsening the loop.",
+      "TAU exposure remains elevated across the active feedback loop."
+    ],
+    "protected_invariants": [
+      "Bounded authority",
+      "Continuity under consequence",
+      "Human answerability"
+    ],
+    "authority_status": "CLEAR"
+  },
+  "trace": {
+    "event_id": "evt-amplified-017",
+    "ledger_ref": "audit/governance_ledger.jsonl#l-091",
+    "attachments": [
+      "exception-spread.pdf",
+      "delta-risk-1.json"
+    ],
+    "created_at": "2026-04-17T18:36:45.361964+00:00",
+    "authoritative_state": "SHADOW_CRITICAL"
+  },
+  "report_layers": {
+    "executive_summary": "partner_b sovereignty posture reads at 70/100, adjudication at 64/100, systemic loop visibility at 64/100, and evidence coverage at 79/100. The current verdict is REJECT with a recommended next action of ENFORCE. Evidence gate: FULL_ACTION.",
+    "operator_summary": "Loop reading: incoming pressure in industrial-operations crosses into system response through transmission, membrane, creates an outgoing imprint in institutional, then returns through information with lag visible in the loop closes within hours, before review discipline catches up.. Current posture: REJECT / ENFORCE.",
+    "institutional_readout": "partner_b Sovereignty can review this payload as a dual report rather than a single dashboard. The institutional reading remains bounded, auditable, and human-legible. Recommended posture: REJECT with ENFORCE. Primary contradiction: Short-term industrial relief is increasing long-term authority exposure..",
+    "adjudication_readout": "Adjudication is being performed around TAU `TAU-partner_b-SOV-01` as reference, not as deciding subject. Protected invariants in view: Bounded authority, Verifiable truth path, Continuity under consequence. Outcome: REJECT. Next viable action: ENFORCE. Key contradiction: Short-term industrial relief is increasing long-term authority exposure.."
+  }
+}

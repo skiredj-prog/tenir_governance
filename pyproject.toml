@@ -1,0 +1,54 @@
+[build-system]
+requires      = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tenir-governance"
+version = "5.0.0"
+description = "TENIR-Gov: Governance Middleware for AI-Enabled Operational Systems"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Abdelaziz Skiredj", email = "skiredj@gmail.com" }
+]
+keywords = [
+    "governance", "middleware", "AI safety", "policy enforcement",
+    "neuro-symbolic", "audit ledger", "Merkle tree", "autonomous agents",
+    "compliance", "FastAPI", "Neo4j"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage      = "https://github.com/skiredj-prog/tenir-governance"
+Repository    = "https://github.com/skiredj-prog/tenir-governance"
+Documentation = "https://github.com/skiredj-prog/tenir-governance#readme"
+"Bug Tracker" = "https://github.com/skiredj-prog/tenir-governance/issues"
+DOI           = "https://doi.org/[DOI_PENDING]"
+
+[project.scripts]
+tenir-validate = "tenir_governance.validator:main"
+tenir-sdk      = "tenir_governance.sdk:main"
+
+[tool.setuptools]
+packages = ["tenir_governance"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["tenir_governance"]
+omit   = ["tests/*"]

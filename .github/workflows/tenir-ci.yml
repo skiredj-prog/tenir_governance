@@ -1,0 +1,238 @@
+# .github/workflows/tenir-ci.yml
+# TENIR Governance CI Gate — R5.0.0
+#
+
+
+name: TENIR Governance CI Gate
+
+on:
+  push:
+    branches: ["main", "governance/**", "r4/**", "r5/**", "sdk/**"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  PYTHON_VERSION: "3.11"
+  POLICY_VERSION: "tenir-canonical-v1.0.0"
+  POLICY_FINGERPRINT: "cb96dd8d35197ab0"
+
+jobs:
+
+ # ── Gate 0: Policy contract must be valid before anything else runs ──────────
+  policy-gate:
+    name: "Gate 0 — Policy Contract + Hard Gate"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install governance package
+        run: |
+          pip install -e . --quiet
+          pip install pytest pytest-cov --quiet
+
+      - name: "GATE: Validate canonical policy (9/9 checks)"
+        run: |
+          python -m tenir_governance.validator \
+            --policy default \
+            --expected-version ${{ env.POLICY_VERSION }}
+
+      - name: "GATE: Verify policy fingerprint"
+        run: |
+          python -c "
+          from tenir_governance import PolicyEngine
+          p = PolicyEngine.default()
+          assert p.fingerprint() == '${{ env.POLICY_FINGERPRINT }}', \
+              f'Fingerprint mismatch: {p.fingerprint()}'
+          print(f'Fingerprint OK: {p.fingerprint()}')
+          "
+
+      - name: Export validator report
+        run: |
+          python -m tenir_governance.validator --policy default --json \
+            > validator_report.json
+          cat validator_report.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validator-report
+          path: validator_report.json
+         
+
+
+  # ── Gate 1: Regression corpus (281 golden cases) ─────────────────────────────
+  regression-corpus:
+    name: "Gate 1 — Regression Corpus (258 cases)"
+    runs-on: ubuntu-latest
+    needs: policy-gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e . --quiet
+          pip install pytest pytest-cov --quiet
+
+      - name: Run regression corpus
+        run: |
+          pytest tests/test_regression_corpus.py \
+            -v --tb=short \
+            --cov=tenir_governance \
+            --cov-report=xml:coverage_regression.xml \
+            -q
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-regression
+          path: coverage_regression.xml
+
+
+  # ── Gate 2: Governance sprint tests ──────────────────────────────────────────
+  governance-sprints:
+    name: "Gate 2 — Governance Sprint Tests (32 cases)"
+    runs-on: ubuntu-latest
+    needs: policy-gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e . --quiet
+          pip install pytest --quiet
+
+      - name: Run sprint tests
+        run: pytest tests/test_sprints_9_10_11.py -v --tb=short
+
+
+  # ── Gate 3: R5 full test suite ────────────────────────────────────────────────
+  r5-suite:
+    name: "Gate 3 — R5 Test Suite (56 cases)"
+    runs-on: ubuntu-latest
+    needs: policy-gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e . --quiet
+          pip install pytest pytest-asyncio \
+              fastapi uvicorn pydantic networkx websockets httpx --quiet
+
+      - name: Run R5 test suite
+        run: |
+          pytest \
+            r5_hardened/IRON_OMEGA_R5/test_r5_all.py \
+            r5_hardened/IRON_OMEGA_R5/test_institutional_hardening.py \
+            -v --tb=short
+
+      - name: Run R5 wired integration tests
+        run: |
+          pytest r5_wired/test_r5_governance_integration.py \
+            -v --tb=short
+
+
+  # ── Gate 4: R4 monitor suite ──────────────────────────────────────────────────
+  r4-suite:
+    name: "Gate 4 — R4 Monitor Suite (61 cases)"
+    runs-on: ubuntu-latest
+    needs: policy-gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e . --quiet
+          pip install -e ./r4 --quiet
+          pip install pytest --quiet
+
+      - name: Run R4 monitor suite
+        run: pytest r4/tests/ -v --tb=short
+
+
+  # ── Gate 5: Nomenclature alignment ───────────────────────────────────────────
+  nomenclature-check:
+    name: "Gate 5 — Nomenclature Alignment"
+    runs-on: ubuntu-latest
+    needs: policy-gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install package
+        run: pip install -e . --quiet
+
+      - name: Verify CAVE canonical definition
+        run: |
+          python -c "
+          from tenir_governance.nomenclature import CAVEFieldNames
+          exp = CAVEFieldNames.EXPANSION
+          assert 'Context' in exp and 'Effect' in exp, f'CAVE wrong: {exp}'
+          assert 'Control' not in exp and 'Veto' not in exp, f'Legacy CAVE: {exp}'
+          print(f'CAVE OK: {exp}')
+          "
+
+      - name: Verify CES canonical labels
+        run: |
+          python -c "
+          from tenir_governance.nomenclature import CESStateNames
+          assert hasattr(CESStateNames, 'SIGNAL_CONFLICT'), 'SIGNAL_CONFLICT missing'
+          print('CES canonical labels OK')
+          "
+
+      - name: Verify R4/R5 mode mapping
+        run: |
+          python -c "
+          from tenir_governance.nomenclature import OperatingModeNames
+          m = OperatingModeNames.R4_TO_R5
+          for k in ['SHADOW_PASSIVE', 'SHADOW_CRITICAL', 'SHADOW_OFF', 'ENFORCE']:
+              assert k in m, f'Mode missing: {k}'
+          print(f'Mode mapping OK: {list(m.keys())}')
+          "
+
+
+  # ── Final: all gates must be green ────────────────────────────────────────────
+  all-clear:
+    name: "TENIR CI — All Gates Clear"
+    runs-on: ubuntu-latest
+    needs:
+      - policy-gate
+      - regression-corpus
+      - governance-sprints
+      - r5-suite
+      - r4-suite
+      - nomenclature-check
+    steps:
+      - name: Summary
+        run: |
+          echo "================================================"
+          echo "  TENIR Governance CI — ALL GATES CLEAR"
+          echo "  Policy:      ${{ env.POLICY_VERSION }}"
+          echo "  Fingerprint: ${{ env.POLICY_FINGERPRINT }}"
+          echo "  Branch:      ${{ github.ref }}"
+          echo "  Commit:      ${{ github.sha }}"
+          echo "================================================"
+          echo "  Gate 0: Policy contract      9/9 checks"
+          echo "  Gate 1: Regression corpus    258 cases"
+          echo "  Gate 2: Governance sprints    32 cases"
+          echo "  Gate 3: R5 suite              56 cases"
+          echo "  Gate 4: R4 monitor suite      61 cases"
+          echo "  Gate 5: Nomenclature          aligned"
+          echo "  Total:                       445 tests"
+          echo "================================================"

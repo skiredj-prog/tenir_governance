@@ -1,0 +1,1289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>partner_b Sovereignty Pilot | Minimum Honest Adjudication</title>
+  <style>
+    :root {
+      --bg: #f4f1eb;
+      --surface: #fffdfa;
+      --surface-strong: #ffffff;
+      --text: #172025;
+      --muted: #5f6c73;
+      --line: #d9d2c5;
+      --tau: #a47a1d;
+      --tau-soft: rgba(164, 122, 29, 0.15);
+      --positive: #1f7a5c;
+      --warning: #b27216;
+      --danger: #a23b31;
+      --executive: #173a5e;
+      --operator: #243228;
+      --shadow: rgba(23, 32, 37, 0.06);
+      --radius: 18px;
+      --mono: "Consolas", "SFMono-Regular", monospace;
+      --sans: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      --serif: Georgia, "Times New Roman", serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at top right, rgba(164, 122, 29, 0.08), transparent 28%),
+        linear-gradient(180deg, #f7f4ee 0%, #f0ece5 100%);
+      color: var(--text);
+      font-family: var(--sans);
+      min-height: 100vh;
+    }
+
+    .shell {
+      width: min(1380px, calc(100vw - 40px));
+      margin: 24px auto 40px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero,
+    .scorebar,
+    .surface-panel {
+      background: linear-gradient(180deg, rgba(255,255,255,0.94), rgba(255,253,250,0.98));
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 12px 30px rgba(23, 32, 37, 0.06);
+    }
+
+    .hero {
+      padding: 26px 28px 22px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 24px;
+      flex-wrap: wrap;
+    }
+
+    .eyebrow {
+      font-size: 12px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--tau);
+      font-family: var(--mono);
+      margin-bottom: 10px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(32px, 4vw, 52px);
+      line-height: 0.96;
+      font-weight: 600;
+      font-family: var(--serif);
+      max-width: 880px;
+    }
+
+    .subtitle {
+      margin-top: 14px;
+      max-width: 880px;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 16px;
+    }
+
+    .workflow-nav {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .workflow-btn {
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--text);
+      border-radius: 999px;
+      padding: 11px 16px;
+      cursor: pointer;
+      transition: 160ms ease;
+      font-size: 13px;
+      font-family: var(--mono);
+      letter-spacing: 0.04em;
+    }
+
+    .workflow-btn.active {
+      border-color: var(--tau);
+      background: var(--tau-soft);
+      color: #61470b;
+    }
+
+    .hero-controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+      align-items: end;
+    }
+
+    .control-block {
+      display: grid;
+      gap: 8px;
+    }
+
+    label {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      font-family: var(--mono);
+    }
+
+    select,
+    input[type="file"] {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px;
+      background: var(--surface-strong);
+      color: var(--text);
+      font: inherit;
+    }
+
+    .scorebar {
+      padding: 18px 20px 20px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .scorebar-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .scorebar-title {
+      display: grid;
+      gap: 4px;
+    }
+
+    .scorebar-title strong {
+      font-size: 14px;
+      font-family: var(--mono);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--executive);
+    }
+
+    .scorebar-title span {
+      color: var(--muted);
+      max-width: 820px;
+      line-height: 1.5;
+    }
+
+    .scoregrid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+    }
+
+    .scorecard {
+      background: var(--surface-strong);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .scorecard .label {
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-family: var(--mono);
+      color: var(--muted);
+    }
+
+    .scorecard .value {
+      font-size: 38px;
+      font-family: var(--serif);
+      line-height: 1;
+    }
+
+    .scorecard .note {
+      color: var(--muted);
+      line-height: 1.45;
+      font-size: 13px;
+    }
+
+    .badge-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      font-family: var(--mono);
+      border: 1px solid currentColor;
+      width: fit-content;
+    }
+
+    .surface-panel {
+      padding: 24px;
+      display: none;
+      gap: 18px;
+    }
+
+    .surface-panel.active {
+      display: grid;
+    }
+
+    .surface-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+
+    .surface-head h2 {
+      margin: 0;
+      font-size: 28px;
+      font-family: var(--serif);
+    }
+
+    .surface-head p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      max-width: 840px;
+      line-height: 1.6;
+    }
+
+    .executive-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 18px;
+    }
+
+    .panel-card,
+    .loop-card,
+    .trace-card {
+      background: var(--surface-strong);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 18px;
+    }
+
+    .panel-card h3,
+    .trace-card h3 {
+      margin: 0 0 12px;
+      font-size: 16px;
+      font-family: var(--mono);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--executive);
+    }
+
+    .panel-card p,
+    .trace-card p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .callout {
+      font-size: clamp(24px, 3vw, 36px);
+      line-height: 1.06;
+      font-family: var(--serif);
+      margin-bottom: 12px;
+    }
+
+    .contradictions {
+      display: grid;
+      gap: 10px;
+      padding-left: 18px;
+      color: var(--text);
+    }
+
+    .reading-split {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .operator-grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .loop-chain {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .loop-card {
+      display: grid;
+      gap: 12px;
+      background:
+        linear-gradient(180deg, rgba(164, 122, 29, 0.08), rgba(255,255,255,0.98));
+    }
+
+    .loop-stage {
+      font-size: 11px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      font-family: var(--mono);
+      color: var(--operator);
+    }
+
+    .loop-summary {
+      font-size: 15px;
+      line-height: 1.5;
+      min-height: 94px;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .token {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 5px 8px;
+      background: rgba(23, 32, 37, 0.03);
+      font-family: var(--mono);
+    }
+
+    .evidence-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .trace-grid {
+      display: grid;
+      grid-template-columns: 0.8fr 1.2fr;
+      gap: 18px;
+    }
+
+    pre {
+      margin: 0;
+      background: #13181b;
+      color: #f1ede4;
+      border-radius: 16px;
+      padding: 16px;
+      overflow: auto;
+      min-height: 420px;
+      font-size: 12px;
+      line-height: 1.5;
+      font-family: var(--mono);
+    }
+
+    .trace-items {
+      display: grid;
+      gap: 10px;
+    }
+
+    .trace-item {
+      display: grid;
+      gap: 4px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(23, 32, 37, 0.03);
+    }
+
+    .trace-item strong {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .copy-btn {
+      width: fit-content;
+      border: 1px solid var(--line);
+      background: transparent;
+      border-radius: 999px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .status-good { color: var(--positive); }
+    .status-mid { color: var(--warning); }
+    .status-risk { color: var(--danger); }
+
+    @media (max-width: 1100px) {
+      .executive-grid,
+      .reading-split,
+      .trace-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .loop-chain {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 720px) {
+      .shell {
+        width: min(100vw - 16px, 1380px);
+        margin: 8px auto 20px;
+      }
+
+      .hero,
+      .scorebar,
+      .surface-panel {
+        padding: 18px;
+      }
+
+      .loop-chain {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div class="hero-top">
+        <div>
+          <div class="eyebrow">partner_b Sovereignty Pilot</div>
+          <h1>Minimum Honest Adjudication</h1>
+          <p class="subtitle">
+            A workflow-routed dual report above the v4 membrane. The pilot shows one full system-environment loop
+            without pretending to model the whole cosmology: what affected the system, how the system answered,
+            what that answer changed outside, what returned, with what lag, and what this exposed around TAU.
+          </p>
+        </div>
+        <div class="workflow-nav" id="workflowNav">
+          <button class="workflow-btn active" data-view="executive">Review / Executive</button>
+          <button class="workflow-btn" data-view="operator">Adjudicate / Operator</button>
+          <button class="workflow-btn" data-view="trace">Export / Trace</button>
+        </div>
+      </div>
+
+      <div class="hero-controls">
+        <div class="control-block">
+          <label for="scenarioSelect">Scenario</label>
+          <select id="scenarioSelect">
+            <option value="amplified_loop">Amplified loop</option>
+            <option value="stabilizing_loop">Stabilizing loop</option>
+            <option value="authority_contradiction">Authority contradiction</option>
+          </select>
+        </div>
+        <div class="control-block">
+          <label for="payloadUpload">Load payload or template</label>
+          <input id="payloadUpload" type="file" accept=".json,application/json">
+        </div>
+      </div>
+    </section>
+
+    <section class="scorebar">
+      <div class="scorebar-head">
+        <div class="scorebar-title">
+          <strong>Shared Spine</strong>
+          <span>
+            Same model, same evidence gate, same verdict. The executive surface optimizes admissibility and recommendation.
+            The operator surface optimizes loop visibility, constraints, and safe action.
+          </span>
+        </div>
+        <div class="badge-row" id="badgeRow"></div>
+      </div>
+      <div class="scoregrid" id="scoreGrid"></div>
+    </section>
+
+    <section id="executivePanel" class="surface-panel active"></section>
+    <section id="operatorPanel" class="surface-panel"></section>
+    <section id="tracePanel" class="surface-panel"></section>
+  </div>
+
+  <script>
+    const DIMENSION_WEIGHTS = {
+      sovereignty: {
+        boundary_integrity: 30,
+        authority_legibility: 25,
+        forensic_verifiability: 25,
+        runtime_resilience: 20,
+      },
+      adjudication: {
+        tension_clarity: 20,
+        tau_alignment: 25,
+        option_space_preservation: 20,
+        reversibility_containment: 15,
+        industrial_consequence_fit: 20,
+      },
+      systemic_loop: {
+        incoming_pressure_legibility: 20,
+        response_fitness: 20,
+        outgoing_imprint_visibility: 15,
+        feedback_return_visibility: 20,
+        loop_lag_awareness: 10,
+        tau_exposure_control: 15,
+      },
+      evidence_coverage: {
+        provenance: 30,
+        timeliness: 20,
+        completeness: 25,
+        cross_signal_consistency: 25,
+      },
+    };
+
+    const LOOP_STAGES = [
+      "incoming_pressure",
+      "system_response",
+      "outgoing_imprint",
+      "feedback_return",
+      "loop_lag",
+      "tau_exposure",
+    ];
+
+    const SAMPLE_TEMPLATES = {
+      stabilizing_loop: {
+        schema_version: "partner_b-sovereignty-pilot-v1",
+        pilot: {
+          pilot_id: "partner_b-sovereignty-stabilizing-loop",
+          title: "partner_b Sovereignty Pilot - Stabilizing Procurement Loop",
+          institution: "partner_b Sovereignty",
+          workflow: "sense-adjudicate-decide-act",
+          reporting_mode: "dual",
+        },
+        tau_profile: {
+          tau_id: "TAU-partner_b-SOV-01",
+          protected_identity_statement: "Protect sovereign decision continuity without sacrificing human legibility or bounded intervention.",
+          invariants: ["Bounded authority", "Verifiable truth path", "Continuity under consequence", "Human answerability"],
+          thresholds: { evidence_gate_enforce_min: 70, tau_exposure_control_enforce_max: 40 },
+        },
+        loop: {
+          incoming_pressure: {
+            summary: "Industrial disruption creates a procurement acceleration request.",
+            realm: "industrial-operations",
+            organ_tags: ["perception", "membrane"],
+            system_tags: ["governance", "supply-chain"],
+            magnitude_raw: 3.6,
+            confidence_raw: 4.3,
+            evidence_refs: ["event:e-001", "memo:ops-brief-7"],
+          },
+          system_response: {
+            summary: "The system routes the request into shadow review with explicit authority check.",
+            realm: "authority",
+            organ_tags: ["membrane", "transmission"],
+            system_tags: ["governance", "review"],
+            magnitude_raw: 3.0,
+            confidence_raw: 4.0,
+            evidence_refs: ["ledger:l-001", "approval:rev-17"],
+          },
+          outgoing_imprint: {
+            summary: "The review slows exception velocity without freezing the workflow.",
+            realm: "industrial-operations",
+            organ_tags: ["transmission", "memory"],
+            system_tags: ["workflow", "governance"],
+            magnitude_raw: 2.6,
+            confidence_raw: 3.8,
+            evidence_refs: ["memo:buyer-note-2"],
+          },
+          feedback_return: {
+            summary: "The environment responds with reduced escalation and cleaner evidence.",
+            realm: "information",
+            organ_tags: ["perception", "memory"],
+            system_tags: ["evidence", "governance"],
+            magnitude_raw: 2.2,
+            confidence_raw: 3.9,
+            evidence_refs: ["event:e-002", "report:signal-cleanup"],
+          },
+          loop_lag: {
+            summary: "Return signal becomes legible within one shift window.",
+            realm: "time",
+            organ_tags: ["memory"],
+            system_tags: ["temporal-governance"],
+            magnitude_raw: 1.9,
+            confidence_raw: 3.5,
+            evidence_refs: ["timeline:t-12h"],
+          },
+          tau_exposure: {
+            summary: "TAU remains exposed but within bounded and recoverable range.",
+            realm: "identity",
+            organ_tags: ["membrane", "conscience"],
+            system_tags: ["governance"],
+            magnitude_raw: 2.1,
+            confidence_raw: 4.2,
+            evidence_refs: ["ledger:l-002"],
+          },
+        },
+        scores: {
+          raw_dimensions: {
+            sovereignty: {
+              boundary_integrity: 4.2,
+              authority_legibility: 4.0,
+              forensic_verifiability: 4.1,
+              runtime_resilience: 3.8,
+            },
+            adjudication: {
+              tension_clarity: 3.9,
+              tau_alignment: 4.2,
+              option_space_preservation: 3.8,
+              reversibility_containment: 3.6,
+              industrial_consequence_fit: 3.9,
+            },
+            systemic_loop: {
+              incoming_pressure_legibility: 4.0,
+              response_fitness: 3.8,
+              outgoing_imprint_visibility: 3.5,
+              feedback_return_visibility: 3.8,
+              loop_lag_awareness: 3.2,
+              tau_exposure_control: 3.7,
+            },
+            evidence_coverage: {
+              provenance: 4.1,
+              timeliness: 3.9,
+              completeness: 3.7,
+              cross_signal_consistency: 3.8,
+            },
+          },
+        },
+        adjudication: {
+          authority_status: "CLEAR",
+          contradictions: ["Industrial urgency still pushes against bounded review latency."],
+          protected_invariants: ["Bounded authority", "Verifiable truth path", "Human answerability"],
+        },
+        trace: {
+          event_id: "evt-stabilizing-001",
+          ledger_ref: "audit/governance_ledger.jsonl#l-002",
+          attachments: ["ops-brief-7.pdf", "buyer-note-2.txt"],
+          created_at: "2026-04-17T10:00:00Z",
+          authoritative_state: "SHADOW_PASSIVE",
+        },
+      },
+      amplified_loop: {
+        schema_version: "partner_b-sovereignty-pilot-v1",
+        pilot: {
+          pilot_id: "partner_b-sovereignty-amplified-loop",
+          title: "partner_b Sovereignty Pilot - Amplified Maintenance Override Loop",
+          institution: "partner_b Sovereignty",
+          workflow: "sense-adjudicate-decide-act",
+          reporting_mode: "dual",
+        },
+        tau_profile: {
+          tau_id: "TAU-partner_b-SOV-01",
+          protected_identity_statement: "Protect sovereign decision continuity without sacrificing human legibility or bounded intervention.",
+          invariants: ["Bounded authority", "Verifiable truth path", "Continuity under consequence", "Human answerability"],
+          thresholds: { evidence_gate_enforce_min: 70, tau_exposure_control_enforce_max: 40 },
+        },
+        loop: {
+          incoming_pressure: {
+            summary: "An outage-driven override request enters with plant-wide urgency.",
+            realm: "industrial-operations",
+            organ_tags: ["perception", "membrane"],
+            system_tags: ["maintenance", "governance"],
+            magnitude_raw: 4.7,
+            confidence_raw: 4.5,
+            evidence_refs: ["event:e-017", "telemetry:cluster-9"],
+          },
+          system_response: {
+            summary: "The first response accelerates approval routing before authority is fully settled.",
+            realm: "authority",
+            organ_tags: ["transmission", "membrane"],
+            system_tags: ["workflow", "governance"],
+            magnitude_raw: 3.9,
+            confidence_raw: 4.1,
+            evidence_refs: ["ledger:l-090", "message:chain-12"],
+          },
+          outgoing_imprint: {
+            summary: "The accelerated posture amplifies environmental expectation for more exceptions.",
+            realm: "institutional",
+            organ_tags: ["transmission", "memory"],
+            system_tags: ["authority", "compliance"],
+            magnitude_raw: 4.2,
+            confidence_raw: 3.9,
+            evidence_refs: ["memo:exception-spread"],
+          },
+          feedback_return: {
+            summary: "The environment returns with a second override demand and degraded confidence.",
+            realm: "information",
+            organ_tags: ["perception", "memory"],
+            system_tags: ["evidence", "governance"],
+            magnitude_raw: 4.4,
+            confidence_raw: 4.2,
+            evidence_refs: ["event:e-018", "audit:delta-risk-1"],
+          },
+          loop_lag: {
+            summary: "The loop closes within hours, before review discipline catches up.",
+            realm: "time",
+            organ_tags: ["memory"],
+            system_tags: ["temporal-governance"],
+            magnitude_raw: 3.7,
+            confidence_raw: 4.0,
+            evidence_refs: ["timeline:t-4h"],
+          },
+          tau_exposure: {
+            summary: "TAU exposure rises because the system is teaching the environment to demand bypasses.",
+            realm: "identity",
+            organ_tags: ["membrane", "conscience"],
+            system_tags: ["governance"],
+            magnitude_raw: 4.5,
+            confidence_raw: 4.4,
+            evidence_refs: ["ledger:l-091", "audit:delta-risk-1"],
+          },
+        },
+        scores: {
+          raw_dimensions: {
+            sovereignty: {
+              boundary_integrity: 3.1,
+              authority_legibility: 3.3,
+              forensic_verifiability: 4.0,
+              runtime_resilience: 3.8,
+            },
+            adjudication: {
+              tension_clarity: 4.3,
+              tau_alignment: 2.2,
+              option_space_preservation: 2.4,
+              reversibility_containment: 2.8,
+              industrial_consequence_fit: 4.5,
+            },
+            systemic_loop: {
+              incoming_pressure_legibility: 4.2,
+              response_fitness: 2.0,
+              outgoing_imprint_visibility: 3.8,
+              feedback_return_visibility: 4.1,
+              loop_lag_awareness: 3.6,
+              tau_exposure_control: 1.4,
+            },
+            evidence_coverage: {
+              provenance: 4.0,
+              timeliness: 4.2,
+              completeness: 3.8,
+              cross_signal_consistency: 3.9,
+            },
+          },
+        },
+        adjudication: {
+          authority_status: "CLEAR",
+          contradictions: [
+            "Short-term industrial relief is increasing long-term authority exposure.",
+            "Evidence is sufficient, but the current response is worsening the loop."
+          ],
+          protected_invariants: ["Bounded authority", "Continuity under consequence", "Human answerability"],
+        },
+        trace: {
+          event_id: "evt-amplified-017",
+          ledger_ref: "audit/governance_ledger.jsonl#l-091",
+          attachments: ["exception-spread.pdf", "delta-risk-1.json"],
+          created_at: "2026-04-17T10:15:00Z",
+          authoritative_state: "SHADOW_CRITICAL",
+        },
+      },
+      authority_contradiction: {
+        schema_version: "partner_b-sovereignty-pilot-v1",
+        pilot: {
+          pilot_id: "partner_b-sovereignty-authority-contradiction",
+          title: "partner_b Sovereignty Pilot - Authority Contradiction Loop",
+          institution: "partner_b Sovereignty",
+          workflow: "sense-adjudicate-decide-act",
+          reporting_mode: "dual",
+        },
+        tau_profile: {
+          tau_id: "TAU-partner_b-SOV-01",
+          protected_identity_statement: "Protect sovereign decision continuity without sacrificing human legibility or bounded intervention.",
+          invariants: ["Bounded authority", "Verifiable truth path", "Continuity under consequence", "Human answerability"],
+          thresholds: { evidence_gate_enforce_min: 70, tau_exposure_control_enforce_max: 40 },
+        },
+        loop: {
+          incoming_pressure: {
+            summary: "A strategic exception request arrives through parallel informal channels.",
+            realm: "institutional",
+            organ_tags: ["perception", "memory"],
+            system_tags: ["governance", "authority"],
+            magnitude_raw: 3.8,
+            confidence_raw: 3.5,
+            evidence_refs: ["mail:chain-44", "note:meeting-1"],
+          },
+          system_response: {
+            summary: "The system can explain the situation but cannot certify the authority path.",
+            realm: "authority",
+            organ_tags: ["membrane", "conscience"],
+            system_tags: ["governance", "review"],
+            magnitude_raw: 2.7,
+            confidence_raw: 3.7,
+            evidence_refs: ["ledger:l-121", "review:r-31"],
+          },
+          outgoing_imprint: {
+            summary: "The unresolved posture sends mixed signals back into the environment.",
+            realm: "institutional",
+            organ_tags: ["transmission"],
+            system_tags: ["authority", "workflow"],
+            magnitude_raw: 3.1,
+            confidence_raw: 3.0,
+            evidence_refs: ["memo:mixed-signal"],
+          },
+          feedback_return: {
+            summary: "Conflicting expectations return as pressure for immediate exception handling.",
+            realm: "information",
+            organ_tags: ["perception", "memory"],
+            system_tags: ["evidence", "authority"],
+            magnitude_raw: 3.5,
+            confidence_raw: 3.3,
+            evidence_refs: ["event:e-044", "mail:chain-45"],
+          },
+          loop_lag: {
+            summary: "The contradiction persists across multiple review windows.",
+            realm: "time",
+            organ_tags: ["memory"],
+            system_tags: ["temporal-governance"],
+            magnitude_raw: 3.0,
+            confidence_raw: 3.4,
+            evidence_refs: ["timeline:t-3d"],
+          },
+          tau_exposure: {
+            summary: "TAU is exposed less by pressure itself than by ambiguity in who can answer.",
+            realm: "identity",
+            organ_tags: ["conscience", "membrane"],
+            system_tags: ["governance", "authority"],
+            magnitude_raw: 3.4,
+            confidence_raw: 3.6,
+            evidence_refs: ["review:r-31"],
+          },
+        },
+        scores: {
+          raw_dimensions: {
+            sovereignty: {
+              boundary_integrity: 3.7,
+              authority_legibility: 1.8,
+              forensic_verifiability: 3.8,
+              runtime_resilience: 3.5,
+            },
+            adjudication: {
+              tension_clarity: 4.1,
+              tau_alignment: 2.8,
+              option_space_preservation: 3.1,
+              reversibility_containment: 3.2,
+              industrial_consequence_fit: 3.8,
+            },
+            systemic_loop: {
+              incoming_pressure_legibility: 3.9,
+              response_fitness: 2.7,
+              outgoing_imprint_visibility: 3.1,
+              feedback_return_visibility: 3.6,
+              loop_lag_awareness: 3.1,
+              tau_exposure_control: 2.6,
+            },
+            evidence_coverage: {
+              provenance: 3.4,
+              timeliness: 3.0,
+              completeness: 3.3,
+              cross_signal_consistency: 3.1,
+            },
+          },
+        },
+        adjudication: {
+          authority_status: "CONTRADICTED",
+          contradictions: [
+            "The recommendation is more legible than the authority path allowed to carry it."
+          ],
+          protected_invariants: ["Bounded authority", "Verifiable truth path", "Human answerability"],
+        },
+        trace: {
+          event_id: "evt-authority-044",
+          ledger_ref: "audit/governance_ledger.jsonl#l-121",
+          attachments: ["meeting-1.txt", "mixed-signal.pdf"],
+          created_at: "2026-04-17T10:20:00Z",
+          authoritative_state: "SHADOW_PASSIVE",
+        },
+      },
+    };
+
+    function normalizeRawScore(raw) {
+      return Math.round((Number(raw) / 5) * 100);
+    }
+
+    function evidenceGateFor(score) {
+      if (score < 50) return "LEARN_ONLY";
+      if (score < 70) return "HOLD_OR_TRANSMIT";
+      return "FULL_ACTION";
+    }
+
+    function familyScore(weightMap, rawMap) {
+      let total = 0;
+      const normalized = {};
+      Object.entries(weightMap).forEach(([dimension, weight]) => {
+        const raw = Number(rawMap[dimension]);
+        const normalizedValue = normalizeRawScore(raw);
+        normalized[dimension] = { raw: Number(raw.toFixed(2)), normalized: normalizedValue };
+        total += normalizedValue * weight;
+      });
+      return { normalized, total: Math.round(total / 100) };
+    }
+
+    function deriveVerdict(familyTotals, normalizedDimensions) {
+      const sovereignty = familyTotals.sovereignty_score;
+      const tauAlignment = normalizedDimensions.adjudication.tau_alignment.normalized;
+      const optionSpace = normalizedDimensions.adjudication.option_space_preservation.normalized;
+      const tensionClarity = normalizedDimensions.adjudication.tension_clarity.normalized;
+      const tauControl = normalizedDimensions.systemic_loop.tau_exposure_control.normalized;
+
+      if (sovereignty >= 65 && tauAlignment >= 75 && optionSpace >= 60 && tensionClarity >= 60 && tauControl >= 55) {
+        return "INTEGRATE";
+      }
+      if (sovereignty < 45 || tauAlignment < 45 || tauControl <= 40) {
+        return "REJECT";
+      }
+      return "HOLD";
+    }
+
+    function deriveNextAction(verdict, evidenceGate, authorityStatus, normalizedDimensions) {
+      const tauControl = normalizedDimensions.systemic_loop.tau_exposure_control.normalized;
+      const industrialConsequence = normalizedDimensions.adjudication.industrial_consequence_fit.normalized;
+
+      if (evidenceGate === "LEARN_ONLY") return "LEARN";
+      if (authorityStatus === "CONTRADICTED") return "TRANSMIT";
+      if (verdict === "INTEGRATE") return evidenceGate === "FULL_ACTION" ? "OBSERVE" : "HOLD";
+      if (verdict === "HOLD") return "HOLD";
+      if (evidenceGate === "FULL_ACTION" && tauControl <= 40 && industrialConsequence >= 60) return "ENFORCE";
+      return evidenceGate === "HOLD_OR_TRANSMIT" ? "TRANSMIT" : "HOLD";
+    }
+
+    function topContradictions(payload, normalizedDimensions, familyTotals, evidenceGate) {
+      const contradictions = [...(payload.adjudication?.contradictions || [])];
+      if (!contradictions.length && evidenceGate !== "FULL_ACTION") {
+        contradictions.push("Evidence coverage constrains action before confidence can widen safely.");
+      }
+      if ((payload.adjudication?.authority_status || "REVIEW_REQUIRED").toUpperCase() === "CONTRADICTED") {
+        contradictions.push("Authority posture and operational recommendation are not yet aligned.");
+      }
+      if (normalizedDimensions.systemic_loop.tau_exposure_control.normalized <= 40) {
+        contradictions.push("TAU exposure remains elevated across the active feedback loop.");
+      }
+      if (familyTotals.sovereignty_score < 60) {
+        contradictions.push("Sovereignty posture trails the level of consequence carried by the workflow.");
+      }
+      if (normalizedDimensions.adjudication.option_space_preservation.normalized < 50) {
+        contradictions.push("Option space is narrowing faster than the current response can justify.");
+      }
+      if (!contradictions.length) {
+        contradictions.push("No material contradiction dominates the current loop at review depth.");
+      }
+      return [...new Set(contradictions)].slice(0, 3);
+    }
+
+    function cloneTemplate(template) {
+      return JSON.parse(JSON.stringify(template));
+    }
+
+    function buildPayload(template) {
+      if (template.scores && template.scores.normalized_dimensions && template.report_layers) {
+        return template;
+      }
+
+      const payload = cloneTemplate(template);
+      const raw = payload.scores.raw_dimensions;
+      const normalizedDimensions = {};
+      const familyTotals = {};
+
+      Object.entries(DIMENSION_WEIGHTS).forEach(([family, weights]) => {
+        const result = familyScore(weights, raw[family]);
+        normalizedDimensions[family] = result.normalized;
+        familyTotals[`${family}_score`] = result.total;
+      });
+
+      const evidenceGate = evidenceGateFor(familyTotals.evidence_coverage_score);
+      const authorityStatus = (payload.adjudication?.authority_status || "REVIEW_REQUIRED").toUpperCase();
+      const verdict = deriveVerdict(familyTotals, normalizedDimensions);
+      const nextAction = deriveNextAction(verdict, evidenceGate, authorityStatus, normalizedDimensions);
+      const contradictions = topContradictions(payload, normalizedDimensions, familyTotals, evidenceGate);
+      const protectedInvariants = payload.adjudication?.protected_invariants || payload.tau_profile.invariants.slice(0, 3);
+      const pilotAdmissibilityScore = Math.round(
+        (0.35 * familyTotals.sovereignty_score) +
+        (0.30 * familyTotals.adjudication_score) +
+        (0.20 * familyTotals.systemic_loop_score) +
+        (0.15 * familyTotals.evidence_coverage_score)
+      );
+
+      payload.scores = {
+        raw_dimensions: raw,
+        normalized_dimensions: normalizedDimensions,
+        family_totals: familyTotals,
+        pilot_admissibility_score: pilotAdmissibilityScore,
+        evidence_gate: evidenceGate,
+      };
+
+      payload.adjudication = {
+        verdict,
+        next_action: nextAction,
+        rationale: `${verdict} was selected from the relationship between sovereignty posture, adjudication quality, loop visibility, and evidence gate ${evidenceGate}.`,
+        contradictions,
+        protected_invariants: protectedInvariants,
+        authority_status: authorityStatus,
+      };
+
+      payload.report_layers = {
+        executive_summary:
+          `partner_b sovereignty posture reads at ${familyTotals.sovereignty_score}/100, adjudication at ${familyTotals.adjudication_score}/100, systemic loop visibility at ${familyTotals.systemic_loop_score}/100, and evidence coverage at ${familyTotals.evidence_coverage_score}/100. The current verdict is ${verdict} with a recommended next action of ${nextAction}. Evidence gate: ${evidenceGate}.`,
+        operator_summary:
+          `Loop reading: incoming pressure in ${payload.loop.incoming_pressure.realm} crosses into system response through ${payload.loop.system_response.organ_tags.join(", ")}, creates an outgoing imprint in ${payload.loop.outgoing_imprint.realm}, then returns through ${payload.loop.feedback_return.realm} with lag visible in ${payload.loop.loop_lag.summary.toLowerCase()}. Current posture: ${verdict} / ${nextAction}.`,
+        institutional_readout:
+          `${payload.pilot.institution} can review this payload as a dual report rather than a single dashboard. The institutional reading remains bounded, auditable, and human-legible. Recommended posture: ${verdict} with ${nextAction}. Primary contradiction: ${contradictions[0]}.`,
+        adjudication_readout:
+          `Adjudication is being performed around TAU ${payload.tau_profile.tau_id} as reference, not as deciding subject. Protected invariants in view: ${payload.tau_profile.invariants.slice(0, 3).join(", ")}. Outcome: ${verdict}. Next viable action: ${nextAction}. Key contradiction: ${contradictions[0]}.`,
+      };
+
+      return payload;
+    }
+
+    function scoreClass(value) {
+      if (value >= 70) return "status-good";
+      if (value >= 50) return "status-mid";
+      return "status-risk";
+    }
+
+    function gateClass(value) {
+      if (value === "FULL_ACTION") return "status-good";
+      if (value === "HOLD_OR_TRANSMIT") return "status-mid";
+      return "status-risk";
+    }
+
+    const elements = {
+      workflowNav: document.getElementById("workflowNav"),
+      scenarioSelect: document.getElementById("scenarioSelect"),
+      payloadUpload: document.getElementById("payloadUpload"),
+      scoreGrid: document.getElementById("scoreGrid"),
+      badgeRow: document.getElementById("badgeRow"),
+      executivePanel: document.getElementById("executivePanel"),
+      operatorPanel: document.getElementById("operatorPanel"),
+      tracePanel: document.getElementById("tracePanel"),
+    };
+
+    let activeView = "executive";
+    let activePayload = buildPayload(SAMPLE_TEMPLATES[elements.scenarioSelect.value]);
+
+    function renderScoreGrid(payload) {
+      const totals = payload.scores.family_totals;
+      const cards = [
+        {
+          label: "Pilot Admissibility",
+          value: payload.scores.pilot_admissibility_score,
+          note: "Composite reading for the current pilot, weighted toward sovereignty and consequence.",
+        },
+        {
+          label: "Sovereignty",
+          value: totals.sovereignty_score,
+          note: "Boundary integrity, authority legibility, forensic verifiability, and runtime resilience.",
+        },
+        {
+          label: "Adjudication",
+          value: totals.adjudication_score,
+          note: "Tension clarity, TAU alignment, option-space preservation, reversibility, industrial fit.",
+        },
+        {
+          label: "Systemic Loop",
+          value: totals.systemic_loop_score,
+          note: "Incoming pressure, response fitness, outgoing imprint, feedback return, lag, TAU exposure.",
+        },
+        {
+          label: "Evidence Coverage",
+          value: totals.evidence_coverage_score,
+          note: "This score gates action. It does not decorate the report.",
+        },
+      ];
+      elements.scoreGrid.innerHTML = cards.map((card) => `
+        <article class="scorecard">
+          <div class="label">${card.label}</div>
+          <div class="value ${scoreClass(card.value)}">${card.value}</div>
+          <div class="note">${card.note}</div>
+        </article>
+      `).join("");
+
+      elements.badgeRow.innerHTML = `
+        <div class="badge ${gateClass(payload.scores.evidence_gate)}">${payload.scores.evidence_gate.replaceAll("_", " ")}</div>
+        <div class="badge ${payload.adjudication.verdict === "INTEGRATE" ? "status-good" : payload.adjudication.verdict === "HOLD" ? "status-mid" : "status-risk"}">Verdict ${payload.adjudication.verdict}</div>
+        <div class="badge ${payload.adjudication.next_action === "ENFORCE" ? "status-risk" : payload.adjudication.next_action === "OBSERVE" ? "status-good" : "status-mid"}">Action ${payload.adjudication.next_action}</div>
+        <div class="badge ${payload.adjudication.authority_status === "CLEAR" ? "status-good" : payload.adjudication.authority_status === "REVIEW_REQUIRED" ? "status-mid" : "status-risk"}">Authority ${payload.adjudication.authority_status.replaceAll("_", " ")}</div>
+      `;
+    }
+
+    function renderExecutive(payload) {
+      const contradictions = payload.adjudication.contradictions.slice(0, 3)
+        .map((item) => `<li>${item}</li>`).join("");
+      elements.executivePanel.innerHTML = `
+        <div class="surface-head">
+          <div>
+            <h2>Executive surface</h2>
+            <p>Admissibility, sovereignty posture, recommendation, and the smallest set of contradictions an executive reviewer must understand before acting.</p>
+          </div>
+        </div>
+        <div class="executive-grid">
+          <div class="panel-card">
+            <div class="callout ${payload.adjudication.next_action === "ENFORCE" ? "status-risk" : payload.adjudication.next_action === "OBSERVE" ? "status-good" : "status-mid"}">
+              ${payload.adjudication.next_action} is the current next viable action.
+            </div>
+            <p>${payload.report_layers.executive_summary}</p>
+          </div>
+          <div class="panel-card">
+            <h3>Institutional readout</h3>
+            <p>${payload.report_layers.institutional_readout}</p>
+          </div>
+        </div>
+        <div class="reading-split">
+          <div class="panel-card">
+            <h3>Top contradictions</h3>
+            <ol class="contradictions">${contradictions}</ol>
+          </div>
+          <div class="panel-card">
+            <h3>Protected invariants</h3>
+            <div class="meta">
+              ${payload.adjudication.protected_invariants.map((item) => `<span class="token">${item}</span>`).join("")}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderOperator(payload) {
+      const loopCards = LOOP_STAGES.map((stage) => {
+        const item = payload.loop[stage];
+        return `
+          <article class="loop-card">
+            <div class="loop-stage">${stage.replaceAll("_", " ")}</div>
+            <div class="loop-summary">${item.summary}</div>
+            <div class="meta">
+              <span class="token">realm ${item.realm}</span>
+              <span class="token">mag ${item.magnitude_raw}/5</span>
+              <span class="token">conf ${item.confidence_raw}/5</span>
+            </div>
+            <div class="meta">
+              ${item.organ_tags.map((tag) => `<span class="token">${tag}</span>`).join("")}
+            </div>
+            <div class="meta">
+              ${item.system_tags.map((tag) => `<span class="token">${tag}</span>`).join("")}
+            </div>
+            <div class="evidence-list">
+              ${item.evidence_refs.map((ref) => `<span>${ref}</span>`).join("")}
+            </div>
+          </article>
+        `;
+      }).join("");
+
+      elements.operatorPanel.innerHTML = `
+        <div class="surface-head">
+          <div>
+            <h2>Operator surface</h2>
+            <p>Loop visibility, action safety, and the reasons why the current posture is constrained, widened, or escalated.</p>
+          </div>
+        </div>
+        <div class="operator-grid">
+          <div class="panel-card">
+            <h3>Operator summary</h3>
+            <p>${payload.report_layers.operator_summary}</p>
+          </div>
+          <div class="loop-chain">${loopCards}</div>
+          <div class="reading-split">
+            <div class="panel-card">
+              <h3>Adjudication readout</h3>
+              <p>${payload.report_layers.adjudication_readout}</p>
+            </div>
+            <div class="panel-card">
+              <h3>Action constraints</h3>
+              <p>
+                Evidence gate: <strong>${payload.scores.evidence_gate.replaceAll("_", " ")}</strong>.<br>
+                Authority status: <strong>${payload.adjudication.authority_status.replaceAll("_", " ")}</strong>.<br>
+                Recommended posture: <strong>${payload.adjudication.verdict}</strong> with
+                <strong>${payload.adjudication.next_action}</strong>.
+              </p>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderTrace(payload) {
+      elements.tracePanel.innerHTML = `
+        <div class="surface-head">
+          <div>
+            <h2>Trace / export surface</h2>
+            <p>Canonical payload, ledger reference, attachments, and the dual-report spine ready for handoff or review packaging.</p>
+          </div>
+          <button class="copy-btn" id="copyJsonBtn">Copy payload JSON</button>
+        </div>
+        <div class="trace-grid">
+          <div class="trace-card">
+            <h3>Trace metadata</h3>
+            <div class="trace-items">
+              <div class="trace-item"><strong>Event ID</strong><span>${payload.trace.event_id}</span></div>
+              <div class="trace-item"><strong>Ledger ref</strong><span>${payload.trace.ledger_ref}</span></div>
+              <div class="trace-item"><strong>Authoritative state</strong><span>${payload.trace.authoritative_state}</span></div>
+              <div class="trace-item"><strong>Created</strong><span>${payload.trace.created_at}</span></div>
+              <div class="trace-item"><strong>Attachments</strong><span>${payload.trace.attachments.join(", ") || "None"}</span></div>
+              <div class="trace-item"><strong>Schema</strong><span>${payload.schema_version}</span></div>
+            </div>
+          </div>
+          <div class="trace-card">
+            <h3>Payload JSON</h3>
+            <pre id="payloadPre"></pre>
+          </div>
+        </div>
+      `;
+
+      const payloadPre = document.getElementById("payloadPre");
+      payloadPre.textContent = JSON.stringify(payload, null, 2);
+      document.getElementById("copyJsonBtn").addEventListener("click", async () => {
+        await navigator.clipboard.writeText(payloadPre.textContent);
+      });
+    }
+
+    function render() {
+      renderScoreGrid(activePayload);
+      renderExecutive(activePayload);
+      renderOperator(activePayload);
+      renderTrace(activePayload);
+
+      elements.executivePanel.classList.toggle("active", activeView === "executive");
+      elements.operatorPanel.classList.toggle("active", activeView === "operator");
+      elements.tracePanel.classList.toggle("active", activeView === "trace");
+      [...elements.workflowNav.querySelectorAll(".workflow-btn")].forEach((button) => {
+        button.classList.toggle("active", button.dataset.view === activeView);
+      });
+    }
+
+    elements.workflowNav.addEventListener("click", (event) => {
+      const button = event.target.closest(".workflow-btn");
+      if (!button) return;
+      activeView = button.dataset.view;
+      render();
+    });
+
+    elements.scenarioSelect.addEventListener("change", () => {
+      activePayload = buildPayload(SAMPLE_TEMPLATES[elements.scenarioSelect.value]);
+      render();
+    });
+
+    elements.payloadUpload.addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      activePayload = buildPayload(parsed);
+      render();
+    });
+
+    render();
+  </script>
+</body>
+</html>

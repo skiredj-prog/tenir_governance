@@ -1,0 +1,1215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TENIR Interface 2cIronOmega v1</title>
+<style>
+/*
+  TENIR Interface 2cIronOmega v1
+  Backend: http://localhost:8000 (r5_server.py · Iron Omega R5 · 2C Full Stack)
+  Auth: JWT in Authorization header — service invocation only, no UI gating
+  Surfaces: Operator Cockpit · Forensics Console · Authority Ceremony
+  Backlog: Board Workbench (OPI/ESI/Value Plane), AI Journal, BFF layer
+*/
+
+:root {
+  --bg:       #07090f;
+  --surface:  #0c1019;
+  --card:     #101520;
+  --card2:    #141b28;
+  --border:   #19253a;
+  --bordlit:  #253550;
+
+  --txt:      #c8d8e8;
+  --muted:    #3d5570;
+  --dim:      #1e3048;
+
+  --blue:     #3d8ef5;
+  --blue-bg:  #0a1a32;
+  --teal:     #00c896;
+  --teal-bg:  #002820;
+  --amber:    #e8a020;
+  --amber-bg: #281c00;
+  --orange:   #e86820;
+  --orange-bg:#281200;
+  --red:      #e84040;
+  --red-bg:   #280808;
+  --purple:   #9060f0;
+  --purple-bg:#180a30;
+
+  --mono: 'JetBrains Mono','SF Mono','Cascadia Code','Fira Code',Consolas,monospace;
+  --sans: -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+}
+
+*,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
+
+html,body { height:100%; }
+
+body {
+  background:var(--bg);
+  color:var(--txt);
+  font-family:var(--sans);
+  font-size:13px;
+  line-height:1.5;
+  overflow-x:hidden;
+}
+
+/* ── HEADER ─────────────────────────────────────────────── */
+.hdr {
+  position:sticky; top:0; z-index:200;
+  display:flex; align-items:center;
+  height:44px; padding:0 14px;
+  background:var(--surface);
+  border-bottom:1px solid var(--border);
+  gap:0;
+}
+
+.logo {
+  font-family:var(--mono);
+  font-size:13px; font-weight:700;
+  letter-spacing:.2em; color:var(--txt);
+  margin-right:28px; flex-shrink:0;
+  user-select:none;
+}
+.logo em { color:var(--blue); font-style:normal; }
+
+.tabs { display:flex; height:100%; flex:1; gap:0; }
+.tab {
+  display:flex; align-items:center;
+  padding:0 16px; height:100%;
+  background:none; border:none;
+  border-bottom:2px solid transparent;
+  color:var(--muted);
+  font:600 10px/1 var(--sans);
+  letter-spacing:.12em; text-transform:uppercase;
+  cursor:pointer; transition:color .12s,border-color .12s;
+}
+.tab:hover { color:var(--txt); }
+.tab.on { color:var(--blue); border-bottom-color:var(--blue); }
+
+.hdr-r { display:flex; align-items:center; gap:14px; flex-shrink:0; }
+
+.ws-pill {
+  display:flex; align-items:center; gap:6px;
+  font-family:var(--mono); font-size:10px; color:var(--muted);
+}
+.ws-dot {
+  width:6px; height:6px; border-radius:50%;
+  background:var(--dim); transition:background .3s,box-shadow .3s;
+}
+.ws-dot.live  { background:var(--teal); box-shadow:0 0 6px var(--teal); }
+.ws-dot.fail  { background:var(--red); }
+
+.tok-wrap { display:flex; align-items:center; gap:5px; font-size:10px; color:var(--muted); }
+.tok-inp {
+  background:var(--card); border:1px solid var(--border);
+  border-radius:3px; padding:3px 8px;
+  color:var(--txt); font:11px var(--mono);
+  width:130px; outline:none;
+}
+.tok-inp:focus { border-color:var(--blue); }
+.tok-inp::placeholder { color:var(--dim); }
+
+/* ── PANELS ─────────────────────────────────────────────── */
+.main { padding:14px; }
+.panel { display:none; }
+.panel.on { display:block; }
+
+/* ── POSTURE BAR ─────────────────────────────────────────── */
+.pbar {
+  display:flex; align-items:center; gap:8px;
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:6px; padding:9px 14px; margin-bottom:12px;
+  flex-wrap:wrap; min-height:40px;
+}
+.pbar-sep { color:var(--dim); font-size:12px; }
+.pbar-stat { font-size:11px; color:var(--muted); }
+.pbar-stat b { font-family:var(--mono); color:var(--txt); }
+.pbar-sp { flex:1; }
+.pbar-hash { font:10px var(--mono); color:var(--dim); }
+
+/* ── BADGES ─────────────────────────────────────────────── */
+.badge {
+  display:inline-flex; align-items:center;
+  padding:2px 8px; border-radius:3px;
+  font:700 10px var(--sans); letter-spacing:.07em; text-transform:uppercase;
+  border:1px solid transparent;
+}
+.b-blue   { background:var(--blue-bg);   color:var(--blue);   border-color:rgba(61,142,245,.2); }
+.b-teal   { background:var(--teal-bg);   color:var(--teal);   border-color:rgba(0,200,150,.2); }
+.b-amber  { background:var(--amber-bg);  color:var(--amber);  border-color:rgba(232,160,32,.2); }
+.b-orange { background:var(--orange-bg); color:var(--orange); border-color:rgba(232,104,32,.2); }
+.b-red    { background:var(--red-bg);    color:var(--red);    border-color:rgba(232,64,64,.2); }
+.b-purple { background:var(--purple-bg); color:var(--purple); border-color:rgba(144,96,240,.2); }
+.b-dim    { background:var(--card);      color:var(--muted);  border-color:var(--border); }
+
+/* ── CARDS ───────────────────────────────────────────────── */
+.card {
+  background:var(--card); border:1px solid var(--border);
+  border-radius:6px; overflow:hidden;
+}
+.ch {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:9px 12px; border-bottom:1px solid var(--border);
+  font:700 9px var(--sans); letter-spacing:.12em; text-transform:uppercase;
+  color:var(--muted);
+}
+.ch-r { font:10px var(--mono); color:var(--dim); text-transform:none; font-weight:400; }
+
+/* ── COCKPIT GRID ─────────────────────────────────────────── */
+.cgrid {
+  display:grid;
+  grid-template-columns:240px 1fr 260px;
+  gap:12px; margin-bottom:12px;
+}
+
+/* S gauge */
+.gauge-wrap {
+  display:flex; flex-direction:column;
+  align-items:center; padding:14px 12px; gap:10px;
+}
+canvas.gauge { display:block; }
+
+.deriv-row { display:flex; gap:8px; width:100%; }
+.deriv {
+  flex:1; background:var(--surface); border:1px solid var(--border);
+  border-radius:4px; padding:7px 10px; text-align:center;
+}
+.deriv-lbl { font-size:9px; color:var(--muted); letter-spacing:.06em; margin-bottom:3px; }
+.deriv-val { font:600 12px var(--mono); }
+
+.thresh-list { width:100%; display:flex; flex-direction:column; gap:4px; }
+.thresh-row {
+  display:flex; align-items:center; justify-content:space-between;
+  gap:8px; font-size:10px;
+}
+.thresh-row .tl { color:var(--muted); flex-shrink:0; }
+.thresh-row .tv { font:10px var(--mono); color:var(--dim); flex-shrink:0; }
+.thresh-bar { flex:1; height:1px; background:var(--border); position:relative; }
+
+/* Trajectory */
+.traj-wrap { padding:12px; }
+canvas.traj { width:100%; height:160px; display:block; border-radius:3px; }
+.traj-leg {
+  display:flex; gap:12px; padding:6px 12px 10px;
+  flex-wrap:wrap;
+}
+.leg { display:flex; align-items:center; gap:5px; font-size:10px; color:var(--muted); }
+.leg-dot { width:16px; height:2px; border-radius:1px; flex-shrink:0; }
+
+/* Event stream */
+.estream {
+  height:245px; overflow-y:auto;
+  display:flex; flex-direction:column; gap:3px;
+  padding:8px;
+}
+.ev {
+  display:flex; gap:7px; align-items:flex-start;
+  padding:5px 7px; border-radius:4px;
+  background:var(--surface); border:1px solid var(--border);
+  animation:fadein .2s ease;
+  flex-shrink:0;
+}
+@keyframes fadein { from{opacity:0;transform:translateY(-3px)} to{opacity:1;transform:translateY(0)} }
+.ev-t { font:10px var(--mono); color:var(--dim); flex-shrink:0; width:56px; }
+.ev-b { flex:1; min-width:0; }
+.ev-type { font-size:10px; font-weight:700; letter-spacing:.05em; }
+.ev-meta { font-size:10px; color:var(--muted); margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ev-hash { font:9px var(--mono); color:var(--dim); }
+
+/* ── ADJ PANEL ───────────────────────────────────────────── */
+.adj-panel { background:var(--card); border:1px solid var(--border); border-radius:6px; }
+.adj-sliders {
+  display:grid; grid-template-columns:1fr 1fr 1fr 1fr;
+  gap:12px; padding:12px 14px;
+}
+.sl-grp { display:flex; flex-direction:column; gap:5px; }
+.sl-lbl { font:700 9px var(--sans); letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+.sl-row { display:flex; align-items:center; gap:7px; }
+input[type=range].sl {
+  -webkit-appearance:none; appearance:none;
+  flex:1; height:2px;
+  background:var(--bordlit); border-radius:1px; outline:none;
+}
+input[type=range].sl::-webkit-slider-thumb {
+  -webkit-appearance:none; width:12px; height:12px;
+  border-radius:50%; background:var(--blue); cursor:pointer;
+  transition:transform .1s;
+}
+input[type=range].sl::-webkit-slider-thumb:hover { transform:scale(1.25); }
+.sl-val { font:600 12px var(--mono); width:30px; text-align:right; color:var(--txt); }
+
+.adj-foot {
+  display:flex; align-items:center; gap:10px;
+  padding:9px 14px; border-top:1px solid var(--border); flex-wrap:wrap;
+}
+.adj-res { display:flex; align-items:center; gap:8px; flex:1; min-width:200px; }
+.adj-res-hint { font-size:11px; color:var(--dim); font-style:italic; }
+
+/* ── INPUTS & BUTTONS ────────────────────────────────────── */
+.inp {
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:4px; padding:5px 9px;
+  color:var(--txt); font:12px var(--sans); outline:none; width:100%;
+}
+.inp:focus { border-color:var(--blue); }
+.inp::placeholder { color:var(--dim); }
+.inp-sm { padding:4px 8px; font-size:11px; }
+.inp-mono { font-family:var(--mono); font-size:11px; }
+
+.btn {
+  display:inline-flex; align-items:center; gap:5px;
+  padding:5px 14px; border-radius:4px; border:none;
+  font:600 11px var(--sans); letter-spacing:.04em;
+  cursor:pointer; transition:filter .12s,opacity .12s;
+  white-space:nowrap;
+}
+.btn:disabled { opacity:.35; cursor:not-allowed; }
+.btn-blue   { background:var(--blue); color:#fff; }
+.btn-blue:not(:disabled):hover { filter:brightness(1.15); }
+.btn-ghost  { background:var(--surface); color:var(--muted); border:1px solid var(--border); }
+.btn-ghost:not(:disabled):hover { color:var(--txt); border-color:var(--bordlit); }
+.btn-red    { background:var(--red-bg); color:var(--red); border:1px solid rgba(232,64,64,.2); }
+.btn-red:not(:disabled):hover { filter:brightness(1.2); }
+
+.err-box {
+  font-size:11px; color:var(--red);
+  background:var(--red-bg); border:1px solid rgba(232,64,64,.2);
+  border-radius:4px; padding:5px 9px;
+}
+.ok-box {
+  font-size:11px; color:var(--teal);
+  background:var(--teal-bg); border:1px solid rgba(0,200,150,.2);
+  border-radius:4px; padding:5px 9px; line-height:1.6;
+}
+.warn-box {
+  font-size:11px; color:var(--amber);
+  background:var(--amber-bg); border:1px solid rgba(232,160,32,.2);
+  border-radius:4px; padding:8px 11px; line-height:1.6;
+}
+
+/* ── BACKLOG ─────────────────────────────────────────────── */
+.backlog {
+  margin-top:12px; padding:8px 12px;
+  background:var(--surface); border:1px solid var(--border); border-radius:5px;
+  font-size:11px; color:var(--muted); display:flex; gap:8px; align-items:flex-start;
+}
+.backlog span:first-child { flex-shrink:0; }
+
+/* ── FORENSICS ───────────────────────────────────────────── */
+.fctrl {
+  display:flex; align-items:center; gap:8px;
+  margin-bottom:12px; flex-wrap:wrap;
+}
+.chain-badge {
+  display:flex; align-items:center; gap:6px;
+  margin-left:auto; padding:4px 10px;
+  background:var(--card); border:1px solid var(--border);
+  border-radius:4px; font-size:10px; color:var(--muted);
+}
+.chdot { width:6px; height:6px; border-radius:50%; background:var(--dim); }
+.chdot.ok  { background:var(--teal); }
+.chdot.bad { background:var(--red); }
+
+.timeline { display:flex; flex-direction:column; }
+.tl-row { display:flex; gap:10px; position:relative; }
+.tl-row::before {
+  content:''; position:absolute; left:73px;
+  top:26px; bottom:-1px; width:1px;
+  background:var(--border); z-index:0;
+}
+.tl-row:last-child::before { display:none; }
+
+.tl-t { width:64px; flex-shrink:0; text-align:right; padding:12px 0; }
+.tl-tabs { font:10px var(--mono); color:var(--dim); }
+.tl-rel { font-size:10px; color:var(--muted); }
+
+.tl-dot-col {
+  width:20px; flex-shrink:0; display:flex;
+  flex-direction:column; align-items:center;
+  padding-top:14px; position:relative; z-index:1;
+}
+.tl-dot {
+  width:9px; height:9px; border-radius:50%;
+  border:2px solid; background:var(--card); flex-shrink:0;
+}
+.td-ADJ    { border-color:var(--blue); background:var(--blue-bg); }
+.td-TRANS  { border-color:var(--purple); background:var(--purple-bg); }
+.td-OATH   { border-color:var(--amber); background:var(--amber-bg); }
+.td-GEN    { border-color:var(--muted); }
+
+.tl-card {
+  flex:1; margin:8px 0;
+  background:var(--card); border:1px solid var(--border);
+  border-radius:6px; cursor:pointer; transition:border-color .12s;
+}
+.tl-card:hover { border-color:var(--bordlit); }
+.tl-card.exp   { border-color:var(--blue-bg); }
+.tl-head {
+  display:flex; align-items:center; gap:8px;
+  padding:9px 11px; flex-wrap:wrap;
+}
+.tl-op { font-size:10px; color:var(--muted); margin-left:auto; }
+.tl-hp { font:9px var(--mono); color:var(--dim); background:var(--surface); padding:1px 5px; border-radius:2px; border:1px solid var(--border); }
+.tl-int { width:5px; height:5px; border-radius:50%; flex-shrink:0; }
+.tl-int.ok { background:var(--teal); }
+.tl-int.nd { background:var(--dim); }
+
+.tl-detail { display:none; border-top:1px solid var(--border); padding:10px 11px; }
+.tl-detail.open { display:block; }
+.json-pre {
+  font:10px var(--mono); color:var(--muted);
+  white-space:pre-wrap; word-break:break-all;
+  line-height:1.65; max-height:280px; overflow-y:auto;
+}
+
+/* ── CEREMONY ────────────────────────────────────────────── */
+.cgrid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+.cer-card { background:var(--card); border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+.cer-head { padding:11px 14px; border-bottom:1px solid var(--border); }
+.cer-head h3 { font-size:12px; font-weight:700; letter-spacing:.07em; text-transform:uppercase; margin-bottom:2px; }
+.cer-head p  { font-size:10px; color:var(--muted); font-family:var(--mono); }
+.cer-body    { padding:14px; display:flex; flex-direction:column; gap:11px; }
+
+.fg { display:flex; flex-direction:column; gap:4px; }
+.fl { font:700 9px var(--sans); letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+.fn { font-size:10px; color:var(--dim); }
+
+textarea.inp { resize:vertical; min-height:56px; line-height:1.5; }
+
+select.inp {
+  cursor:pointer; appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%233d5570' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat:no-repeat; background-position:right 8px center; padding-right:26px;
+}
+
+/* ── SCROLLBARS ──────────────────────────────────────────── */
+::-webkit-scrollbar { width:4px; height:4px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--border); border-radius:2px; }
+::-webkit-scrollbar-thumb:hover { background:var(--bordlit); }
+
+@media(max-width:900px) {
+  .cgrid  { grid-template-columns:1fr; }
+  .adj-sliders { grid-template-columns:1fr 1fr; }
+  .cgrid2 { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+
+<!-- ── HEADER ─────────────────────────────────────────────── -->
+<header class="hdr">
+  <div class="logo">TENIR<em>.</em> <span style="font-size:10px;color:var(--muted);font-weight:400;letter-spacing:.08em">2cIronOmega v1</span></div>
+  <nav class="tabs">
+    <button class="tab on" data-tab="cockpit">Cockpit</button>
+    <button class="tab" data-tab="forensics">Forensics</button>
+    <button class="tab" data-tab="ceremony">Ceremony</button>
+  </nav>
+  <div class="hdr-r">
+    <div class="ws-pill">
+      <div class="ws-dot" id="wsDot"></div>
+      <span id="wsLbl">localhost:8000</span>
+    </div>
+    <div class="tok-wrap">
+      <span>Bearer</span>
+      <input type="password" class="tok-inp" id="jwtInp" placeholder="JWT (optional)">
+    </div>
+  </div>
+</header>
+
+<main class="main">
+
+<!-- ══ COCKPIT ════════════════════════════════════════════ -->
+<section class="panel on" id="tab-cockpit">
+
+  <!-- posture bar -->
+  <div class="pbar" id="pbar">
+    <span class="badge b-dim" id="pbPosture">POSTURE —</span>
+    <span class="pbar-sep">|</span>
+    <span class="badge b-dim" id="pbCES">CES —</span>
+    <span class="pbar-sep">|</span>
+    <span class="pbar-stat">S = <b id="pbS">—</b></span>
+    <span class="pbar-sep">|</span>
+    <span class="badge b-dim" id="pbMem">MEMBRANE —</span>
+    <span class="pbar-sep">|</span>
+    <span class="badge b-purple" id="pbMode">MODE —</span>
+    <span class="pbar-sp"></span>
+    <span class="pbar-hash" id="pbHash">—</span>
+  </div>
+
+  <!-- cockpit grid -->
+  <div class="cgrid">
+
+    <!-- S kernel -->
+    <div class="card">
+      <div class="ch"><span>Stability Kernel</span><span class="ch-r" id="epochLbl">—</span></div>
+      <div class="gauge-wrap">
+        <canvas class="gauge" id="gCanvas" width="220" height="130"></canvas>
+        <div class="deriv-row">
+          <div class="deriv">
+            <div class="deriv-lbl">dS/dE</div>
+            <div class="deriv-val" id="dsLbl">—</div>
+          </div>
+          <div class="deriv">
+            <div class="deriv-lbl">d²S/dE²</div>
+            <div class="deriv-val" id="d2sLbl">—</div>
+          </div>
+        </div>
+        <div class="thresh-list">
+          <div class="thresh-row">
+            <span class="tl">τ floor</span>
+            <div class="thresh-bar"></div>
+            <span class="tv" style="color:var(--muted)">0.42</span>
+          </div>
+          <div class="thresh-row">
+            <span class="tl">S block</span>
+            <div class="thresh-bar"></div>
+            <span class="tv" style="color:var(--red)">0.75</span>
+          </div>
+          <div class="thresh-row">
+            <span class="tl">S alert</span>
+            <div class="thresh-bar"></div>
+            <span class="tv" style="color:var(--amber)">0.90</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- trajectory -->
+    <div class="card">
+      <div class="ch"><span>Trajectory</span><span class="ch-r" id="trajCnt">0 samples</span></div>
+      <div class="traj-wrap">
+        <canvas class="traj" id="tCanvas" width="600" height="160"></canvas>
+      </div>
+      <div class="traj-leg">
+        <div class="leg"><div class="leg-dot" style="background:var(--red)"></div>P pressure</div>
+        <div class="leg"><div class="leg-dot" style="background:var(--amber)"></div>V velocity</div>
+        <div class="leg"><div class="leg-dot" style="background:var(--blue)"></div>K capacity</div>
+        <div class="leg"><div class="leg-dot" style="background:var(--teal)"></div>S stability</div>
+      </div>
+    </div>
+
+    <!-- live events -->
+    <div class="card">
+      <div class="ch"><span>Live Events</span><span class="ch-r" id="evCnt">0</span></div>
+      <div class="estream" id="estream">
+        <div style="text-align:center;color:var(--dim);font-size:11px;padding:24px">Awaiting stream…</div>
+      </div>
+    </div>
+
+  </div><!-- /cgrid -->
+
+  <!-- adjudication panel -->
+  <div class="adj-panel">
+    <div class="ch" style="padding:9px 14px">
+      <span>Adjudication</span>
+      <span class="ch-r">POST /api/v1/adjudicate</span>
+    </div>
+    <div class="adj-sliders">
+      <div class="sl-grp">
+        <div class="sl-lbl">P — Pressure</div>
+        <div class="sl-row">
+          <input type="range" class="sl" id="slP" min="0" max="1" step="0.01" value="0.50">
+          <span class="sl-val" id="vP">0.50</span>
+        </div>
+      </div>
+      <div class="sl-grp">
+        <div class="sl-lbl">V — Velocity</div>
+        <div class="sl-row">
+          <input type="range" class="sl" id="slV" min="0" max="1" step="0.01" value="0.50">
+          <span class="sl-val" id="vV">0.50</span>
+        </div>
+      </div>
+      <div class="sl-grp">
+        <div class="sl-lbl">K — Capacity</div>
+        <div class="sl-row">
+          <input type="range" class="sl" id="slK" min="0" max="1" step="0.01" value="0.80">
+          <span class="sl-val" id="vK">0.80</span>
+        </div>
+      </div>
+      <div class="sl-grp">
+        <div class="sl-lbl">O — Options</div>
+        <div class="sl-row">
+          <input type="range" class="sl" id="slO" min="0" max="10" step="0.5" value="3.0">
+          <span class="sl-val" id="vO">3.0</span>
+        </div>
+      </div>
+    </div>
+    <div class="adj-foot">
+      <input class="inp inp-sm" id="opId" placeholder="operator_id (optional)" style="max-width:180px">
+      <button class="btn btn-blue" id="adjBtn">ADJUDICATE</button>
+      <div class="adj-res">
+        <span class="adj-res-hint" id="adjHint">Submit to see verdict</span>
+        <span class="badge" id="adjBadge" style="display:none"></span>
+        <span id="adjDetail" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="backlog">
+    <span>⟳</span>
+    <span>BACKLOG — Board Workbench (OPI · ESI · Value Plane): awaiting computation endpoints · AI Journal de Conscience: design-space · BFF aggregation layer: deferred (no multi-source aggregation required yet)</span>
+  </div>
+
+</section>
+
+<!-- ══ FORENSICS ══════════════════════════════════════════ -->
+<section class="panel" id="tab-forensics">
+  <div class="fctrl">
+    <input class="inp inp-sm" id="fSearch" placeholder="Filter by operator, hash prefix, CES state…" style="max-width:260px">
+    <button class="btn btn-ghost" id="btnLoad">LOAD ENTRIES</button>
+    <button class="btn btn-ghost" id="btnVerify">VERIFY CHAIN</button>
+    <button class="btn btn-ghost" id="btnExport">EXPORT SEAL</button>
+    <div class="chain-badge" id="chainBadge">
+      <div class="chdot" id="chainDot"></div>
+      <span id="chainLbl">Chain unverified</span>
+    </div>
+  </div>
+  <div class="timeline" id="timeline">
+    <div style="text-align:center;color:var(--dim);font-size:11px;padding:40px">
+      No entries loaded — press LOAD ENTRIES to fetch ledger.
+    </div>
+  </div>
+</section>
+
+<!-- ══ CEREMONY ═══════════════════════════════════════════ -->
+<section class="panel" id="tab-ceremony">
+  <div class="cgrid2">
+
+    <!-- sign oath -->
+    <div class="cer-card">
+      <div class="cer-head">
+        <h3>Sign Oath</h3>
+        <p>POST /api/v1/oath/sign?operator_id=…</p>
+      </div>
+      <div class="cer-body">
+        <div class="warn-box">
+          This endpoint will sign any operator_id without verifying the caller's identity.
+          Cryptographic integrity is real; identity assurance is not yet enforced.
+          See G-R5-001 in release tracker.
+        </div>
+        <div class="fg">
+          <label class="fl">Operator ID</label>
+          <input class="inp" id="oathOp" placeholder="e.g. aziz.skiredj">
+        </div>
+        <button class="btn btn-blue" id="btnOath" style="align-self:flex-start">REQUEST OATH</button>
+        <div class="fg" id="oathTxtGrp" style="display:none">
+          <label class="fl">Oath Text (fixed)</label>
+          <textarea class="inp inp-mono" id="oathTxt" readonly rows="3"></textarea>
+        </div>
+        <div class="fg" id="oathSigGrp" style="display:none">
+          <label class="fl">Signature</label>
+          <textarea class="inp inp-mono" id="oathSig" readonly rows="2"></textarea>
+          <button class="btn btn-ghost" id="btnCopySig" style="align-self:flex-start;margin-top:4px">COPY</button>
+        </div>
+        <div id="oathRes"></div>
+      </div>
+    </div>
+
+    <!-- transition -->
+    <div class="cer-card">
+      <div class="cer-head">
+        <h3>Authority Transition</h3>
+        <p>POST /api/v1/transition — requires signed oath</p>
+      </div>
+      <div class="cer-body">
+        <div class="fg">
+          <label class="fl">Target Mode</label>
+          <select class="inp" id="tMode">
+            <option value="SHADOW_PASSIVE">SHADOW_PASSIVE — observation, no block (default)</option>
+            <option value="SHADOW">SHADOW — shadow mode</option>
+            <option value="SHADOW_CRITICAL">SHADOW_CRITICAL — critical posture</option>
+            <option value="ENFORCE">ENFORCE — enforcement active</option>
+            <option value="SHADOW_OFF">SHADOW_OFF — shadow disabled</option>
+          </select>
+        </div>
+        <div class="fg">
+          <label class="fl">Operator ID</label>
+          <input class="inp" id="tOp" placeholder="pre-filled from Sign Oath">
+        </div>
+        <div class="fg">
+          <label class="fl">Oath Text</label>
+          <textarea class="inp inp-mono" id="tOathTxt" rows="2" placeholder="pre-filled from Sign Oath"></textarea>
+        </div>
+        <div class="fg">
+          <label class="fl">Oath Signature</label>
+          <textarea class="inp inp-mono" id="tOathSig" rows="2" placeholder="pre-filled from Sign Oath"></textarea>
+        </div>
+        <div class="fg">
+          <label class="fl">Nonce <span class="fn">— auto-generated, single-use</span></label>
+          <input class="inp inp-mono" id="tNonce" readonly>
+          <button class="btn btn-ghost" id="btnNonce" style="align-self:flex-start;margin-top:4px">REGENERATE</button>
+        </div>
+        <button class="btn btn-red" id="btnTrans">SUBMIT TRANSITION</button>
+        <div id="transRes"></div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+</main>
+
+<script>
+/* ============================================================
+   TENIR Interface 2cIronOmega v1 — Runtime
+   Backend: http://localhost:8000 (r5_server.py · Iron Omega R5 · 2C Full Stack)
+   WS:      ws://localhost:8000/ws/vps
+   Auth:    JWT Bearer in Authorization header (service-level only)
+   ============================================================ */
+
+const API = 'http://localhost:8000';
+const WS_URL = 'ws://localhost:8000/ws/vps';
+const S_BLOCK = 0.75, S_ALERT = 0.90, TAU = 0.42, S_MAX = 3.0;
+const BUF = 60; // trajectory buffer size
+
+// ── STATE ──────────────────────────────────────────────────
+const st = {
+  ws: null, wsDelay: 1200,
+  buf: [],          // [{p,v,k,s,t}]
+  evCount: 0,
+  entries: [],      // forensics ledger
+  s: null
+};
+
+// ── AUTH ───────────────────────────────────────────────────
+const jwt = () => document.getElementById('jwtInp').value.trim();
+const hdrs = (extra={}) => {
+  const h = { 'Content-Type':'application/json', ...extra };
+  const t = jwt();
+  if (t) h['Authorization'] = `Bearer ${t}`;
+  return h;
+};
+
+// ── TABS ───────────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
+    document.querySelectorAll('.panel').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    document.getElementById('tab-' + b.dataset.tab).classList.add('on');
+  });
+});
+
+// ── API ────────────────────────────────────────────────────
+async function call(method, path, body=null) {
+  const opts = { method, headers: hdrs() };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(API + path, opts);
+  const d = await r.json().catch(() => ({ detail: r.statusText }));
+  if (!r.ok) {
+    const msg = d.detail || JSON.stringify(d);
+    if (r.status === 403) throw new Error(`403 — Insufficient credentials: ${msg}`);
+    if (r.status === 401) throw new Error('401 — Authentication required');
+    throw new Error(`${r.status} — ${msg}`);
+  }
+  return d;
+}
+
+// ── POSTURE DERIVATION ─────────────────────────────────────
+function posture(s) {
+  if (s == null) return '—';
+  if (s < TAU || s < S_BLOCK) return 'HOLDING-FIRST';
+  if (s < S_ALERT) return 'CAUTION';
+  return 'NORMAL';
+}
+function sColor(s) {
+  if (s == null) return 'var(--muted)';
+  if (s < S_BLOCK) return 'var(--red)';
+  if (s < S_ALERT) return 'var(--amber)';
+  return 'var(--teal)';
+}
+const CES_CLASS = {
+  REST:'b-teal', METABOLIZING:'b-blue', TENSION:'b-amber',
+  SIGNAL_CONFLICT:'b-orange', COLLAPSE:'b-red'
+};
+const MEM_CLASS = { PASS:'b-teal', FLAG:'b-amber', BLOCK:'b-red' };
+const CES_COLOR = {
+  REST:'var(--teal)', METABOLIZING:'var(--blue)', TENSION:'var(--amber)',
+  SIGNAL_CONFLICT:'var(--orange)', COLLAPSE:'var(--red)'
+};
+
+// ── UPDATE POSTURE BAR ─────────────────────────────────────
+function updateBar(d) {
+  st.s = d.s_score;
+  const p = posture(st.s);
+
+  const pb = document.getElementById('pbPosture');
+  pb.textContent = p;
+  pb.className = 'badge ' + (p==='NORMAL'?'b-teal':p==='CAUTION'?'b-amber':'b-red');
+
+  const pc = document.getElementById('pbCES');
+  const cv = d.ces_state || '—';
+  pc.textContent = cv;
+  pc.className = 'badge ' + (CES_CLASS[cv] || 'b-dim');
+
+  document.getElementById('pbS').textContent = st.s != null ? st.s.toFixed(4) : '—';
+  document.getElementById('pbS').style.color = sColor(st.s);
+
+  const pm = document.getElementById('pbMem');
+  const mv = d.membrane_decision || '—';
+  pm.textContent = mv;
+  pm.className = 'badge ' + (MEM_CLASS[mv] || 'b-dim');
+
+  document.getElementById('pbMode').textContent = d.operating_mode || '—';
+
+  if (d.latest_hash) document.getElementById('pbHash').textContent = d.latest_hash.slice(0,18) + '…';
+  if (d.epoch_id) document.getElementById('epochLbl').textContent = 'epoch · ' + d.epoch_id.slice(0,8);
+
+  drawGauge(st.s);
+  updateDerivs(d.ds_de, d.d2s_de2);
+}
+
+// ── GAUGE (canvas arc) ─────────────────────────────────────
+// Arc: center (110,120), r=88, CCW from π (left/9h) to 0 (right/3h) through top
+function drawGauge(s) {
+  const el = document.getElementById('gCanvas');
+  const dpr = window.devicePixelRatio || 1;
+  el.width = 220 * dpr; el.height = 130 * dpr;
+  el.style.width = '220px'; el.style.height = '130px';
+
+  const ctx = el.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, 220, 130);
+
+  const cx=110, cy=120, r=86, lw=10;
+  const norm = s != null ? Math.min(Math.max(s,0)/S_MAX, 1) : 0;
+  const col = sColor(s);
+
+  // track (full arc, CCW from π to 0)
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, Math.PI, 0, true);
+  ctx.strokeStyle = 'var(--border)'; // CSS vars don't work in canvas directly
+  ctx.strokeStyle = '#19253a';
+  ctx.lineWidth = lw; ctx.lineCap = 'round';
+  ctx.stroke();
+
+  // threshold ticks
+  const tick = (v, color) => {
+    const a = Math.PI * (1 - v/S_MAX);
+    const ri = r - 7, ro = r + 7;
+    ctx.beginPath();
+    ctx.moveTo(cx + ri*Math.cos(a), cy + ri*Math.sin(a));
+    ctx.lineTo(cx + ro*Math.cos(a), cy + ro*Math.sin(a));
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.lineCap = 'butt';
+    ctx.stroke();
+  };
+  tick(TAU,    '#1e3048');
+  tick(S_BLOCK,'#e8404080');
+  tick(S_ALERT,'#e8a02080');
+
+  // fill arc
+  if (norm > 0.005) {
+    const fillEnd = Math.PI * (1 - norm);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, Math.PI, fillEnd, true);
+    const c = s < S_BLOCK ? '#e84040' : s < S_ALERT ? '#e8a020' : '#00c896';
+    // glow pass
+    ctx.strokeStyle = c + '30';
+    ctx.lineWidth = 18; ctx.lineCap = 'round';
+    ctx.stroke();
+    // main pass
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, Math.PI, fillEnd, true);
+    ctx.strokeStyle = c;
+    ctx.lineWidth = lw; ctx.lineCap = 'round';
+    ctx.stroke();
+  }
+
+  // S value text
+  const fc = s != null ? (s<S_BLOCK?'#e84040':s<S_ALERT?'#e8a020':'#00c896') : '#1e3048';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = fc;
+  ctx.font = `bold 22px "JetBrains Mono","SF Mono",Consolas,monospace`;
+  ctx.fillText(s != null ? s.toFixed(3) : '—', cx, cy - 28);
+  ctx.fillStyle = '#3d5570';
+  ctx.font = `9px -apple-system,system-ui,sans-serif`;
+  ctx.letterSpacing = '1px';
+  ctx.fillText('S-SCORE', cx, cy - 12);
+}
+
+function updateDerivs(ds, d2s) {
+  const d1 = document.getElementById('dsLbl');
+  const d2 = document.getElementById('d2sLbl');
+  if (ds != null) {
+    d1.textContent = (ds>=0?'+':'') + ds.toFixed(4);
+    d1.style.color = ds<0?'#e84040':ds>0?'#00c896':'var(--txt)';
+  }
+  if (d2s != null) {
+    d2.textContent = (d2s>=0?'+':'') + d2s.toFixed(4);
+    d2.style.color = d2s<0?'#e8a020':'var(--txt)';
+  }
+}
+
+// ── TRAJECTORY CANVAS ──────────────────────────────────────
+function pushPoint(d) {
+  const pt = {
+    p: d.pressure ?? null, v: d.velocity ?? null,
+    k: d.capacity ?? null, s: d.s_score ?? null,
+    t: Date.now()
+  };
+  st.buf.push(pt);
+  if (st.buf.length > BUF) st.buf.shift();
+  document.getElementById('trajCnt').textContent = st.buf.length + ' samples';
+  drawTraj();
+}
+
+function drawTraj() {
+  const el = document.getElementById('tCanvas');
+  const dpr = window.devicePixelRatio || 1;
+  const cw = el.offsetWidth || 600;
+  const ch = el.offsetHeight || 160;
+  el.width = cw * dpr; el.height = ch * dpr;
+  const ctx = el.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  ctx.fillStyle = '#0c1019';
+  ctx.fillRect(0,0,cw,ch);
+
+  if (st.buf.length < 2) {
+    ctx.fillStyle = '#1e3048';
+    ctx.font = '11px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText('Waiting for data…', cw/2, ch/2);
+    return;
+  }
+
+  const pad = {t:8,b:8,l:6,r:6};
+  const w = cw - pad.l - pad.r;
+  const h = ch - pad.t - pad.b;
+
+  // threshold dashes
+  ctx.setLineDash([2,4]);
+  const threshY = (v, vmax) => pad.t + h*(1-v/vmax);
+  ctx.strokeStyle = '#e8a02030'; ctx.lineWidth=1;
+  ctx.beginPath();
+  const ya = threshY(S_ALERT, S_MAX);
+  ctx.moveTo(pad.l, ya); ctx.lineTo(cw-pad.r, ya); ctx.stroke();
+
+  ctx.strokeStyle = '#e8404030';
+  ctx.beginPath();
+  const yb = threshY(S_BLOCK, S_MAX);
+  ctx.moveTo(pad.l, yb); ctx.lineTo(cw-pad.r, yb); ctx.stroke();
+  ctx.setLineDash([]);
+
+  const line = (key, color, vmax=1) => {
+    const pts = st.buf.map((pt,i) => {
+      const val = pt[key];
+      if (val == null) return null;
+      return { x: pad.l + (i/(st.buf.length-1))*w,
+               y: pad.t + h*(1-Math.min(Math.max(val,0),vmax)/vmax) };
+    }).filter(Boolean);
+    if (pts.length < 2) return;
+    ctx.beginPath();
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.lineCap='round'; ctx.lineJoin='round';
+    pts.forEach((p,i) => i===0 ? ctx.moveTo(p.x,p.y) : ctx.lineTo(p.x,p.y));
+    ctx.stroke();
+  };
+
+  line('p','#e84040');
+  line('v','#e8a020');
+  line('k','#3d8ef5');
+  line('s','#00c896', S_MAX);
+
+  // last point dot for S
+  const last = st.buf[st.buf.length-1];
+  if (last.s != null) {
+    const x = pad.l + w;
+    const y = pad.t + h*(1-Math.min(last.s,S_MAX)/S_MAX);
+    ctx.beginPath();
+    const c = last.s<S_BLOCK?'#e84040':last.s<S_ALERT?'#e8a020':'#00c896';
+    ctx.arc(x, y, 3, 0, 2*Math.PI);
+    ctx.fillStyle = c; ctx.fill();
+  }
+}
+
+// ── EVENT STREAM ───────────────────────────────────────────
+function addEvent(d, type='EVENT') {
+  const stream = document.getElementById('estream');
+  const ph = stream.querySelector('[data-ph]');
+  if (ph) ph.remove();
+
+  st.evCount++;
+  document.getElementById('evCnt').textContent = st.evCount;
+
+  const t = new Date();
+  const ts = t.toTimeString().split(' ')[0];
+  const ces = d.ces_state || type;
+  const col = CES_COLOR[ces] || 'var(--txt)';
+  const h = d.hash || d.entry_hash || '';
+  const mem = d.membrane_decision || '';
+
+  const div = document.createElement('div');
+  div.className = 'ev';
+  div.innerHTML = `
+    <div class="ev-t">${ts}</div>
+    <div class="ev-b">
+      <div class="ev-type" style="color:${col}">${ces}</div>
+      <div class="ev-meta">S=${d.s_score!=null?d.s_score.toFixed(3):'—'}${mem?' · '+mem:''}</div>
+      ${h?`<div class="ev-hash">${h.slice(0,22)}…</div>`:''}
+    </div>`;
+  stream.insertBefore(div, stream.firstChild);
+  while (stream.children.length > 50) stream.removeChild(stream.lastChild);
+}
+
+// ── WEBSOCKET ──────────────────────────────────────────────
+function connectWS() {
+  const dot = document.getElementById('wsDot');
+  const lbl = document.getElementById('wsLbl');
+  dot.className = 'ws-dot'; lbl.textContent = 'Connecting…';
+  try { st.ws = new WebSocket(WS_URL); } catch(e) { schedRetry(); return; }
+
+  st.ws.onopen = () => {
+    dot.className = 'ws-dot live'; lbl.textContent = 'ws://localhost:8000/ws/vps';
+    st.wsDelay = 1200;
+  };
+  st.ws.onmessage = e => {
+    try {
+      const d = JSON.parse(e.data);
+      updateBar(d); pushPoint(d); addEvent(d);
+    } catch(_) {}
+  };
+  st.ws.onclose = () => { dot.className='ws-dot fail'; lbl.textContent='Disconnected'; schedRetry(); };
+  st.ws.onerror = () => { dot.className='ws-dot fail'; };
+}
+function schedRetry() {
+  setTimeout(connectWS, st.wsDelay);
+  st.wsDelay = Math.min(st.wsDelay*1.8, 30000);
+}
+
+// ── POLL FALLBACK (every 5s) ───────────────────────────────
+async function poll() {
+  try {
+    const d = await call('GET','/api/v1/state');
+    updateBar(d);
+    const wsLive = st.ws && st.ws.readyState === WebSocket.OPEN;
+    if (!wsLive) { pushPoint(d); addEvent(d, 'POLL'); }
+  } catch(_) {}
+}
+
+// ── SLIDERS ───────────────────────────────────────────────
+[['slP','vP',2],['slV','vV',2],['slK','vK',2],['slO','vO',1]].forEach(([sid,vid,dp]) => {
+  document.getElementById(sid).addEventListener('input', function() {
+    document.getElementById(vid).textContent = parseFloat(this.value).toFixed(dp);
+  });
+});
+
+// ── ADJUDICATION ───────────────────────────────────────────
+document.getElementById('adjBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('adjBtn');
+  const hint = document.getElementById('adjHint');
+  const badge = document.getElementById('adjBadge');
+  const detail = document.getElementById('adjDetail');
+
+  btn.disabled=true; btn.textContent='SUBMITTING…';
+  hint.style.display='none'; badge.style.display='none'; detail.textContent='';
+
+  try {
+    // AdjudicationRequest takes raw_input: str (natural language OR JSON EventSample)
+    // The NSL engine extracts: pressure, velocity, capacity, option_space
+    const params = {
+      pressure:     parseFloat(document.getElementById('slP').value),
+      velocity:     parseFloat(document.getElementById('slV').value),
+      capacity:     parseFloat(document.getElementById('slK').value),
+      option_space: parseFloat(document.getElementById('slO').value),
+    };
+    const op = document.getElementById('opId').value.trim();
+    const body = { raw_input: JSON.stringify(params) };
+    if (op) body.actor_ref = op;
+
+    const r = await call('POST','/api/v1/adjudicate',body);
+    const v = r.membrane_decision || r.decision || '—';
+    badge.textContent = v;
+    badge.className = 'badge ' + (MEM_CLASS[v]||'b-dim');
+    badge.style.display = 'inline-flex';
+    detail.textContent = `S=${r.s_score?.toFixed(4)||'—'} · ${r.ces_state||'—'} · ${r.event_id?.slice(0,10)||''}`;
+
+    updateBar(r); pushPoint(r); addEvent({...r,type:'ADJUDICATION'});
+  } catch(e) {
+    detail.innerHTML = `<span class="err-box">${e.message}</span>`;
+  } finally {
+    btn.disabled=false; btn.textContent='ADJUDICATE';
+  }
+});
+
+// ── FORENSICS ──────────────────────────────────────────────
+document.getElementById('btnLoad').addEventListener('click', async () => {
+  const btn=document.getElementById('btnLoad');
+  btn.disabled=true; btn.textContent='LOADING…';
+  try {
+    const d = await call('GET','/api/v1/ledger/recent?limit=100');
+    st.entries = d.entries || d || [];
+    renderTL(st.entries);
+  } catch(e) {
+    document.getElementById('timeline').innerHTML = `<div class="err-box" style="margin:16px">${e.message}</div>`;
+  } finally { btn.disabled=false; btn.textContent='LOAD ENTRIES'; }
+});
+
+document.getElementById('btnVerify').addEventListener('click', async () => {
+  const btn=document.getElementById('btnVerify');
+  btn.disabled=true; btn.textContent='VERIFYING…';
+  try {
+    const r = await call('GET','/api/v1/ledger/verify');
+    const ok = r.valid ?? r.chain_valid ?? false;
+    document.getElementById('chainDot').className = 'chdot ' + (ok?'ok':'bad');
+    document.getElementById('chainLbl').textContent = ok
+      ? `Chain valid · ${r.entry_count||''} entries`
+      : `Chain INVALID · ${r.error||'hash mismatch'}`;
+    document.getElementById('chainBadge').style.borderColor = ok?'rgba(0,200,150,.25)':'rgba(232,64,64,.25)';
+  } catch(e) {
+    document.getElementById('chainDot').className='chdot bad';
+    document.getElementById('chainLbl').textContent = e.message;
+  } finally { btn.disabled=false; btn.textContent='VERIFY CHAIN'; }
+});
+
+document.getElementById('btnExport').addEventListener('click', () => {
+  if (!st.entries.length) { alert('Load entries first.'); return; }
+  const blob = new Blob(st.entries.map(e=>JSON.stringify(e)+'\n'), {type:'application/x-ndjson'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `tenir_audit_seal_${Date.now()}.jsonl`;
+  a.click();
+});
+
+document.getElementById('fSearch').addEventListener('input', () => {
+  const q = document.getElementById('fSearch').value.toLowerCase();
+  renderTL(q ? st.entries.filter(e=>JSON.stringify(e).toLowerCase().includes(q)) : st.entries);
+});
+
+function renderTL(entries) {
+  const tl = document.getElementById('timeline');
+  if (!entries.length) {
+    tl.innerHTML = '<div style="text-align:center;color:var(--dim);font-size:11px;padding:32px">No entries match.</div>';
+    return;
+  }
+  tl.innerHTML = '';
+  [...entries].reverse().forEach((entry,idx) => {
+    const type = entry.entry_type || entry.type || 'UNKNOWN';
+    const ts = entry.timestamp ? new Date(entry.timestamp*1000) : new Date();
+    const rel = relTime(ts);
+    const hash = entry.hash || entry.entry_hash || '';
+    const parentHash = entry.parent_hash || '';
+    const op = entry.operator_id || entry.actor || '';
+    const ces = entry.ces_state || '';
+    const dec = entry.membrane_decision || entry.decision || '';
+
+    const typeClass = {ADJUDICATION:'b-blue',TRANSITION:'b-purple',OATH:'b-amber',GENESIS:'b-dim'}[type]||'b-dim';
+    const dotClass  = {ADJUDICATION:'td-ADJ',TRANSITION:'td-TRANS',OATH:'td-OATH',GENESIS:'td-GEN'}[type]||'td-GEN';
+
+    const row = document.createElement('div');
+    row.className='tl-row';
+    row.innerHTML = `
+      <div class="tl-t">
+        <div class="tl-rel">${rel}</div>
+        <div class="tl-tabs">${ts.toTimeString().split(' ')[0]}</div>
+      </div>
+      <div class="tl-dot-col"><div class="tl-dot ${dotClass}"></div></div>
+      <div class="tl-card" id="tlc${idx}">
+        <div class="tl-head" onclick="togTL(${idx})">
+          <span class="badge ${typeClass}" style="font-size:9px">${type}</span>
+          ${ces?`<span class="badge ${CES_CLASS[ces]||'b-dim'}" style="font-size:9px">${ces}</span>`:''}
+          ${dec?`<span class="badge ${MEM_CLASS[dec]||'b-dim'}" style="font-size:9px">${dec}</span>`:''}
+          ${op?`<span class="tl-op">${op}</span>`:''}
+          ${hash?`<span class="tl-hp">${hash.slice(0,14)}…</span>`:''}
+          <div class="tl-int ${hash?'ok':'nd'}"></div>
+        </div>
+        <div class="tl-detail" id="tld${idx}">
+          <pre class="json-pre">${JSON.stringify(entry,null,2)}</pre>
+          ${parentHash?`<div style="font-size:10px;color:var(--dim);margin-top:8px">← parent: ${parentHash.slice(0,22)}…</div>`:''}
+        </div>
+      </div>`;
+    tl.appendChild(row);
+  });
+}
+
+function togTL(idx) {
+  document.getElementById(`tlc${idx}`).classList.toggle('exp');
+  document.getElementById(`tld${idx}`).classList.toggle('open');
+}
+
+function relTime(ts) {
+  const s = (Date.now()-ts.getTime())/1000;
+  if (s<60) return Math.floor(s)+'s';
+  if (s<3600) return Math.floor(s/60)+'m';
+  if (s<86400) return Math.floor(s/3600)+'h';
+  return Math.floor(s/86400)+'d';
+}
+
+// ── CEREMONY ───────────────────────────────────────────────
+const mkNonce = () => 'nonce-'+Date.now()+'-'+Math.random().toString(36).slice(2,9);
+document.getElementById('tNonce').value = mkNonce();
+document.getElementById('btnNonce').addEventListener('click', () => {
+  document.getElementById('tNonce').value = mkNonce();
+});
+
+document.getElementById('btnOath').addEventListener('click', async () => {
+  const btn = document.getElementById('btnOath');
+  const res = document.getElementById('oathRes');
+  const op = document.getElementById('oathOp').value.trim();
+  if (!op) { res.innerHTML='<div class="err-box">operator_id required</div>'; return; }
+  btn.disabled=true; btn.textContent='REQUESTING…'; res.innerHTML='';
+  try {
+    const r = await call('POST', `/api/v1/oath/sign?operator_id=${encodeURIComponent(op)}`);
+    const txt = r.oath_text || '';
+    const sig = r.oath_signature || r.signature || '';
+    document.getElementById('oathTxt').value = txt;
+    document.getElementById('oathSig').value = sig;
+    document.getElementById('oathTxtGrp').style.display='flex';
+    document.getElementById('oathTxtGrp').style.flexDirection='column';
+    document.getElementById('oathTxtGrp').style.gap='4px';
+    document.getElementById('oathSigGrp').style.display='flex';
+    document.getElementById('oathSigGrp').style.flexDirection='column';
+    document.getElementById('oathSigGrp').style.gap='4px';
+    // pre-fill transition
+    document.getElementById('tOp').value = op;
+    document.getElementById('tOathTxt').value = txt;
+    document.getElementById('tOathSig').value = sig;
+    res.innerHTML='<div class="ok-box">Oath signed. Transition form pre-filled.</div>';
+  } catch(e) {
+    res.innerHTML=`<div class="err-box">${e.message}</div>`;
+  } finally { btn.disabled=false; btn.textContent='REQUEST OATH'; }
+});
+
+document.getElementById('btnCopySig').addEventListener('click', () => {
+  navigator.clipboard.writeText(document.getElementById('oathSig').value).catch(()=>{});
+  const b=document.getElementById('btnCopySig');
+  b.textContent='COPIED'; setTimeout(()=>b.textContent='COPY',2000);
+});
+
+document.getElementById('btnTrans').addEventListener('click', async () => {
+  const btn=document.getElementById('btnTrans');
+  const res=document.getElementById('transRes');
+  btn.disabled=true; btn.textContent='SUBMITTING…'; res.innerHTML='';
+  try {
+    const body = {
+      target_mode:    document.getElementById('tMode').value,
+      operator_id:    document.getElementById('tOp').value.trim(),
+      oath_text:      document.getElementById('tOathTxt').value.trim(),
+      oath_signature: document.getElementById('tOathSig').value.trim(),
+      nonce:          document.getElementById('tNonce').value.trim(),
+      timestamp:      String(Math.floor(Date.now()/1000))
+    };
+    const r = await call('POST','/api/v1/transition',body);
+    res.innerHTML=`<div class="ok-box">
+      Transition committed.<br>
+      Mode: <b>${r.new_mode||r.operating_mode||'—'}</b><br>
+      Entry: <span style="font-family:var(--mono);font-size:10px">${r.event_id||r.entry_id||'—'}</span>
+    </div>`;
+    document.getElementById('tNonce').value = mkNonce(); // consume nonce
+    poll();
+  } catch(e) {
+    res.innerHTML=`<div class="err-box">${e.message}</div>`;
+  } finally { btn.disabled=false; btn.textContent='SUBMIT TRANSITION'; }
+});
+
+// ── BOOT ───────────────────────────────────────────────────
+connectWS();
+poll();
+setInterval(poll, 5000);
+drawGauge(null);
+drawTraj();
+window.addEventListener('resize', () => { drawTraj(); drawGauge(st.s); });
+</script>
+</body>
+</html>

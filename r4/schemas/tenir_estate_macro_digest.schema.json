@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tenir.local/schemas/tenir_estate_macro_digest.schema.json",
+  "title": "Tenir Estate Macro Digest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "Schema_Version",
+    "Digest_Kind",
+    "Estate_Name",
+    "Root_Name",
+    "Generated_At",
+    "Source_Note",
+    "Layer_Cards"
+  ],
+  "properties": {
+    "Schema_Version": {
+      "type": "string",
+      "const": "v1"
+    },
+    "Digest_Kind": {
+      "type": "string",
+      "const": "macro_digest"
+    },
+    "Estate_Name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "Root_Name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "Generated_At": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "Source_Note": {
+      "type": "string",
+      "minLength": 1
+    },
+    "Layer_Cards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "Layer_Id",
+          "Layer_Name",
+          "Layer_Type",
+          "Layer_Order",
+          "Authority_Status",
+          "Current_State",
+          "Top_Contradiction",
+          "Current_Ask",
+          "Evidence_Anchor",
+          "Deeper_Digest_Path"
+        ],
+        "properties": {
+          "Layer_Id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "Layer_Name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "Layer_Type": {
+            "type": "string",
+            "enum": [
+              "depth_layer",
+              "side_plane"
+            ]
+          },
+          "Layer_Order": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "Authority_Status": {
+            "type": "string",
+            "enum": [
+              "authoritative",
+              "constraining",
+              "derived",
+              "downstream",
+              "parallel",
+              "archival",
+              "mixed",
+              "pending_intake"
+            ]
+          },
+          "Current_State": {
+            "type": "string",
+            "enum": [
+              "forming",
+              "active",
+              "stable",
+              "partial",
+              "blocked",
+              "stale",
+              "superseded",
+              "archival",
+              "pending_ratification",
+              "pending_intake"
+            ]
+          },
+          "Top_Contradiction": {
+            "type": "string",
+            "minLength": 1
+          },
+          "Current_Ask": {
+            "type": "string",
+            "minLength": 1
+          },
+          "Evidence_Anchor": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "Label",
+                "Path",
+                "Kind"
+              ],
+              "properties": {
+                "Label": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "Path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "Kind": {
+                  "type": "string",
+                  "enum": [
+                    "doc",
+                    "schema",
+                    "state",
+                    "review",
+                    "artifact",
+                    "release_plane"
+                  ]
+                }
+              }
+            }
+          },
+          "Deeper_Digest_Path": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

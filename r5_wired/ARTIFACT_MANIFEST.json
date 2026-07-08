@@ -1,0 +1,21 @@
+{
+  "artifact_name": "IRON_OMEGA_R5",
+  "artifact_type": "governance_runtime",
+  "version": "5.0.0",
+  "release_codename": "IRON OMEGA R5",
+  "status": "release",
+  "imported_at": "2026-04-19",
+  "self_contained_import_fixes": [
+    "Added local core adapters for trajectory and CES imports",
+    "Fixed package-relative NSL grammar import",
+    "Added FastAPI-free websocket import shim for local test environments"
+  ],
+  "verification": {
+    "unit_test_command": "pytest r5_hardened/IRON_OMEGA_R5/test_r5_all.py -v",
+    "unit_tests_passed": 53,
+    "unit_tests_failed": 0,
+    "full_suite_command": "docker compose exec tenir-middleware pytest -v --cov=tenir_governance",
+    "full_suite_passed": 445,
+    "coverage_statement": "70%"
+  }
+}

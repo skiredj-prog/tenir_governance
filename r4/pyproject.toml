@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tenir_v4_test"
+version = "4.0.0"
+description = "TENIR R4 Monitoring Layer — TenirMonitor, TrajectoryTracker, HashChainedLedger"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [{name = "Abdelaziz Skiredj", email = "skiredj@gmail.com"}]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tenir_v4_test*"]

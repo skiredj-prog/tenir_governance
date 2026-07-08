@@ -1,0 +1,24 @@
+{
+  "artifact_name": "IRON_OMEGA_R5_DeepTech",
+  "workspace_name": "Iron_Omega_R5__Intake__Ws",
+  "artifact_type": "imported_repo_workspace",
+  "source_archive": "C:\\Users\\skire\\Downloads\\IRON_OMEGA_R5_DeepTech.zip",
+  "imported_into": "C:\\Users\\skire\\OneDrive\\Desktop\\Documents\\RATIONALIZATION CORPUS AVRIL 2026\\LATEST CORPUS - ACTIVE\\Tenir v4\\Iron_Omega_R5__Intake__Ws",
+  "imported_at": "2026-04-19",
+  "status": "intake_repaired",
+  "audience": "internal_review",
+  "self_contained_import_fixes": [
+    "Added local core adapters for trajectory and CES imports",
+    "Fixed package-relative NSL grammar import",
+    "Added FastAPI-free websocket import shim for local test environments"
+  ],
+  "verification": {
+    "unit_test_command": "python -m unittest -v",
+    "unit_tests_passed": 53,
+    "unit_tests_failed": 0,
+    "server_import_status": "blocked_by_missing_runtime_dependency",
+    "runtime_blockers": [
+      "fastapi not installed in current Python environment"
+    ]
+  }
+}

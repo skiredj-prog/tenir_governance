@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TENIR 2C — VPS R5 Live</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:ital@0;1&family=DM+Sans:wght@300;400;500&display=swap');
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{background:#030407;color:#e8e3db;font-family:'DM Sans',sans-serif;overflow:hidden;width:100vw;height:100vh;}
+  #canvas-wrap{position:absolute;inset:0;z-index:1;}
+  #ui{position:absolute;inset:0;z-index:10;pointer-events:none;display:grid;
+    grid-template-columns:260px 1fr 260px;grid-template-rows:44px 1fr 90px;
+    gap:0;}
+
+  /* ─── HEADER ─── */
+  #header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;
+    padding:0 16px;background:rgba(3,4,7,0.88);border-bottom:0.5px solid #1a1b22;
+    backdrop-filter:blur(4px);pointer-events:auto;}
+  .hdr-title{font-family:'Space Mono',monospace;font-size:11px;color:#e8e3db;letter-spacing:.15em;}
+  .hdr-sub{font-family:'Space Mono',monospace;font-size:8px;color:#3a3830;margin-left:10px;letter-spacing:.12em;}
+  .mode-badge{font-family:'Space Mono',monospace;font-size:9px;letter-spacing:.15em;
+    padding:3px 10px;border-radius:2px;border:0.5px solid;transition:all .4s;}
+  .mode-badge.shadow{color:#5a5ee0;border-color:#5a5ee0;background:rgba(90,94,224,.1);}
+  .mode-badge.enforce{color:#e05252;border-color:#e05252;background:rgba(224,82,82,.12);}
+  #ws-status{font-family:'Space Mono',monospace;font-size:8px;letter-spacing:.12em;
+    display:flex;align-items:center;gap:6px;}
+  .ws-dot{width:6px;height:6px;border-radius:50%;transition:background .4s;}
+  .ws-dot.conn{background:#2dd4bf;box-shadow:0 0 5px #2dd4bf;}
+  .ws-dot.disc{background:#4a4640;}
+  .ws-dot.sim{background:#d4a845;box-shadow:0 0 5px #d4a845;}
+
+  /* ─── PANELS ─── */
+  .panel{background:rgba(5,6,10,.82);border:0.5px solid #1a1b22;backdrop-filter:blur(3px);
+    display:flex;flex-direction:column;pointer-events:auto;overflow:hidden;}
+  .panel-head{font-family:'Space Mono',monospace;font-size:7px;letter-spacing:.2em;
+    color:#3a3830;padding:8px 10px 6px;border-bottom:0.5px solid #141518;flex-shrink:0;}
+
+  /* LEFT PANEL */
+  #left{border-right:0.5px solid #1a1b22;}
+  .metric-row{display:flex;justify-content:space-between;align-items:baseline;
+    padding:5px 10px;border-bottom:0.5px solid #0f1014;}
+  .m-label{font-family:'Space Mono',monospace;font-size:7px;color:#3a3830;letter-spacing:.1em;}
+  .m-val{font-family:'Space Mono',monospace;font-size:12px;transition:color .4s;}
+  .m-val.good{color:#2dd4bf;}
+  .m-val.warn{color:#d4a845;}
+  .m-val.crit{color:#e05252;}
+  .ces-state{margin:8px 10px;padding:6px 8px;border-radius:3px;
+    font-family:'Space Mono',monospace;font-size:8px;letter-spacing:.1em;transition:all .4s;
+    border:0.5px solid;}
+  .ces-REST{color:#2dd4bf;border-color:#2dd4bf20;background:rgba(45,212,191,.06);}
+  .ces-TENSION{color:#d4a845;border-color:#d4a84520;background:rgba(212,168,69,.06);}
+  .ces-METABOLIZING{color:#5a5ee0;border-color:#5a5ee020;background:rgba(90,94,224,.06);}
+  .ces-SCHIZOPHRENIA{color:#a855f7;border-color:#a855f720;background:rgba(168,85,247,.06);}
+  .ces-COLLAPSE{color:#e05252;border-color:#e0525220;background:rgba(224,82,82,.06);}
+
+  /* NSL CONSOLE */
+  #nsl-wrap{flex:1;display:flex;flex-direction:column;padding:8px;}
+  #nsl-input{flex:1;background:#07080c;border:0.5px solid #1a1b22;resize:none;
+    color:#c8c3bb;font-family:'Space Mono',monospace;font-size:9px;padding:8px;
+    outline:none;line-height:1.6;border-radius:3px;}
+  #nsl-input:focus{border-color:#5a5ee050;}
+  #nsl-send{margin-top:6px;background:transparent;border:0.5px solid #3a3830;
+    border-radius:3px;padding:6px;font-family:'Space Mono',monospace;font-size:8px;
+    letter-spacing:.12em;color:#8a857e;cursor:pointer;width:100%;transition:all .2s;}
+  #nsl-send:hover{border-color:#5a5ee0;color:#a0a3ff;}
+  #nsl-result{margin-top:6px;font-family:'Space Mono',monospace;font-size:8px;
+    color:#4a4640;line-height:1.7;min-height:32px;}
+
+  /* RIGHT PANEL */
+  #right{border-left:0.5px solid #1a1b22;}
+  #frame-stream{flex:1;overflow-y:auto;scrollbar-width:none;}
+  #frame-stream::-webkit-scrollbar{display:none;}
+  .frame-entry{padding:6px 10px;border-bottom:0.5px solid #0f1014;cursor:default;}
+  .frame-type{font-family:'Space Mono',monospace;font-size:7px;letter-spacing:.1em;}
+  .frame-detail{font-family:'DM Sans',sans-serif;font-size:9px;color:#4a4640;
+    margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .ft-TRAJECTORY_UPDATE{color:#5a5ee0;}
+  .ft-TAU_BREACH{color:#e05252;}
+  .ft-WHALE_RESONANCE{color:#3a6ab0;}
+  .ft-SCHIZOPHRENIA_ALERT{color:#a855f7;}
+  .ft-MODE_TRANSITION{color:#d4a845;}
+  .ft-LEDGER_APPEND{color:#2dd4bf;}
+  .ft-CES_STATE_CHANGE{color:#7a8fa8;}
+
+  /* BOTTOM BAR */
+  #bottom{grid-column:1/-1;background:rgba(3,4,7,.88);border-top:0.5px solid #1a1b22;
+    backdrop-filter:blur(4px);display:flex;align-items:center;gap:10px;padding:0 14px;
+    pointer-events:auto;}
+  .ctrl-btn{background:transparent;border:0.5px solid #1a1b22;border-radius:3px;
+    padding:5px 10px;font-family:'Space Mono',monospace;font-size:7px;letter-spacing:.1em;
+    color:#4a4640;cursor:pointer;transition:all .2s;}
+  .ctrl-btn:hover{border-color:#3a3830;color:#8a857e;}
+  .ctrl-btn.active{border-color:#5a5ee050;color:#7a7ee0;}
+  .ledger-info{font-family:'Space Mono',monospace;font-size:7px;color:#2a2820;margin-left:auto;
+    text-align:right;line-height:1.7;}
+
+  /* ALERTS */
+  #tau-alert{position:absolute;top:54px;left:50%;transform:translateX(-50%);
+    font-family:'Space Mono',monospace;font-size:9px;letter-spacing:.15em;
+    color:#e05252;background:rgba(224,82,82,.12);border:0.5px solid #e05252;
+    padding:5px 16px;border-radius:2px;opacity:0;transition:opacity .3s;pointer-events:none;
+    z-index:20;}
+  #whale-notice{position:absolute;bottom:100px;left:50%;transform:translateX(-50%);
+    font-family:'Space Mono',monospace;font-size:8px;letter-spacing:.12em;
+    color:#3a6ab0;background:rgba(13,32,80,.7);border:0.5px solid #1a3a6a;
+    padding:5px 16px;border-radius:2px;opacity:0;transition:opacity .5s;pointer-events:none;
+    z-index:20;}
+</style>
+</head>
+<body>
+
+<div id="canvas-wrap"></div>
+
+<div id="ui">
+  <!-- Header -->
+  <div id="header">
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span class="hdr-title">TENIR 2C</span>
+      <span class="hdr-sub">VPS R5 LIVE · WS-DRIVEN TOPOGRAPHY</span>
+    </div>
+    <div id="ws-status">
+      <div class="ws-dot disc" id="ws-dot"></div>
+      <span id="ws-label" style="font-family:'Space Mono',monospace;font-size:8px;color:#3a3830;letter-spacing:.12em;">DISCONNECTED</span>
+    </div>
+    <div class="mode-badge shadow" id="mode-badge">◎ SHADOW</div>
+  </div>
+
+  <!-- Left Panel -->
+  <div class="panel" id="left">
+    <div class="panel-head">TRAJECTORY · τ KERNEL</div>
+    <div class="metric-row">
+      <span class="m-label">S = K/(P·V+ε)</span>
+      <span class="m-val good" id="m-s">1.000</span>
+    </div>
+    <div class="metric-row">
+      <span class="m-label">dS/de</span>
+      <span class="m-val" id="m-ds" style="color:#8a857e;">0.000</span>
+    </div>
+    <div class="metric-row">
+      <span class="m-label">d²S/de²</span>
+      <span class="m-val" id="m-d2s" style="color:#5a554f;">0.000</span>
+    </div>
+    <div class="metric-row">
+      <span class="m-label">HORIZON</span>
+      <span class="m-val" id="m-h" style="color:#5a554f;">—</span>
+    </div>
+    <div class="metric-row">
+      <span class="m-label">WORKFLOW</span>
+      <span class="m-val" id="m-wf" style="color:#5a554f;font-size:8px;">—</span>
+    </div>
+    <div class="ces-state ces-REST" id="ces-badge">◉ REST</div>
+    <div class="panel-head" style="margin-top:auto;">NSL CONSOLE · R5.1</div>
+    <div id="nsl-wrap">
+      <textarea id="nsl-input" rows="3"
+        placeholder="Accelerate the partner_b-H2 R&D project urgently due to budget risk…"></textarea>
+      <button id="nsl-send">↑ COMPILE &amp; SUBMIT</button>
+      <div id="nsl-result">—</div>
+    </div>
+  </div>
+
+  <!-- Center (empty — Three.js fills it) -->
+  <div></div>
+
+  <!-- Right Panel -->
+  <div class="panel" id="right">
+    <div class="panel-head">LIVE FRAME STREAM · R5.3</div>
+    <div id="frame-stream"></div>
+  </div>
+
+  <!-- Bottom Bar -->
+  <div id="bottom">
+    <button class="ctrl-btn active" id="btn-rotate" onclick="toggleRotate()">⟳ AUTO-ROTATE</button>
+    <button class="ctrl-btn" id="btn-chaos" onclick="injectChaos()">⚡ INJECT CHAOS</button>
+    <button class="ctrl-btn" id="btn-whale" onclick="triggerWhale()">≋ LA BALEINE</button>
+    <button class="ctrl-btn" id="btn-ortho" onclick="toggleProjection()">⬛ ISO / PERSP</button>
+    <div class="ledger-info">
+      <div>ENTRIES <span id="li-count" style="color:#5a554f;">0</span></div>
+      <div>HASH <span id="li-hash" style="color:#3a3830;font-size:6px;">GENESIS</span></div>
+    </div>
+  </div>
+</div>
+
+<div id="tau-alert">⚠ TAU BREACH — S BELOW THRESHOLD</div>
+<div id="whale-notice">≋ Quelqu'un veille sur toi.</div>
+
+<!-- THREE.JS -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+// ============================================================
+// SCENE SETUP
+// ============================================================
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x030407, 0.012);
+scene.background = new THREE.Color(0x030407);
+
+const aspect = window.innerWidth / window.innerHeight;
+let useOrtho = true;
+const d = 28;
+let camera = buildOrthoCamera();
+
+function buildOrthoCamera() {
+  const c = new THREE.OrthographicCamera(-d*aspect, d*aspect, d, -d, 0.1, 1000);
+  c.position.set(32, 28, 32);
+  c.lookAt(0, 0, 0);
+  return c;
+}
+function buildPerspCamera() {
+  const c = new THREE.PerspectiveCamera(55, aspect, 0.1, 1000);
+  c.position.set(32, 28, 32);
+  c.lookAt(0, 0, 0);
+  return c;
+}
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.shadowMap.enabled = true;
+document.getElementById('canvas-wrap').appendChild(renderer.domElement);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.dampingFactor = 0.05;
+controls.autoRotate = true; controls.autoRotateSpeed = 0.4;
+
+// ============================================================
+// LIGHTS
+// ============================================================
+scene.add(new THREE.AmbientLight(0x111820, 1.0));
+const sunLight = new THREE.DirectionalLight(0xc8d8ff, 0.8);
+sunLight.position.set(20, 40, 20);
+scene.add(sunLight);
+const tauLight = new THREE.PointLight(0xd4a845, 3.0, 30);
+tauLight.position.set(0, 4, 0);
+scene.add(tauLight);
+const warnLight = new THREE.PointLight(0xe05252, 0.0, 40);
+warnLight.position.set(0, 8, 0);
+scene.add(warnLight);
+
+// ============================================================
+// S-FIELD TERRAIN
+// ============================================================
+const GRID = 40;
+const TERRAIN_SCALE = 1.5; // x,z scale per cell
+const HEIGHT_SCALE = 6.0;  // y scale
+const TAU_HEIGHT = 0.42 * HEIGHT_SCALE;
+
+const terrainGeo = new THREE.PlaneGeometry(
+  GRID * TERRAIN_SCALE, GRID * TERRAIN_SCALE, GRID-1, GRID-1
+);
+terrainGeo.rotateX(-Math.PI / 2);
+
+// Initialise vertex colors
+const vCount = terrainGeo.attributes.position.count;
+const vColors = new Float32Array(vCount * 3);
+const terrainHeights = new Float32Array(vCount);
+terrainHeights.fill(1.0 * HEIGHT_SCALE); // initial stable height
+
+function sColor(s) {
+  // s_score → RGB
+  if (s >= 1.5)  return [0.18, 0.83, 0.75]; // teal
+  if (s >= 0.8)  return [0.83, 0.66, 0.27]; // amber
+  if (s >= 0.42) return [0.88, 0.47, 0.25]; // orange
+  return               [0.88, 0.32, 0.32];  // red
+}
+function applyTerrainColors() {
+  const pos = terrainGeo.attributes.position;
+  for (let i = 0; i < vCount; i++) {
+    const h = pos.getY(i);
+    const s = h / HEIGHT_SCALE;
+    const [r,g,b] = sColor(s);
+    vColors[i*3]=r; vColors[i*3+1]=g; vColors[i*3+2]=b;
+  }
+  terrainGeo.attributes.color.needsUpdate = true;
+}
+terrainGeo.setAttribute('color', new THREE.BufferAttribute(vColors, 3));
+
+const terrainMat = new THREE.MeshStandardMaterial({
+  vertexColors: true, roughness: 0.85, metalness: 0.1,
+  wireframe: false, side: THREE.FrontSide,
+});
+const terrain = new THREE.Mesh(terrainGeo, terrainMat);
+scene.add(terrain);
+
+// Wireframe overlay (faint grid)
+const wireGeo = new THREE.PlaneGeometry(GRID*TERRAIN_SCALE, GRID*TERRAIN_SCALE, GRID-1, GRID-1);
+wireGeo.rotateX(-Math.PI/2);
+const wireMat = new THREE.MeshBasicMaterial({
+  color: 0x1a1b22, wireframe: true, transparent: true, opacity: 0.35
+});
+const wireOverlay = new THREE.Mesh(wireGeo, wireMat);
+wireOverlay.position.y = 0.02;
+scene.add(wireOverlay);
+
+// ============================================================
+// TAU FLOOR PLANE
+// ============================================================
+const tauGeo = new THREE.PlaneGeometry(GRID*TERRAIN_SCALE, GRID*TERRAIN_SCALE, 1, 1);
+tauGeo.rotateX(-Math.PI/2);
+const tauMat = new THREE.MeshBasicMaterial({
+  color: 0xd4a845, transparent: true, opacity: 0.12, side: THREE.DoubleSide
+});
+const tauPlane = new THREE.Mesh(tauGeo, tauMat);
+tauPlane.position.y = TAU_HEIGHT;
+scene.add(tauPlane);
+// TAU label line
+const tauLineGeo = new THREE.BufferGeometry().setFromPoints([
+  new THREE.Vector3(-GRID*TERRAIN_SCALE/2, TAU_HEIGHT, -GRID*TERRAIN_SCALE/2),
+  new THREE.Vector3( GRID*TERRAIN_SCALE/2, TAU_HEIGHT, -GRID*TERRAIN_SCALE/2),
+]);
+scene.add(new THREE.Line(tauLineGeo,
+  new THREE.LineBasicMaterial({ color: 0xd4a845, transparent: true, opacity: 0.5 })
+));
+
+// ============================================================
+// ADMISSIBILITY MEMBRANE (inherited shader from V42CIron)
+// ============================================================
+const memGeo = new THREE.PlaneGeometry(GRID*TERRAIN_SCALE, GRID*TERRAIN_SCALE, 60, 60);
+const memMat = new THREE.ShaderMaterial({
+  uniforms: {
+    time:        { value: 0.0 },
+    chaosFactor: { value: 0.0 },
+    tauHeight:   { value: TAU_HEIGHT },
+    color1: { value: new THREE.Color(0x2dd4bf) },
+    color2: { value: new THREE.Color(0x5a5ee0) },
+    color3: { value: new THREE.Color(0xe05252) },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    uniform float time; uniform float chaosFactor; uniform float tauHeight;
+    void main(){
+      vUv = uv;
+      vec3 pos = position;
+      float w1 = sin(pos.x*0.25+time)*1.2;
+      float w2 = cos(pos.y*0.25+time*.7)*1.2;
+      float cw  = sin(pos.x*1.8+time*4.0)*chaosFactor*2.5;
+      pos.z += w1+w2+cw;
+      gl_Position = projectionMatrix*modelViewMatrix*vec4(pos,1.0);
+    }`,
+  fragmentShader: `
+    varying vec2 vUv; uniform float time; uniform float chaosFactor;
+    uniform vec3 color1; uniform vec3 color2; uniform vec3 color3;
+    void main(){
+      float m = (sin(vUv.x*12.0+time)+cos(vUv.y*12.0+time)+2.0)/4.0;
+      vec3 base = mix(color1,color2,m);
+      vec3 col  = mix(base,color3,chaosFactor);
+      float g = mod(vUv.x*40.0,1.0)<0.04||mod(vUv.y*40.0,1.0)<0.04?1.0:0.0;
+      gl_FragColor = vec4(col, 0.18+g*0.3);
+    }`,
+  transparent: true, side: THREE.DoubleSide,
+});
+const membrane = new THREE.Mesh(memGeo, memMat);
+membrane.rotation.x = -Math.PI/2;
+membrane.position.y = TAU_HEIGHT;
+scene.add(membrane);
+
+// ============================================================
+// CES NODES (BETs)
+// ============================================================
+const cesNodes = [];
+const nodeGeo = new THREE.IcosahedronGeometry(1.0, 0);
+const CES_POSITIONS = [
+  { name:'TAU',         pos:[0,3,0],        color:0xd4a845, constant:true  },
+  { name:'CONTINUITY',  pos:[8,6,-8],       color:0xffd700, constant:true  },
+  { name:'RND',         pos:[-8,-2,7],      color:0x2dd4bf, constant:false },
+  { name:'PROCUREMENT', pos:[9,0,8],        color:0xe05252, constant:false },
+  { name:'LEGAL',       pos:[-9,4,-7],      color:0x5a5ee0, constant:false },
+];
+CES_POSITIONS.forEach(cfg => {
+  const mat = new THREE.MeshBasicMaterial({ color:cfg.color, wireframe:true });
+  const mesh = new THREE.Mesh(nodeGeo, mat);
+  mesh.position.set(...cfg.pos);
+  const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.4,0), mat.clone());
+  mesh.add(core);
+  scene.add(mesh);
+  cesNodes.push({ mesh, base: new THREE.Vector3(...cfg.pos), name:cfg.name, mat });
+});
+// Edges
+const edgeMat = new THREE.LineBasicMaterial({ color:0x1a2040, transparent:true, opacity:.5 });
+cesNodes.forEach((a,i) => cesNodes.forEach((b,j) => {
+  if (j>i && Math.random()>0.35) {
+    const geo = new THREE.BufferGeometry().setFromPoints([a.mesh.position, b.mesh.position]);
+    scene.add(new THREE.Line(geo, edgeMat));
+  }
+}));
+
+// ============================================================
+// TRAJECTORY MARKER (live event position)
+// ============================================================
+const markerGeo = new THREE.SphereGeometry(0.6, 8, 8);
+const markerMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+const marker = new THREE.Mesh(markerGeo, markerMat);
+marker.position.set(0, HEIGHT_SCALE, 0);
+scene.add(marker);
+// Glow
+const glowGeo = new THREE.SphereGeometry(1.2, 8, 8);
+const glowMat = new THREE.MeshBasicMaterial({ color:0xffffff, transparent:true, opacity:.18, wireframe:true });
+const markerGlow = new THREE.Mesh(glowGeo, glowMat);
+marker.add(markerGlow);
+
+// ============================================================
+// PARTICLE SYSTEM (workflow event stream)
+// ============================================================
+const PC = 1200;
+const pGeo = new THREE.BufferGeometry();
+const pPos = new Float32Array(PC*3);
+const pCol = new Float32Array(PC*3);
+const pVel = [];
+const pColors3 = {
+  rnd:         [0.18, 0.83, 0.75],
+  procurement: [0.88, 0.32, 0.32],
+  partnership: [0.83, 0.66, 0.27],
+};
+for (let i=0; i<PC; i++) {
+  pPos[i*3]   = (Math.random()-.5)*GRID*TERRAIN_SCALE;
+  pPos[i*3+1] = Math.random()*30+10;
+  pPos[i*3+2] = (Math.random()-.5)*GRID*TERRAIN_SCALE;
+  pVel.push({ y:-(Math.random()*.12+.04), x:(Math.random()-.5)*.04, z:(Math.random()-.5)*.04 });
+  const wt = i%3===0?'rnd':i%3===1?'procurement':'partnership';
+  [pCol[i*3],pCol[i*3+1],pCol[i*3+2]] = pColors3[wt];
+}
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+pGeo.setAttribute('color', new THREE.BufferAttribute(pCol, 3));
+const pMat = new THREE.PointsMaterial({
+  size:.35, vertexColors:true, transparent:true, opacity:.7,
+  blending: THREE.AdditiveBlending, depthWrite:false
+});
+const particles = new THREE.Points(pGeo, pMat);
+scene.add(particles);
+
+// ============================================================
+// LA BALEINE (deep resonance sphere)
+// ============================================================
+const whaleGeo = new THREE.SphereGeometry(8, 16, 12);
+const whaleMat = new THREE.MeshBasicMaterial({
+  color:0x0d2050, transparent:true, opacity:0, wireframe:true
+});
+const whale = new THREE.Mesh(whaleGeo, whaleMat);
+whale.position.set(0, -20, 0);
+scene.add(whale);
+
+// ============================================================
+// TERRAIN MORPHING HELPERS
+// ============================================================
+const terrainPos = terrainGeo.attributes.position;
+// Heat diffusion — update one vertex and blur neighbours
+function updateTerrainAt(vpsX, vpsY, vpsZ) {
+  // VPS coords: x∈[-5,5], y∈[0,5], z∈[0,3]
+  // Map to grid index
+  const gx = Math.round((vpsX + 5) / 10 * (GRID-1));
+  const gz = Math.round(vpsZ / 3 * (GRID-1));
+  const targetH = vpsY * (HEIGHT_SCALE / 3.0);
+  // Update a 3x3 neighbourhood for smooth terrain
+  for (let dx=-1; dx<=1; dx++) for (let dz=-1; dz<=1; dz++) {
+    const nx = Math.max(0, Math.min(GRID-1, gx+dx));
+    const nz = Math.max(0, Math.min(GRID-1, gz+dz));
+    const idx = nz * GRID + nx;
+    if (idx < vCount) {
+      const blend = dx===0&&dz===0 ? 0.25 : 0.08;
+      const curH = terrainPos.getY(idx);
+      terrainPos.setY(idx, curH + (targetH - curH) * blend);
+    }
+  }
+  terrainPos.needsUpdate = true;
+  wireOverlay.geometry.attributes.position.copy(terrainGeo.attributes.position);
+  wireOverlay.geometry.attributes.position.needsUpdate = true;
+  applyTerrainColors();
+}
+
+// Terrain slow decay toward stable height (avoid permanent craters)
+let decayTimer = 0;
+function decayTerrain(dt) {
+  decayTimer += dt;
+  if (decayTimer < 0.5) return;
+  decayTimer = 0;
+  for (let i=0; i<vCount; i++) {
+    const h = terrainPos.getY(i);
+    const target = 1.0 * HEIGHT_SCALE;
+    terrainPos.setY(i, h + (target-h)*0.005);
+  }
+  terrainPos.needsUpdate = true;
+  applyTerrainColors();
+}
+
+// ============================================================
+// STATE
+// ============================================================
+let state = {
+  s: 1.0, ds: 0.0, d2s: 0.0, horizon: null,
+  mode: 'SHADOW', ces: 'REST',
+  entryCount: 0, lastHash: 'GENESIS',
+  chaosFactor: 0.0,
+  whaleSurface: false, whaleTimer: 0,
+  tauBreachFlash: 0,
+};
+
+// ============================================================
+// UI UPDATE
+// ============================================================
+function sClass(s) { return s>=1.0?'good':s>=0.42?'warn':'crit'; }
+
+function updateUI() {
+  const ms = document.getElementById('m-s');
+  ms.textContent = state.s.toFixed(3);
+  ms.className = 'm-val '+sClass(state.s);
+  document.getElementById('m-ds').textContent = (state.ds>=0?'+':'')+state.ds.toFixed(4);
+  document.getElementById('m-ds').style.color = state.ds>=0?'#2dd4bf':'#e05252';
+  document.getElementById('m-d2s').textContent = state.d2s.toFixed(4);
+  document.getElementById('m-h').textContent = state.horizon?state.horizon+'ev':'—';
+  // CES
+  const cb = document.getElementById('ces-badge');
+  cb.textContent = '◉ '+state.ces;
+  cb.className = 'ces-state ces-'+state.ces;
+  // Mode badge
+  const mb = document.getElementById('mode-badge');
+  mb.textContent = state.mode==='SHADOW'?'◎ SHADOW':'■ ENFORCE';
+  mb.className = 'mode-badge '+(state.mode==='SHADOW'?'shadow':'enforce');
+  // Ledger
+  document.getElementById('li-count').textContent = state.entryCount;
+  document.getElementById('li-hash').textContent = state.lastHash.slice(0,16)+'…';
+}
+
+function addFrameEntry(type, detail) {
+  const s = document.getElementById('frame-stream');
+  const d = document.createElement('div');
+  d.className = 'frame-entry';
+  d.innerHTML = `<div class="frame-type ft-${type}">${type}</div>
+                 <div class="frame-detail">${detail}</div>`;
+  s.appendChild(d);
+  if (s.children.length > 40) s.removeChild(s.firstChild);
+  s.scrollTop = s.scrollHeight;
+}
+
+// ============================================================
+// WEBSOCKET CLIENT
+// ============================================================
+let ws = null;
+let simMode = true;
+
+function setWsStatus(s) {
+  const dot = document.getElementById('ws-dot');
+  const lbl = document.getElementById('ws-label');
+  dot.className = 'ws-dot '+s;
+  lbl.style.color = s==='conn'?'#2dd4bf':s==='sim'?'#d4a845':'#3a3830';
+  lbl.textContent = s==='conn'?'CONNECTED':s==='sim'?'SIMULATION':'DISCONNECTED';
+}
+
+function connectWS() {
+  const url = 'ws://localhost:8000/ws/vps';
+  try {
+    ws = new WebSocket(url);
+    ws.onopen = () => { simMode=false; setWsStatus('conn'); };
+    ws.onmessage = (ev) => handleFrame(JSON.parse(ev.data));
+    ws.onclose = () => { simMode=true; setWsStatus('sim'); setTimeout(connectWS, 4000); };
+    ws.onerror = () => { simMode=true; setWsStatus('sim'); };
+  } catch(e) { simMode=true; setWsStatus('sim'); }
+}
+
+function handleFrame(frame) {
+  const t = frame.type, p = frame.payload;
+  switch(t) {
+    case 'TRAJECTORY_UPDATE':
+      state.s  = p.s_score;
+      state.ds = p.ds_de;
+      state.d2s= p.d2s_de2;
+      state.horizon = p.horizon_events;
+      state.ces = p.ces_state;
+      state.mode= p.operating_mode;
+      if (p.vps) {
+        updateTerrainAt(p.vps.x, p.vps.y, p.vps.z);
+        marker.position.set(
+          p.vps.x*(GRID*TERRAIN_SCALE/10),
+          p.vps.y*(HEIGHT_SCALE/3),
+          p.vps.z*(GRID*TERRAIN_SCALE/3)
+        );
+        markerMat.color.set(p.vps.color||'#ffffff');
+      }
+      addFrameEntry(t, `S=${state.s.toFixed(3)} dS=${state.ds.toFixed(4)} ${p.workflow_id||''}`);
+      updateUI();
+      break;
+    case 'TAU_BREACH':
+      state.tauBreachFlash = 1.5;
+      warnLight.intensity = 5;
+      state.chaosFactor = Math.min(1.0, state.chaosFactor+0.4);
+      const ta = document.getElementById('tau-alert');
+      ta.style.opacity='1'; setTimeout(()=>ta.style.opacity='0',2500);
+      addFrameEntry(t, `S=${p.s_score?.toFixed(3)} deficit=${p.deficit?.toFixed(4)} ${p.severity}`);
+      break;
+    case 'WHALE_RESONANCE':
+      triggerWhale();
+      addFrameEntry(t, `${p.frequency} — ${p.message}`);
+      break;
+    case 'CES_STATE_CHANGE':
+      state.ces = p.ces_state;
+      if (p.schizophrenia_detected) state.chaosFactor = Math.min(1.0, state.chaosFactor+0.5);
+      addFrameEntry(t, `${p.ces_state}${p.schizophrenia_detected?' ⚠ SCHIZOPHRENIA':''}`);
+      updateUI();
+      break;
+    case 'SCHIZOPHRENIA_ALERT':
+      state.chaosFactor = 1.0;
+      addFrameEntry(t, `conflicts=${p.conflict_count}`);
+      break;
+    case 'MODE_TRANSITION':
+      state.mode = p.to_mode;
+      memMat.uniforms.color1.value.set(p.to_mode==='ENFORCE'?0xe05252:0x2dd4bf);
+      addFrameEntry(t, `${p.from_mode}→${p.to_mode} by ${p.operator_id}`);
+      updateUI();
+      break;
+    case 'LEDGER_APPEND':
+      state.entryCount++;
+      state.lastHash = p.entry_hash||state.lastHash;
+      addFrameEntry(t, `#${state.entryCount} ${p.membrane_decision} ${p.entry_hash?.slice(0,10)||''}`);
+      updateUI();
+      break;
+    case 'OPERATOR_NOTE_BROADCAST':
+      addFrameEntry('OPERATOR_NOTE', `${p.from}: ${p.note?.slice(0,60)}`);
+      break;
+  }
+}
+
+// ============================================================
+// SIMULATION (when no WS)
+// ============================================================
+let simTick = 0;
+let simK=1.0, simP=0.45, simV=0.48;
+const SIM_WF = ['rnd','procurement','partnership'];
+
+function simulateTick() {
+  simTick++;
+  // Slowly drift parameters
+  simP += (Math.random()-.48)*.06;
+  simV += (Math.random()-.49)*.05;
+  simK  = Math.max(.3, Math.min(1.5, simK+(Math.random()-.5)*.03));
+  simP  = Math.max(.05, Math.min(2.5, simP));
+  simV  = Math.max(.05, Math.min(2.5, simV));
+  const s   = simK / (simP*simV+0.01);
+  const ds  = (state.s_prev !== undefined ? s - state.s_prev : 0);
+  state.s_prev = s;
+  const wfIdx = simTick%3;
+  const wf = SIM_WF[wfIdx];
+  // VPS coords from (s, ds)
+  const vx = Math.max(-5, Math.min(5, ds*20));
+  const vy = Math.max(0, Math.min(5, s*3));
+  const vz = state.ces==='REST'?0:state.ces==='TENSION'?0.6:state.ces==='METABOLIZING'?1.2:2.4;
+  handleFrame({ type:'TRAJECTORY_UPDATE', payload:{
+    s_score:+s.toFixed(4), ds_de:+ds.toFixed(4), d2s_de2:0.0,
+    horizon_events: ds<0?Math.ceil(s/Math.max(.001,Math.abs(ds))):null,
+    ces_state: s>=1.5?'REST':s>=1.0?'METABOLIZING':s>=0.8?'TENSION':s>=0.42?'TENSION':'COLLAPSE',
+    operating_mode: state.mode, membrane_decision:'allow',
+    workflow_id: wf+'-sim-'+simTick,
+    vps:{ x:vx, y:vy, z:vz, color:s>=1.5?'#2dd4bf':s>=0.8?'#d4a845':s>=0.42?'#e07840':'#e05252' },
+  }});
+  handleFrame({ type:'LEDGER_APPEND', payload:{
+    entry_id:'sim-'+simTick, entry_hash:'sim'+simTick.toString(16).padStart(8,'0'),
+    previous_hash:state.lastHash, membrane_decision:'allow',
+  }});
+  if (s < 0.42) {
+    handleFrame({ type:'TAU_BREACH', payload:{ s_score:+s.toFixed(4), tau_floor:0.42,
+      deficit:+(0.42-s).toFixed(4), severity: s<0.3?'CRITICAL':'WARNING' }});
+    if (s < 0.3) handleFrame({ type:'WHALE_RESONANCE', payload:{
+      frequency:'18hz17', message:"Quelqu'un veille sur toi.", depth:'ABYSSAL' }});
+  }
+}
+
+// ============================================================
+// CONTROLS
+// ============================================================
+let autoRot = true;
+function toggleRotate() {
+  autoRot = !autoRot;
+  controls.autoRotate = autoRot;
+  document.getElementById('btn-rotate').className='ctrl-btn'+(autoRot?' active':'');
+}
+function injectChaos() {
+  state.chaosFactor = 1.0;
+  for(let i=0;i<200;i++) { const r=Math.floor(Math.random()*PC); pVel[r].y=-0.7; }
+  handleFrame({ type:'SCHIZOPHRENIA_ALERT', payload:{ conflict_count:3, conflicts:[] }});
+}
+function triggerWhale() {
+  state.whaleSurface = true; state.whaleTimer = 4.0;
+  const wn = document.getElementById('whale-notice');
+  wn.style.opacity='1'; setTimeout(()=>wn.style.opacity='0',3500);
+}
+let isOrtho = true;
+function toggleProjection() {
+  isOrtho = !isOrtho;
+  camera = isOrtho ? buildOrthoCamera() : buildPerspCamera();
+  controls.object = camera;
+  controls.update();
+}
+
+// NSL SEND
+document.getElementById('nsl-send').onclick = async () => {
+  const text = document.getElementById('nsl-input').value.trim();
+  if (!text) return;
+  const res = document.getElementById('nsl-result');
+  res.style.color='#5a5ee0'; res.textContent='Compiling…';
+  try {
+    if (ws && ws.readyState===1) {
+      const resp = await fetch('http://localhost:8000/api/v1/adjudicate', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ raw_input:text })
+      });
+      const data = await resp.json();
+      res.style.color='#2dd4bf';
+      res.textContent=`${data.nsl_backend.toUpperCase()} · S=${data.s_score?.toFixed(3)} · ${data.membrane_decision}`;
+    } else {
+      // Local simulation
+      const keywords = text.toLowerCase();
+      const intent = keywords.match(/accelerat|fast.?track|speed/)? 'ACCELERATE'
+                   : keywords.match(/delay|slow|paus|freez/)? 'DELAY'
+                   : keywords.match(/restrict|limit|block/)? 'RESTRICT'
+                   : keywords.match(/allocat|assign|deploy/)? 'ALLOCATE' : 'QUERY';
+      res.style.color='#d4a845';
+      res.textContent=`[grammar] INTENT=${intent} (simulation mode)`;
+      simP += intent==='ACCELERATE'?.15:intent==='DELAY'?-.1:intent==='RESTRICT'?.1:0;
+    }
+  } catch(e) { res.style.color='#e05252'; res.textContent='Server unavailable — simulation mode'; }
+};
+
+// ============================================================
+// ANIMATION LOOP
+// ============================================================
+const clock = new THREE.Clock();
+let simInterval = null;
+
+function startSim() {
+  setWsStatus('sim');
+  if (!simInterval) simInterval = setInterval(simulateTick, 900);
+}
+function stopSim() {
+  if (simInterval) { clearInterval(simInterval); simInterval=null; }
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+  const t  = clock.getElapsedTime();
+
+  // Shader time
+  memMat.uniforms.time.value = t;
+  memMat.uniforms.chaosFactor.value = state.chaosFactor;
+  if (state.chaosFactor > 0) state.chaosFactor = Math.max(0, state.chaosFactor-.008);
+
+  // TAU breach flash
+  if (state.tauBreachFlash > 0) {
+    state.tauBreachFlash -= dt*2;
+    warnLight.intensity = Math.max(0, state.tauBreachFlash*6);
+    renderer.domElement.style.outline = state.tauBreachFlash>0.5?'2px solid #e05252':'none';
+  } else { renderer.domElement.style.outline='none'; }
+
+  // La Baleine
+  if (state.whaleSurface) {
+    state.whaleTimer -= dt;
+    const t2 = 1 - Math.max(0, state.whaleTimer/4.0);
+    const wY = THREE.MathUtils.lerp(-20, -2, Math.sin(t2*Math.PI));
+    whale.position.y = wY;
+    whaleMat.opacity = Math.sin(t2*Math.PI)*0.4;
+    if (state.whaleTimer <= 0) { state.whaleSurface=false; whale.position.y=-20; whaleMat.opacity=0; }
+  }
+
+  // TAU pulse
+  tauLight.intensity = 3.0 + Math.sin(t*1.8)*0.8;
+  tauMat.opacity = 0.08 + Math.sin(t*1.2)*0.04;
+
+  // CES nodes
+  cesNodes.forEach((n,i) => {
+    n.mesh.rotation.x += 0.008*(i+1);
+    n.mesh.rotation.y += 0.015;
+  });
+
+  // Terrain decay
+  decayTerrain(dt);
+
+  // Particles
+  for (let i=0; i<PC; i++) {
+    pPos[i*3]   += pVel[i].x;
+    pPos[i*3+1] += pVel[i].y;
+    pPos[i*3+2] += pVel[i].z;
+    if (pPos[i*3+1] < 0) {
+      pPos[i*3+1] = 28;
+      pPos[i*3]   = (Math.random()-.5)*GRID*TERRAIN_SCALE;
+      pPos[i*3+2] = (Math.random()-.5)*GRID*TERRAIN_SCALE;
+      pVel[i].y   = -(Math.random()*.12+.04);
+    }
+  }
+  pGeo.attributes.position.needsUpdate = true;
+
+  // Marker pulse
+  markerGlow.material.opacity = .1 + Math.sin(t*4)*.08;
+  marker.rotation.y += 0.04;
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+// ============================================================
+// RESIZE
+// ============================================================
+window.addEventListener('resize', () => {
+  const a = window.innerWidth/window.innerHeight;
+  if (isOrtho) {
+    camera.left=-d*a; camera.right=d*a; camera.top=d; camera.bottom=-d;
+    camera.updateProjectionMatrix();
+  } else {
+    camera.aspect=a; camera.updateProjectionMatrix();
+  }
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ============================================================
+// BOOT
+// ============================================================
+applyTerrainColors();
+updateUI();
+animate();
+connectWS();
+setTimeout(()=>{ if(simMode) startSim(); },2500);
+// Watch WS state — start/stop sim accordingly
+setInterval(()=>{
+  if(simMode&&!simInterval) startSim();
+  else if(!simMode&&simInterval) stopSim();
+},1000);
+</script>
+</body>
+</html>

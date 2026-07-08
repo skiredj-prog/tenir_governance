@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tenir.local/schemas/tenir_estate_layer_digest.schema.json",
+  "title": "Tenir Estate Layer Digest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "Schema_Version",
+    "Digest_Kind",
+    "Layer_Id",
+    "Layer_Name",
+    "Layer_Type",
+    "Layer_Order",
+    "Role",
+    "Authority_Status",
+    "Current_State",
+    "Abstraction_Level",
+    "Summary",
+    "Governed_Paths",
+    "Top_Contradictions",
+    "Current_Ask",
+    "Evidence_Anchor",
+    "Last_Review_Date",
+    "Steward"
+  ],
+  "properties": {
+    "Schema_Version": {
+      "type": "string",
+      "const": "v1"
+    },
+    "Digest_Kind": {
+      "type": "string",
+      "const": "layer_digest"
+    },
+    "Layer_Id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "Layer_Name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "Layer_Type": {
+      "type": "string",
+      "enum": [
+        "depth_layer",
+        "side_plane"
+      ]
+    },
+    "Layer_Order": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "Role": {
+      "type": "string",
+      "minLength": 1
+    },
+    "Authority_Status": {
+      "type": "string",
+      "enum": [
+        "authoritative",
+        "constraining",
+        "derived",
+        "downstream",
+        "parallel",
+        "archival",
+        "mixed",
+        "pending_intake"
+      ]
+    },
+    "Current_State": {
+      "type": "string",
+      "enum": [
+        "forming",
+        "active",
+        "stable",
+        "partial",
+        "blocked",
+        "stale",
+        "superseded",
+        "archival",
+        "pending_ratification",
+        "pending_intake"
+      ]
+    },
+    "Abstraction_Level": {
+      "type": "string",
+      "enum": [
+        "very_high",
+        "high",
+        "medium",
+        "low",
+        "heart"
+      ]
+    },
+    "Summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "Governed_Paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "Top_Contradictions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "Current_Ask": {
+      "type": "string",
+      "minLength": 1
+    },
+    "Evidence_Anchor": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "Label",
+          "Path",
+          "Kind"
+        ],
+        "properties": {
+          "Label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "Path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "Kind": {
+            "type": "string",
+            "enum": [
+              "doc",
+              "schema",
+              "state",
+              "review",
+              "artifact",
+              "release_plane"
+            ]
+          }
+        }
+      }
+    },
+    "Last_Review_Date": {
+      "type": "string",
+      "format": "date"
+    },
+    "Next_Review_Date": {
+      "type": "string",
+      "format": "date"
+    },
+    "Health_Signal": {
+      "type": "string"
+    },
+    "Next_Decision": {
+      "type": "string"
+    },
+    "Admissibility_Note": {
+      "type": "string"
+    },
+    "Deeper_Authority_Path": {
+      "type": "string"
+    },
+    "Related_Layer_Ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "Steward": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "Name",
+        "Role"
+      ],
+      "properties": {
+        "Name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "Role": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

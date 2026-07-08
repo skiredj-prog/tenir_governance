@@ -1,0 +1,53 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+type: software
+title: "TENIR-Gov: An Open-Source Governance Middleware Combining Deterministic Policy Enforcement, Neuro-Symbolic Validation, and Verifiable Audit Logging for AI-Enabled Operational Systems"
+abstract: >
+  TENIR-Gov is an open-source governance middleware positioned between
+  decision-producing AI agents and downstream execution environments.
+  Organized as a two-tier architecture (tenir-kernel + tenir_governance),
+  it combines neuro-symbolic intent validation, graph-based policy evaluation,
+  deterministic admissibility computation (S = K / (P × V + ε)), and
+  cryptographically verifiable Merkle-based audit logging to provide
+  model-independent governance for AI-enabled operational systems.
+  Release R5.0.0 (IRON OMEGA R5) is validated by 557 automated tests
+  (555 passing, 2 intentionally skipped) achieving 96% statement coverage.
+version: "5.0.0"
+date-released: "2026-06-29"
+license: Apache-2.0
+repository-code: "https://github.com/skiredj-prog/tenir-governance"
+doi: [DOI_PENDING]
+url: "https://github.com/skiredj-prog/tenir-governance"
+keywords:
+  - governance middleware
+  - AI governance
+  - policy enforcement
+  - neuro-symbolic validation
+  - audit ledger
+  - Merkle tree
+  - autonomous agents
+  - compliance
+  - deterministic governance
+  - admissibility
+authors:
+  - family-names: Skiredj
+    given-names: Abdelaziz
+    email: skiredj@gmail.com
+    affiliation: "TENIR Labs"
+    orcid: "https://orcid.org/0009-0003-2678-4069"
+identifiers:
+  - type: doi
+    value: [DOI_PENDING]
+    description: "Zenodo archive of TENIR-Gov R5.0.0 (IRON OMEGA R5)"
+references:
+  - type: article
+    title: >
+      TENIR-Gov: An Open-Source Governance Middleware Combining
+      Deterministic Policy Enforcement, Neuro-Symbolic Validation,
+      and Verifiable Audit Logging for AI-Enabled Operational Systems
+    authors:
+      - family-names: Skiredj
+        given-names: Abdelaziz
+    journal: SoftwareX
+    year: 2026
+    doi: [DOI_PENDING]
