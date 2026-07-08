@@ -15,9 +15,9 @@ abstract: >
 version: "5.0.0"
 date-released: "2026-06-29"
 license: Apache-2.0
-repository-code: "https://github.com/skiredj-prog/tenir-governance"
+repository-code: "https://github.com/skiredj-prog/tenir_governance"
 doi: [DOI_PENDING]
-url: "https://github.com/skiredj-prog/tenir-governance"
+url: "https://github.com/skiredj-prog/tenir_governance"
 keywords:
   - governance middleware
   - AI governance

@@ -32,10 +32,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage      = "https://github.com/skiredj-prog/tenir-governance"
-Repository    = "https://github.com/skiredj-prog/tenir-governance"
-Documentation = "https://github.com/skiredj-prog/tenir-governance#readme"
-"Bug Tracker" = "https://github.com/skiredj-prog/tenir-governance/issues"
+Homepage      = "https://github.com/skiredj-prog/tenir_governance"
+Repository    = "https://github.com/skiredj-prog/tenir_governance"
+Documentation = "https://github.com/skiredj-prog/tenir_governance#readme"
+"Bug Tracker" = "https://github.com/skiredj-prog/tenir_governance/issues"
 DOI           = "https://doi.org/[DOI_PENDING]"
 
 [project.scripts]
