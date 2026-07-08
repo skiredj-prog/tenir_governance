@@ -8,7 +8,7 @@ documentation, or test coverage are especially welcome.
 
 ### Reporting Issues
 
-Please use [GitHub Issues](https://github.com/skiredj-prog/tenir_governance/issues) for:
+Please use [GitHub Issues](https://github.com/skiredj-prog/tenir-gov/issues) for:
 - Bug reports (include Python version, OS, and the full traceback)
 - Reproducibility failures (include the docker compose or pytest command used)
 - Documentation gaps or inaccuracies

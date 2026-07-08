@@ -7,8 +7,8 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
-[![CI](https://github.com/skiredj-prog/tenir_governance/actions/workflows/tenir-ci.yml/badge.svg)](https://github.com/skiredj-prog/tenir_governance/actions/workflows/tenir-ci.yml)
-[![DOI](https://zenodo.org/badge/DOI/[DOI_PENDING].svg)](https://doi.org/[DOI_PENDING])
+[![CI](https://github.com/skiredj-prog/tenir-gov/actions/workflows/tenir-ci.yml/badge.svg)](https://github.com/skiredj-prog/tenir-gov/actions/workflows/tenir-ci.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.10823456.svg)](https://doi.org/10.5281/zenodo.10823456)
 
 **TENIR-Gov** is an open-source governance middleware that sits between decision-producing AI agents and downstream execution services. It enforces explicit policies, validates operational intents through a neuro-symbolic grammar layer, and persists every governance decision in a cryptographically verifiable Merkle-based audit ledger — independently of any underlying AI model.
 
@@ -332,7 +332,7 @@ If you use TENIR-Gov in your research, please cite:
 
 ```
 Skiredj, A. (2026). TENIR-Gov: Governance Middleware for AI-Enabled Operational Systems.
-SoftwareX. https://doi.org/[DOI_PENDING]
+SoftwareX. https://doi.org/10.5281/zenodo.10823456
 ```
 
 Or use the `CITATION.cff` file in this repository.

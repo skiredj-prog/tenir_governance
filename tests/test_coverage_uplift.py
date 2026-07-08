@@ -310,7 +310,7 @@ class TestSDKCLI:
             {"pressure": 0.8, "velocity": 0.7, "capacity": 0.5},
         ]
         events_file = tmp_path / "events.json"
-        events_file.write_text(json.dumps(events), encoding="utf-8")
+        events_file.write_text(json.dumps(events, encoding="utf-8"))
         monkeypatch.setattr(sys, "argv", ["tenir-sdk", "--events", str(events_file)])
         main()
         out = capsys.readouterr().out
@@ -321,7 +321,7 @@ class TestSDKCLI:
         from tenir_governance.sdk import main
         events = [{"pressure": 0.4, "velocity": 0.4, "capacity": 1.0}]
         events_file = tmp_path / "events.json"
-        events_file.write_text(json.dumps(events), encoding="utf-8")
+        events_file.write_text(json.dumps(events, encoding="utf-8"))
         monkeypatch.setattr(sys, "argv", ["tenir-sdk", "--events", str(events_file), "--business"])
         main()
         out = capsys.readouterr().out
@@ -512,7 +512,7 @@ class TestValidatorCLI:
         chain_hash = hashlib.sha256(f"GENESIS|{clean}".encode()).hexdigest()
         entry = {"previous_hash": "GENESIS", "chain_hash": chain_hash,
                  "timestamp": "2026-01-01T00:00:00Z", "payload": payload}
-        ledger_file.write_text(_json.dumps(entry) + "\n", encoding="utf-8")
+        ledger_file.write_text(_json.dumps(entry, encoding="utf-8") + "\n")
         rc = main(["--ledger", str(ledger_file)])
         assert rc == 0
 
