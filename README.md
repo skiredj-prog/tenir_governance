@@ -1,10 +1,3 @@
-Here are four revised public-facing artifacts, rebuilt strictly from the positioning strategy. Every claim is §7-qualified or removed. "Gateway" has been eliminated entirely. "Control Plane" is the lead category. "Fail-closed by design" replaces "un-bypassable." The DOI is corrected throughout.
-
----
-
-Artifact 1: README.md (Commit-Ready)
-
-```markdown
 # TENIR-Gov · The Execution Control Plane for Agentic AI
 
 > **It decides whether what AI wants to do is allowed to become real.**
