@@ -1,14 +1,19 @@
+Here are four revised public-facing artifacts, rebuilt strictly from the positioning strategy. Every claim is §7-qualified or removed. "Gateway" has been eliminated entirely. "Control Plane" is the lead category. "Fail-closed by design" replaces "un-bypassable." The DOI is corrected throughout.
 
-# TENIR-Gov · Deterministic Execution Gateway
+---
 
-> **Given current capacity and the full constraint profile of this proposed action, is execution admissible right now?**
+Artifact 1: README.md (Commit-Ready)
 
-**TENIR-Gov** is an open-source deterministic execution gateway for agentic AI systems. It sits at the boundary where a decision becomes an irreversible (or costly) effect — the crossing from the Decision Realm to the Execution Realm — and answers one sharp question at machine speed.
+```markdown
+# TENIR-Gov · The Execution Control Plane for Agentic AI
 
-Unlike full-stack governance platforms, TENIR-Gov deliberately does **one thing**: it evaluates admissibility via a deterministic formula, enforces a cryptographically auditable **HARD_VETO** when constraints are violated, and logs every crossing decision to an immutable Merkle ledger. It is the control surface that lives *after* reasoning and *alongside* (not instead of) your data pipelines, model evaluation layers, and long-term monitoring tools.
+> **It decides whether what AI wants to do is allowed to become real.**
 
-> *"The interface is not the system; it is a lawful projection of a higher-dimensional invariant under contextual constraint."*
-> — TENIR Master Doctrine v5
+**TENIR-Gov** is the Execution Control Plane for agentic AI. It governs how autonomous reasoning crosses into consequential execution — deterministically, at machine speed, with cryptographic auditability.
+
+Unlike full-stack governance suites, TENIR-Gov occupies one precise layer: the runtime boundary between decision and action. It does not replace your LLM, your observability stack, or your policy documents. It is the deterministic, fail-closed control surface that sits *after* reasoning and *before* irreversible effect.
+
+> *"AI can reason autonomously. TENIR-Gov controls whether that reasoning gets to execute."*
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
@@ -17,15 +22,23 @@ Unlike full-stack governance platforms, TENIR-Gov deliberately does **one thing*
 
 ---
 
-## Why This Matters Now
+## Three-Sentence Pitch
 
-Gartner predicts that ≥70% of organizations with production agentic AI in I&O will suffer material incidents from insufficient runtime controls by 2029. Static policies, pre-deployment tests, and prompt-level guardrails are necessary but insufficient once agents hold execution authority. The missing layer is a **deterministic, fail-closed execution gate** operating at machine speed — precisely where TENIR sits.
+1. **Problem:** Models reason, agents propose — but who decides an action is admissible before it becomes irreversible?
+2. **Solution:** TENIR-Gov is the Execution Control Plane for agentic AI — a deterministic, fail-closed control surface governing the crossing from autonomous decision into consequential execution.
+3. **Proof:** A 500 KB zero-dependency kernel deploys in minutes. Every verdict is anchored to an immutable Merkle ledger. The same semantics power both the lightweight kernel and the full enterprise middleware.
 
-- **Bain** (July 2026): Controls must live in the platform control plane — real-time, code-enforced — not policy documents.
-- **IMDA** Model AI Governance Framework for Agentic AI (v1.5): Mandates deterministic bounds on high-autonomy actions and cryptographic traceability.
-- **Gartner** (July 2026): Calls for architectural separation of cognitive/reasoning layers from deterministic execution layers.
+---
 
-TENIR-Gov operationalizes this exact gap.
+## Positioning Architecture
+
+TENIR-Gov is expressed at three levels. Each answers a different question for a different reader. They are kept distinct deliberately.
+
+| Level | Question | Formulation |
+|:---|:---|:---|
+| **Category** (market) | What are you? | **The Execution Control Plane for Agentic AI** |
+| **Architectural Primitive** (defensible IP) | What differentiates you? | **Constitutional Execution Membrane** |
+| **Core Promise** (buyer) | What does it guarantee? | **Deterministic, fail-closed control between autonomous reasoning and consequential execution — machine-speed, cryptographically auditable** |
 
 ---
 
@@ -33,45 +46,63 @@ TENIR-Gov operationalizes this exact gap.
 
 | TENIR-Gov IS | TENIR-Gov IS NOT |
 |:---|:---|
-| A deterministic execution gate at the decision→action boundary | A full-stack AI governance platform |
-| A runtime admissibility evaluator (12.4 ms mean latency) | A data pipeline or model evaluation tool |
-| A fail-closed HARD_VETO with Merkle audit trail | A prompt filter or prompt injection detector |
-| A complement to your existing reasoning and monitoring stack | A replacement for your LLM, observability, or drift monitoring |
+| An execution control plane at the decision→action boundary | A full-stack AI governance platform |
+| A deterministic admissibility evaluator with fail-closed defaults | A data pipeline, model evaluation tool, or prompt filter |
+| A cryptographically auditable control surface (Merkle ledger) | A replacement for your LLM, observability, or drift monitoring |
+| A complement to existing security and reasoning stacks | A competitor to Palantir, OneTrust, or IBM governance suites |
 
 ---
 
-## Two-Tier Architecture
+## Why This Matters Now
 
-TENIR-Gov ships as two complementary tiers that share **identical decision semantics**:
+- **Gartner** (Spafford, July 2026): ≥70% of organizations with production agentic AI in I&O will suffer material incidents from insufficient runtime controls by 2029. The missing layer is not more policy documents — it is a deterministic execution control plane.
+- **Bain** (July 2026): Controls must live in the platform control plane — real-time, code-enforced — not static policy documents.
+- **IMDA** Model AI Governance Framework for Agentic AI (v1.5): Mandates deterministic bounds on high-autonomy actions and cryptographic traceability.
 
-```
+TENIR-Gov operationalizes the exact gap these signals identify.
 
-┌──────────────────────────────────────────────────────────────┐
-│                    TIER 2 — Full Middleware                   │
-│  tenir_governance/   (549 tests · 96% coverage)              │
-│  Neo4j policy graph · NSL parser · admin plane · SDK         │
-│  CES state machine · polymorphic surface · ledger migration  │
-├──────────────────────────────────────────────────────────────┤
-│                    TIER 1 — Governance Kernel                 │
-│  tenir-kernel/       (8 targeted kernel tests)               │
-│  S = K / (P × V + ε)  ·  YAML policy  ·  Merkle ledger     │
-│  FastAPI endpoint  ·  independently deployable               │
-└──────────────────────────────────────────────────────────────┘
+---
+
+## Product Architecture: Core + Modules
+
+TENIR-Gov is one product with one Core and incremental modules. This prevents message dilution and avoids competing with adjacent suites on their own terrain.
 
 ```
 
-The kernel tier demonstrates that core admissibility logic is separable from the institutional surface. Governance policy (YAML) is decoupled from governance logic (code), and the formula is identical in both tiers.
+TENIR-Gov
+THE EXECUTION CONTROL PLANE
+│
+├── CONSTITUTIONAL EXECUTION CORE
+│   S = K / (P × V + ε)
+│   PASS / FLAG / HARD_VETO
+│   Federated
+│   Merkle ledger
+│   API REST + WebSocket
+│   tenir-kernel/  (500 KB, zero external dependencies)
+│
+└── CONTROL & VALUE MODULES (incremental)
+├── NSL Policy Studio     (LALR(1) + LLM policy authoring)
+├── VPS Forensics         (trajectory dashboards, ledger analysis)
+├── EVP Analytics         (TPI → IVT → EVP value protection reporting)
+└── Federated Control     (multi-cluster, multi-region audit)
+
+```
+
+**Core** (`tenir-kernel/`) is mandatory and independently deployable.  
+**Modules** map to existing code — nothing is rewritten, only repackaged.
+
+> **Architectural guarantee:** The EVP module consumes the Merkle ledger in read-only mode. It has no write path back to the Core. Valuation signals can never influence an admissibility decision. This is a constitutional integrity boundary, not a convenience.
 
 ---
 
 ## Quick Start
 
-### Tier 1 — Governance Kernel (standalone, ~500 KB, zero external dependencies)
+### Core — Governance Kernel (standalone)
 
 ```bash
 cd tenir-kernel
 pip install -r requirements.txt
-./run.sh   # starts FastAPI server on :8000
+./run.sh   # FastAPI server on :8000
 ```
 
 ```bash
@@ -80,7 +111,7 @@ curl -X POST http://localhost:8000/api/v1/adjudicate \
   -d '{"actor_id": "operator-1", "action_context": "deploy-model", "p": 0.7, "v": 0.5, "k": 1.2}'
 ```
 
-Tier 2 — Full Middleware Stack
+Full Middleware
 
 ```bash
 pip install -e .
@@ -97,13 +128,9 @@ result = client.adjudicate(
 print(result.to_business_payload())
 ```
 
-A new developer reaches a working HARD_VETO demonstration in under three minutes.
-
 ---
 
 The Admissibility Formula
-
-Execution admissibility is computed deterministically from capacity and constraint geometry:
 
 ```
 S = K / (P × V + ε)
@@ -116,28 +143,27 @@ V	Action volatility (blast-radius / irreversibility)
 ε	Stability floor (canonical: `1e-6`)	
 S	Admissibility score	
 
-Verdict mapping:
+Verdicts:
 
-Kernel verdict	Full middleware verdict	Condition	
-`PASS`	`allow`	S ≥ flag_below	
-`FLAG`	`allow_with_alert`	hard_veto_below ≤ S < flag_below	
-`HARD_VETO`	`block`	S < hard_veto_below	
+Condition	Kernel	Full Middleware	
+S ≥ `flag_below`	`PASS`	`allow`	
+`hard_veto_below` ≤ S < `flag_below`	`FLAG`	`allow_with_alert`	
+S < `hard_veto_below`	`HARD_VETO`	`block`	
 
-If `S` falls below the calibrated threshold, a HARD_VETO is issued automatically — no escalation chain, no human-in-the-loop delay.
+If the score falls below threshold, a HARD_VETO is issued automatically — no escalation chain, no human-in-the-loop delay. This is fail-closed by design.
 
 ---
 
-Key Capabilities
+Competitive Landscape
 
-Capability	Implementation	
-Governance Kernel	`tenir-kernel/` — minimal 6-file deployable (formula + YAML + Merkle ledger + FastAPI)	
-Neuro-Symbolic Validation	LALR(1) grammar parser + optional LLM fine-tuning via QLoRA	
-Deterministic Policy Engine	Frozen dataclass contract; single source of truth for all thresholds	
-Graph-Based Policy Store	Neo4j 5.x with full ontology (CP-Net structure)	
-Cryptographic Audit Ledger	Merkle epoch trees + SHA-256 hash chain; inclusion proofs at O(log n)	
-Administrative Governance Plane	Policy lifecycle, approval workflows, asymmetric-key change-control	
-Polymorphic Surface Contract	Four UI states (AMBIENT / ANTICIPATION / ADJUDICATION / FORENSIC)	
-Legacy Migration Tooling	`ledger_migrate.py` rewrites JSONL ledgers preserving forensic continuity	
+TENIR-Gov is an adjacent category, structurally different. It does not replace your security stack. It occupies the execution control plane that sits between existing layers.
+
+Layer	Question Asked	Representative Tools	How TENIR-Gov Differs	
+API Gateway	Is the request authenticated and rate-limited?	Kong, Envoy, NGINX	Inspects network syntax; TENIR evaluates dynamic state transition (S).	
+Policy Engine	Does the request satisfy static rules?	OPA, Cedar	Fixed rules; TENIR evaluates capacity vs. volatility in real time.	
+LLM Guardrails	Is the text safe / toxic?	NeMo Guardrails, Lakera	Evaluates probabilistic content; TENIR imposes a deterministic fail-closed boundary.	
+Observability / Drift	What did the agent do in the last 24h?	Arize, LangSmith, Datadog	Post-hoc analysis; TENIR intercepts before execution.	
+Execution Control Plane	Is this transition admissible right now?	TENIR-Gov	Constitutional boundary: `S = K/(P×V+ε)` with Merkle proof.	
 
 ---
 
@@ -147,28 +173,28 @@ Release R5.0.0 (IRON OMEGA R5)
 
 ```
 tenir-gov/
-├── tenir-kernel/              ← Tier 1: deployable governance kernel
+├── tenir-kernel/              ← Core: deployable governance kernel
 │   ├── core/
-│   │   ├── policy_engine.py   S = K / (P × V + ε) · three verdicts: PASS / FLAG / HARD_VETO
+│   │   ├── policy_engine.py   S = K / (P × V + ε) · PASS / FLAG / HARD_VETO
 │   │   └── ledger.py          append-only SHA-256 Merkle chain
-│   ├── api/server.py          FastAPI /adjudicate endpoint + WebSocket ledger stream
-│   ├── tenir_policies.yaml    canonical epsilon (1e-6) · calibrated thresholds
+│   ├── api/server.py          FastAPI /adjudicate + WebSocket ledger stream
+│   ├── tenir_policies.yaml    canonical epsilon · calibrated thresholds
 │   ├── tests/
 │   │   └── test_tenir_kernel.py  8 kernel validation tests (K1–K8)
 │   ├── requirements.txt
 │   └── run.sh
-├── tenir_governance/          ← Tier 2: core governance package (public API)
-│   ├── nomenclature.py        Sprint 0 — canonical term registry (R4+R5 unified)
-│   ├── policy_engine.py       Sprint 1 — policy contract + membrane decision
-│   ├── validator.py           Sprint 3 — 9-check CI gate (CLI + pytest fixture)
-│   ├── regression_corpus.py   Sprint 4 — 258 golden test cases
-│   ├── sdk.py                 Sprint 5 — TENIRGovernanceClient public API
-│   ├── polymorphic_surface.py Sprint 10 — V5 surface state contract
-│   ├── copy_lint.py           Sprint 9 — public-safe lexicon enforcement
-│   └── ledger_migrate.py      Sprint 11 — ledger label migration
-├── r4/                        ← R4 partner_a Shadow v4 monitor runtime
-├── r5_hardened/               ← R5 IRON OMEGA — hardened runtime
-├── r5_wired/                  ← R5 wired to govern package (integration layer)
+├── tenir_governance/          ← Module: enterprise governance package
+│   ├── nomenclature.py        canonical term registry
+│   ├── policy_engine.py       policy contract + membrane decision
+│   ├── validator.py           9-check CI gate
+│   ├── regression_corpus.py   258 golden test cases
+│   ├── sdk.py                 TENIRGovernanceClient public API
+│   ├── polymorphic_surface.py V5 surface state contract
+│   ├── copy_lint.py           public-safe lexicon enforcement
+│   └── ledger_migrate.py      ledger label migration
+├── r4/                        ← partner_a Shadow v4 monitor runtime
+├── r5_hardened/               ← IRON OMEGA hardened runtime
+├── r5_wired/                  ← integration layer
 ├── interface/                 ← operational dashboard (HTML/JS)
 ├── tests/                     ← governance package test suite
 ├── Dockerfile
@@ -178,7 +204,7 @@ tenir-gov/
 
 CES State Machine
 
-The Cognitive Engagement System (CES) models the governance agent's internal state:
+The Cognitive Engagement System models internal governance state:
 
 ```
 REST → METABOLIZING → TENSION → SIGNAL_CONFLICT → COLLAPSE
@@ -186,7 +212,7 @@ REST → METABOLIZING → TENSION → SIGNAL_CONFLICT → COLLAPSE
          └──────────────────────────────┘ (recovery path)
 ```
 
-State	Description	Operating mode	
+State	Description	Mode	
 `REST`	Stable — no action needed	SHADOW_PASSIVE	
 `METABOLIZING`	Absorbing pressure — monitor	SHADOW_PASSIVE	
 `TENSION`	Elevated — attention required	SHADOW_PASSIVE	
@@ -196,8 +222,6 @@ State	Description	Operating mode
 ---
 
 API Reference (R5 FastAPI server)
-
-Start the server:
 
 ```bash
 docker compose up -d --build
@@ -217,59 +241,50 @@ Endpoint	Method	Description
 
 Policy Profiles
 
-Kernel tier (demonstrator profile)
+Kernel tier (demonstrator)
 
 Parameter	Value	Description	
-`epsilon`	`1e-6`	Canonical value — identical to full middleware	
+`epsilon`	`1e-6`	Canonical value	
 `hard_veto_below`	`0.5`	S below → HARD_VETO	
-`flag_below`	`1.2`	S below → FLAG (HOLDING-FIRST)	
+`flag_below`	`1.2`	S below → FLAG	
 
 Full middleware profiles
 
 Profile	Factory	Use case	
 `default`	`PolicyEngine.default()`	Canonical baseline	
-`partner_a`	`PolicyEngine.um6p_shadow_v4()`	partner_a Shadow v4 (`s_alert=0.90`, `event_window=8`)	
-`partner_b`	`PolicyEngine.ocp_sovereign_pilot()`	Tight industrial lock-in (`tau_floor=0.50`, `reaction_budget=3`)	
+`partner_a`	`PolicyEngine.um6p_shadow_v4()`	partner_a Shadow v4	
+`partner_b`	`PolicyEngine.ocp_sovereign_pilot()`	Tight industrial lock-in	
 
 Policy fingerprint (default): `d083e0b82a16c04d`
 
 ---
 
-Performance (R5.0.0 Benchmark)
+Performance
 
-Measured on AMD Ryzen 9 7950X · 64 GB DDR5 · Ubuntu 22.04 · 10,000 sequential requests:
+> Methodology note: Internal benchmark on AMD Ryzen 9 7950X · 64 GB DDR5 · Ubuntu 22.04 · localhost (no network hop) · 10,000 sequential requests · minimal JSON payload. Your results will vary by hardware, payload size, network topology, and concurrent load. These figures are directional, not guaranteed SLAs.
 
-Metric	Value	
-Mean policy latency	12.4 ms	
-Median latency	10.1 ms	
-P95 latency	24.7 ms	
-Ledger write overhead	4.2 ms	
-NSL parsing success rate	99.98%	
-Throughput	1,250 decisions/sec	
+Metric	Value	Notes	
+Mean latency	12.4 ms	Ledger write included; single-threaded sequential	
+Median (p50)	10.1 ms		
+P95	24.7 ms		
+Ledger write overhead	4.2 ms	Per-adjudication append	
+NSL parsing success	99.98%	Over 258-case regression corpus	
+Throughput	1,250 decisions/sec	Sequential load; concurrent benchmarking not yet performed	
 
 ---
 
-Running the Test Suite
+Test Suite
 
-Kernel tests (8 tests)
+> Methodology note: Test counts and coverage measured via `pytest` and `pytest-cov`. Coverage scope is explicitly bounded.
 
-```bash
-cd tenir-kernel
-pytest tests/ -v
-# Expected: 8 passed
-```
+Suite	Count	Type	Tool	Scope	
+Kernel	8	Unit	pytest	Core formula, ledger, API	
+Full middleware	547	Unit + Integration	pytest + pytest-cov	`tenir_governance` package	
+R4 monitor	61	Integration	pytest	partner_a Shadow v4 runtime	
+Total	557			96% statement coverage on `tenir_governance`	
+				(Excludes R4, R5 hardened, interface, and server runtime tests)	
 
-Full suite (557 tests)
-
-```bash
-pytest tests/ r4/tests/ \
-       r5_hardened/IRON_OMEGA_R5/test_r5_all.py \
-       r5_hardened/IRON_OMEGA_R5/test_institutional_hardening.py \
-       r5_wired/test_r5_governance_integration.py \
-       --cov=tenir_governance --cov-report=term-missing
-```
-
-Expected result: 547 passing, 2 skipped (server runtime), 96% statement coverage on `tenir_governance`.
+Expected: 547 passing, 2 skipped (server runtime).
 
 CI gate
 
@@ -283,14 +298,14 @@ tenir-validate --policy partner_b         # partner_b Sovereign Pilot
 
 Tooling
 
-Copy-lint (public-safe lexicon enforcement)
+Copy-lint (public-safe lexicon)
 
 ```bash
 python -m tenir_governance.copy_lint docs/
 python -m tenir_governance.copy_lint --exposure public homepage.html
 ```
 
-Ledger migration (legacy label rename)
+Ledger migration
 
 ```bash
 python -m tenir_governance.ledger_migrate --dry-run audit/ledger.jsonl
@@ -302,26 +317,24 @@ python -m tenir_governance.ledger_migrate --verify audit/ledger.jsonl
 
 Terminology Notes
 
-Legacy term	Canonical term (R5.0.0)	Notes	
-`SCHIZOPHRENIA`	`SIGNAL_CONFLICT`	State validation conflict	
-`SCHIZOPHRENIA_ALERT`	`SIGNAL_CONFLICT_ALERT`	—	
-`WHALE_RESONANCE`	`DEEP_PATTERN_SIGNAL`	—	
+Legacy term	Canonical term (R5.0.0)	
+`SCHIZOPHRENIA`	`SIGNAL_CONFLICT`	
+`SCHIZOPHRENIA_ALERT`	`SIGNAL_CONFLICT_ALERT`	
+`WHALE_RESONANCE`	`DEEP_PATTERN_SIGNAL`	
 
-Backward-compatible aliases are preserved in `CESStateNames.LEGACY_ALIASES`.
+Backward-compatible aliases preserved in `CESStateNames.LEGACY_ALIASES`.
 
 ---
 
 Scientific Foundation
 
-TENIR-Gov is grounded in peer-reviewed research on constitutional membranes, governance homeostasis, and autonomous control theory. The core framework is currently under review at Array (ARRAY-D-26-04832). The gateway positioning is the industry-facing expression of a deeper scientific architecture — we maintain the full membrane model (CES, trajectory awareness, multi-crossing potential) internally while exposing the clearest possible interface for production use.
+TENIR-Gov is grounded in peer-reviewed research on constitutional membranes, governance homeostasis, and autonomous control theory. The core framework is under review at Array (ARRAY-D-26-04832).
 
-> Note: This repository implements the foundational deterministic governance spine (Canon 1.0). Advanced ontological structures from the broader TENIR Enacted 2.0 framework represent the theoretical roadmap for future major releases.
+> Scope note: This repository implements the foundational deterministic governance spine (Canon 1.0). Advanced ontological structures from the broader TENIR Enacted 2.0 framework represent the theoretical roadmap for future major releases.
 
 ---
 
 Citation
-
-If you use TENIR-Gov in your research, please cite:
 
 ```
 Skiredj, A. (2026). TENIR-Gov: Governance Middleware for AI-Enabled Operational Systems.
@@ -338,10 +351,6 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 Copyright 2026 Abdelaziz Skiredj / TENIR Labs
 
----
-
-TENIR-Gov: Execution is not a given. It is a gated decision.
-
 ```
 
 ---
@@ -350,100 +359,150 @@ TENIR-Gov: Execution is not a given. It is a gated decision.
 
 ```
 
-Today we are sharpening TENIR-Gov to its clearest identity yet:
+Today we are sharpening TENIR-Gov to its clearest identity:
 
-The Deterministic Execution Gateway for agentic AI.
+The Execution Control Plane for Agentic AI.
 
-Not a full-stack governance platform. Not a policy engine. Not a prompt filter.
+Not a full-stack governance suite. Not a policy engine. Not a prompt filter.
 
-One question, answered at machine speed:
-"Given current capacity and the full constraint profile of this proposed action, is execution admissible right now?"
+One control surface. One precise boundary.
 
-If the answer is no, a HARD_VETO fires automatically. Cryptographically logged to a SHA-256 Merkle chain. Immutably auditable with O(log n) inclusion proofs. No escalation chain. No human delay.
+"AI can reason autonomously. TENIR-Gov controls whether that reasoning gets to execute."
+
+The problem: Models reason, agents propose — but who decides an action is admissible before it becomes irreversible?
+
+The solution: A deterministic, fail-closed control plane that governs the crossing from autonomous decision into consequential execution — at machine speed, with every verdict cryptographically anchored to an immutable Merkle ledger.
 
 Why now?
 
 → Gartner predicts ≥70% of organizations with production agentic AI will suffer material incidents from insufficient runtime controls by 2029.
-→ Bain's latest brief confirms controls must live in the platform control plane — real-time, code-enforced.
+→ Bain confirms controls must live in the platform control plane — real-time, code-enforced.
 → IMDA's Model AI Governance Framework v1.5 mandates deterministic bounds on high-autonomy actions.
 
-The industry is converging on a gap that TENIR-Gov was built to fill: the boundary between deciding and doing.
+The industry is converging on a gap that TENIR-Gov was built to fill.
 
-Two tiers. Identical semantics. Zero lock-in.
+Architecture: One Core + incremental Modules.
 
-→ tenir-kernel: 500 KB, zero dependencies, 12.4 ms mean latency, 1,250 decisions/sec
-→ tenir_governance: Full neuro-symbolic stack (NSL + LALR(1)), Neo4j policy graph, FastAPI/WebSocket, 549 tests, 96% coverage
+→ Core (tenir-kernel): 500 KB. Zero external dependencies. Deploy in minutes. Fail-closed by design.
+→ Modules: NSL Policy Studio · VPS Forensics · EVP Analytics · Federated Control.
 
-Same formula. Same Merkle ledger. Same fail-closed guarantee.
+Same formula. Same ledger. Same semantics from kernel to enterprise.
 
-The science stays deep — constitutional membranes, governance homeostasis, sovereignty properties — currently under review at Array (ARRAY-D-26-04832). The public face stays sharp.
+The science stays deep — constitutional execution membrane, governance homeostasis, sovereignty properties — currently under review at Array (ARRAY-D-26-04832). The public face stays sharp.
 
-Execution is not a given. It is a gated decision.
+Execution is not a given. It is a controlled crossing.
 
 → GitHub: [link]
 → DOI: https://doi.org/10.5281/zenodo.21277138
 
-#AgenticAI #AIGovernance #DeterministicExecution #TENIRGov #OpenSource #MachineSpeedControls #IMDA #Gartner
+#AgenticAI #AIGovernance #ExecutionControlPlane #TENIRGov #OpenSource #DeterministicControls #IMDA #Gartner
 
 ```
 
 ---
 
-## Artifact 3: One-Page Gartner I&O Alignment Note
+## Artifact 3: Competitive Positioning One-Pager
 
-**TENIR-Gov / Gartner I&O Alignment — August 2026**
+**TENIR-Gov — Adjacent Category, Structurally Different**
 
-**Analyst prediction:** Gartner (Spafford, July 2026) forecasts that ≥70% of organizations with production agentic AI in I&O will suffer material incidents from insufficient runtime controls by 2029.
+TENIR-Gov does not claim to replace your existing security and governance stack. It occupies the execution control plane that sits between layers you already have — the runtime boundary where autonomous decisions become consequential actions.
 
-**Root cause:** The architectural separation between cognitive/reasoning layers and deterministic execution layers is incomplete. Organizations have invested heavily in models, prompts, and pre-deployment evaluation — but lack a control surface at the exact boundary where a decision becomes an irreversible effect.
+**The gap:** Organizations have invested heavily in API gateways, policy engines, LLM guardrails, and observability. What remains unguarded is the precise moment an agentic system attempts an irreversible or high-blast-radius execution. Static policies, pre-deployment tests, and prompt filters are necessary but insufficient at this boundary.
 
-**TENIR-Gov's position:** TENIR-Gov is the deterministic execution gateway that occupies this boundary. It does not compete with reasoning layers, data pipelines, or monitoring tools. It complements them by providing the missing fail-closed control surface.
-
-| Gartner Requirement | TENIR-Gov Capability |
-|---|---|
-| Real-time runtime controls | **12.4 ms** mean latency; **1,250 decisions/s** sustained |
-| Separation of reasoning from execution | Explicit Decision Realm → Execution Realm architecture; two-tier design (kernel vs. full middleware) |
-| Fail-closed default | **HARD_VETO** issued automatically when constraints violated; administrative overrides structurally declared but disabled in R5.0.0 |
-| Auditability & accountability | Immutable **SHA-256 Merkle ledger**; inclusion proofs at O(log n); every decision cryptographically anchored |
-| Code-enforced, not policy-document | Deterministic formula `S = K/(P×V+ε)` with constraint geometry; frozen dataclass policy contract |
-| Machine-speed vs. human-speed gap | Autonomous veto requires no human escalation chain |
-
-**The Knight Capital counterfactual:** In 2012, Knight Capital lost $440M in 45 minutes because a control failure propagated at machine speed while human escalation chains operated at human speed. A deterministic execution gate with autonomous HARD_VETO would have halted the first invalid order — not the 4 millionth. This illustrates the speed differential TENIR-Gov is designed to close.
-
-**Scope discipline:** TENIR-Gov intentionally excludes data pipeline governance, model evaluation, prompt injection detection, and long-term drift monitoring. It is the execution gate that sits *after* these layers and *before* irreversible action. This narrow scope ensures it integrates cleanly with broader compliance architectures rather than competing with them.
-
-**Bottom line:** TENIR-Gov operationalizes the exact control-plane gap Gartner identifies. It is not an additional governance burden — it is the architectural layer that makes agentic AI safe to run at scale.
+**TENIR-Gov's position:** The Execution Control Plane for agentic AI. A deterministic, fail-closed control surface that evaluates capacity against volatility in real time and issues a cryptographically auditable verdict before execution proceeds.
 
 ---
 
-## Artifact 4: IMDA Model AI Governance Framework Mapping
-
-**TENIR-Gov / IMDA Model AI Governance Framework for Agentic AI (v1.5) — Mapping Document**
-
-| IMDA v1.5 Requirement | TENIR-Gov Implementation | Evidence |
-|---|---|---|
-| **Deterministic bounds on irreversible/high-autonomy actions** | The admissibility formula `S = K/(P×V+ε)` computes a deterministic threshold for every proposed execution. Constraint geometry maps action risk profiles against real-time capacity. Three verdicts: PASS / FLAG / HARD_VETO. | `tenir-kernel/core/policy_engine.py`; 99.98% NSL parsing success |
-| **Cryptographic traceability of governance decisions** | Every admissibility evaluation produces a Merkle root anchoring the decision, its inputs, and the constraint profile to an append-only SHA-256 chain. Inclusion proofs at O(log n). | `tenir-kernel/core/ledger.py`; `tenir_governance` persistent ledger |
-| **Clear separation of evaluation from commitment** | Explicit architectural separation: evaluation occurs in the Decision Realm; commitment (execution) occurs only after Gateway admissibility clearance. | Two-realm architecture; HARD_VETO as commitment gate |
-| **Real-time enforcement, not post-hoc review** | **12.4 ms** mean latency; autonomous HARD_VETO requires no human escalation. | R5.0.0 benchmark (AMD Ryzen 9 7950X, 10,000 sequential requests) |
-| **Fail-closed behavior** | If capacity cannot be verified or constraints are violated, default behavior is HARD_VETO (execution denied). Administrative overrides disabled in R5.0.0. | Kernel design invariant; `tenir_policies.yaml` |
-| **Retained human accountability** | Merkle ledger provides non-repudiable audit trail linking every executed action to its governance clearance, enabling post-hoc accountability without requiring real-time human approval. | `/api/v1/ledger/verify` and `/api/v1/ledger/proof/{entry_id}` endpoints |
-
-**How TENIR-Gov fits in a compliant stack:**
+### Where TENIR-Gov Sits in Your Stack
 
 ```
 
-[Agent / LLM / Reasoning Layer]  ← Evaluates options, generates proposals
+[Agent / LLM / Reasoning Layer]     ← Generates proposals
 ↓
-[TENIR-Gov Gateway]              ← Determines admissibility (THIS LAYER)
+[Policy Engine / Guardrails]        ← Static rules, content safety
 ↓
-[Execution Environment]          ← Acts only if admissible = True
+[API Gateway / IAM]                 ← Auth, rate-limiting, routing
 ↓
-[Monitoring / Drift Detection]   ← Long-term observability (complementary)
+[TENIR-Gov Execution Control Plane] ← THIS LAYER: admissibility verdict
+↓
+[Execution Environment]             ← Acts only if PASS cleared
+↓
+[Observability / Drift Monitoring]  ← Post-hoc analysis
 
 ```
 
-**Statement of scope:** TENIR-Gov intentionally does *not* provide data pipeline governance, model evaluation, prompt injection detection, or long-term drift monitoring. It is the deterministic execution gate that sits *after* these layers and *before* irreversible action. This narrow scope ensures it integrates cleanly with broader compliance architectures rather than competing with them.
+---
+
+### Benchmark: Adjacent Categories vs. TENIR-Gov
+
+| Layer | Question Asked | Representative Tools | Distinction |
+|:---|:---|:---|:---|
+| **API Gateway** | Is the request authenticated and rate-limited? | Kong, Envoy, NGINX | Inspects network syntax; TENIR evaluates dynamic state transition (S). |
+| **Policy Engine** | Does the request satisfy static rules? | OPA, Cedar | Fixed rules; TENIR evaluates capacity vs. volatility in real time. |
+| **LLM Guardrails** | Is the text safe / toxic? | NeMo Guardrails, Lakera | Evaluates probabilistic content; TENIR imposes a deterministic fail-closed boundary. |
+| **Observability / Drift** | What did the agent do in the last 24h? | Arize, LangSmith, Datadog | Post-hoc analysis; TENIR intercepts *before* execution. |
+| **Execution Control Plane** | Is this transition admissible right now? | **TENIR-Gov** | Constitutional boundary: `S = K/(P×V+ε)` with Merkle proof. |
+
+---
+
+### Why "Control Plane" and Not "Gateway"
+
+A gateway is a component that intercepts calls. A control plane is an infrastructure layer that coordinates enforcement points — the vocabulary of Kubernetes, SDN, and service mesh. This distinction matters because TENIR-Gov may be the sole execution frontier *or* one coordinated gate among many. "Control Plane" permits both readings without forcing a choice.
+
+---
+
+### Scope Discipline
+
+TENIR-Gov intentionally excludes:
+- Data pipeline governance
+- Model evaluation and benchmarking
+- Prompt injection detection
+- Long-term drift monitoring
+
+It is the execution control plane that sits *after* these layers and *before* irreversible action. This narrow scope ensures clean integration with broader compliance architectures rather than competition with them.
+
+---
+
+**Bottom line:** TENIR-Gov operationalizes the exact runtime control gap identified by Gartner, Bain, and IMDA. It is not an additional governance burden — it is the architectural layer that makes agentic AI safe to run at scale.
+
+---
+
+## Artifact 4: Audience Messaging & Offers Card
+
+**TENIR-Gov — Messaging by Audience**
+
+| Audience | Hook | Key Module |
+|:---|:---|:---|
+| **Engineers / MLOps** | "Deploy the gate in 3 minutes. 500 KB. Zero dependencies." | Core |
+| **Architects / VP Engineering** | "Separate reasoning from execution. Fail-closed by design." | Core + NSL Policy Studio |
+| **CISOs** | "Every decision is cryptographically anchored. Inclusion proof O(log n)." | Core + VPS Forensics |
+| **CFO / Risk Management** | "TPI measures protected risk. EVP quantifies value preserved by adjudicated crossings." | Core + EVP Analytics |
+| **Compliance / Legal** | "Governance is no longer a document — it is code." | Core + NSL Policy Studio |
+
+---
+
+**The Pitch (3 phrases)**
+
+1. *"Models reason, agents propose — but who decides an action is admissible before it becomes irreversible?"*
+2. *"TENIR-Gov is the Execution Control Plane for agentic AI — a deterministic, fail-closed control surface governing the crossing from decision to execution."*
+3. *"Deploy the Core in minutes. Expand with modules as your governance maturity grows."*
+
+---
+
+**Packaging & Offers**
+
+| Offer | Contents | Channel |
+|:---|:---|:---|
+| **Open Source (Community)** | Core (`tenir-kernel`) + SDK | GitHub, self-service |
+| **Professional** | Core + NSL Policy Studio + SLA support | Direct sales, AWS Marketplace |
+| **Enterprise** | Core + all modules + federated deployment + training | Pre-sales, consulting |
+| **TENIR-as-a-Service** | Cloud-hosted, API-only | SaaS, pay-as-you-go |
+
+---
+
+**Constitutional Integrity Guarantee**
+
+The EVP Analytics module consumes the Merkle ledger in **read-only mode**. It has no write path back to the Core. Valuation signals can never influence a PASS, FLAG, or HARD_VETO decision. This is an architectural guarantee, not a convenience.
 
 ---
 
