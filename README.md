@@ -270,11 +270,11 @@ Test Suite
 
 > Methodology note: Test counts and coverage measured via `pytest` and `pytest-cov`. Coverage scope is explicitly bounded.
 
-Suite	Count	Type	Tool	Scope	
-Kernel	8	Unit	pytest	Core formula, ledger, API	
-Full middleware	547	Unit + Integration	pytest + pytest-cov	`tenir_governance` package	
-R4 monitor	61	Integration	pytest	partner_a Shadow v4 runtime	
-Total	557			96% statement coverage on `tenir_governance`	
+-Suite	Count	Type	Tool	Scope	
+-Kernel	8	Unit	pytest	Core formula, ledger, API	
+-Full middleware	547	Unit + Integration	pytest + pytest-cov	`tenir_governance` package	
+	(R4 monitor	61	Integration	pytest	partner_a Shadow v4 runtime)
+-Total	557			96% statement coverage on `tenir_governance`	
 				(Excludes R4, R5 hardened, interface, and server runtime tests)	
 
 Expected: 547 passing, 2 skipped (server runtime).
@@ -331,7 +331,7 @@ Citation
 
 ```
 Skiredj, A. (2026). TENIR-Gov: Governance Middleware for AI-Enabled Operational Systems.
-SoftwareX. https://doi.org/10.5281/zenodo.21277138
+Zenodo. https://doi.org/10.5281/zenodo.21277138
 ```
 
 Or use the `CITATION.cff` file in this repository.
