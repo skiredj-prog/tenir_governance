@@ -17,9 +17,9 @@ Governance Branch:    tenir_governance/
 ├── copy_lint.py             — Sprint 9: public-safe lexicon enforcement
 └── ledger_migrate.py        — Sprint 11: legacy label migration
 
-Version: 5.0.0 (IRON OMEGA R5)
+Version: 5.2.0 (TENIR 2.0 runtime kernel)
 Policy: tenir-canonical-v1.0.0
-Policy fingerprint: d083e0b82a16c04d
+Policy fingerprint: cb96dd8d35197ab0
 """
 
 from .nomenclature import (
@@ -76,7 +76,7 @@ from .polymorphic_surface import (
 from .copy_lint import CopyLinter, LintReport as CopyLintReport, Finding as CopyLintFinding
 from .ledger_migrate import migrate_ledger, verify_migrated_ledger, MigrationReport
 
-__version__ = "5.0.0"
+__version__ = "5.2.0"
 __policy_version__ = "tenir-canonical-v1.0.0"
 
 __all__ = [
