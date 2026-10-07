@@ -9,12 +9,12 @@ Integrates all four R5 components into the V42CIron API:
   R5.4 Distributed Crypto → Merkle ledger with consensus broadcast
 
 Usage:
-  uvicorn r5_server:app --host 0.0.0.0 --port 8000 --reload
+  uvicorn r5_server:app --host 127.0.0.1 --port 8000
 
 Environment variables:
   NEO4J_URI          bolt://localhost:7687
   NEO4J_USER         neo4j
-  NEO4J_PASSWORD     tenir_password
+  NEO4J_PASSWORD     <required when enabling Neo4j>
   NEO4J_DATABASE     tenir
   NEO4J_SEED         true  (seed partner_a/partner_b ontology on first run)
   OLLAMA_MODEL       tenir-nsl:latest  (or "grammar" for grammar-only mode)
@@ -28,12 +28,13 @@ import os
 import json
 import logging
 import hashlib
+import hmac
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional, List
 from uuid import uuid4
 
-from fastapi import FastAPI, WebSocket, HTTPException, Depends
+from fastapi import FastAPI, WebSocket, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -66,14 +67,23 @@ logger = logging.getLogger("r5.server")
 async def lifespan(app: FastAPI):
     logger.info("[R5] Starting IRON OMEGA R5 server…")
 
+    app.state.api_token = os.getenv("TENIR_API_TOKEN", "")
+    if len(app.state.api_token) < 32:
+        raise RuntimeError("TENIR_API_TOKEN must be configured with at least 32 characters.")
+    app.state.operator_id = os.getenv("TENIR_OPERATOR_ID", "").strip()
+    if not app.state.operator_id:
+        raise RuntimeError("TENIR_OPERATOR_ID is required for signed mode transitions.")
+
     # Initialize Neo4j
     neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     neo4j_user = os.getenv("NEO4J_USER", "neo4j")
-    neo4j_pass = os.getenv("NEO4J_PASSWORD", "tenir_password")
+    neo4j_pass = os.getenv("NEO4J_PASSWORD", "").strip()
     neo4j_db = os.getenv("NEO4J_DATABASE", "tenir")
     neo4j_seed = os.getenv("NEO4J_SEED", "false").lower() == "true"
 
     try:
+        if not neo4j_pass:
+            raise RuntimeError("NEO4J_PASSWORD is unset; graph features are disabled")
         await db_startup(
             uri=neo4j_uri,
             auth=(neo4j_user, neo4j_pass),
@@ -98,25 +108,25 @@ async def lifespan(app: FastAPI):
     # Initialize distributed ledger + key ceremony
     ledger_path = os.getenv("LEDGER_PATH", "ledger/tenir_ledger.jsonl")
     oath_secret = os.getenv("OATH_SECRET", "").strip()
-    if not oath_secret:
+    if len(oath_secret) < 32:
         raise RuntimeError(
-            "OATH_SECRET environment variable is required and must not be empty. "
+            "OATH_SECRET environment variable is required and must contain at least 32 characters. "
             "This secret signs the SHADOW->ENFORCE oath ceremony (KeyCeremony). "
             "There is no safe default: refusing to start with an unset or "
             "well-known signing secret would allow forged mode-transition oaths."
         )
-    get_ledger(ledger_path)
-    get_ceremony(oath_secret)
+    wired_ledger = get_ledger(ledger_path)
+    get_ceremony(oath_secret, used_nonces=wired_ledger.recover_used_nonces())
     logger.info(f"[R5] Distributed ledger: {ledger_path}")
 
     # Initialize peer nodes for consensus
     peer_urls = [u.strip() for u in os.getenv("PEER_NODES", "").split(",") if u.strip()]
     if peer_urls:
         peers = [PeerNode(node_id=f"peer-{i}", url=url, public_key="") for i, url in enumerate(peer_urls)]
-        app.state.consensus = ConsensusBroadcast(peers)
+        app.state.consensus = ConsensusBroadcast(peers, api_token=app.state.api_token)
         logger.info(f"[R5] Consensus peers: {peer_urls}")
     else:
-        app.state.consensus = ConsensusBroadcast([])
+        app.state.consensus = ConsensusBroadcast([], api_token=app.state.api_token)
         logger.info("[R5] Single-node mode (no peers)")
 
     # Initialize kernel with shared governance policy (Sprint 12 wiring).
@@ -138,7 +148,16 @@ async def lifespan(app: FastAPI):
 
     app.state.ces = CESMatrix()
     # Canonical operating mode (Sprint 12: use SHADOW_PASSIVE, not loose "SHADOW")
-    app.state.mode = "SHADOW_PASSIVE"
+    configured_mode = os.getenv("TENIR_MODE", "SHADOW_PASSIVE").upper()
+    if configured_mode not in {"SHADOW_OFF", "SHADOW_PASSIVE", "SHADOW_CRITICAL", "ENFORCE"}:
+        raise RuntimeError("TENIR_MODE must be SHADOW_OFF, SHADOW_PASSIVE, SHADOW_CRITICAL, or ENFORCE")
+    wired_ledger = get_ledger()
+    if wired_ledger.entry_count == 0 and configured_mode in {"SHADOW_CRITICAL", "ENFORCE"}:
+        raise RuntimeError(
+            "An empty ledger must bootstrap in SHADOW_OFF or SHADOW_PASSIVE; "
+            "use signed transitions to enter SHADOW_CRITICAL and then ENFORCE."
+        )
+    app.state.mode = wired_ledger.recover_last_mode(default=configured_mode)
     app.state.tenant_id = os.getenv("TENANT_ID", "partner_a")
 
     logger.info("[R5] IRON OMEGA R5 ready")
@@ -156,14 +175,33 @@ app = FastAPI(
     version="5.0.0",
     description="Neuro-Symbolic Governance Platform: NSL + Neo4j + Live VPS + Distributed Crypto",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
+cors_origins = [origin.strip() for origin in os.getenv("TENIR_CORS_ORIGINS", "").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+
+async def require_api_token(authorization: Optional[str] = Header(default=None)) -> None:
+    expected = getattr(app.state, "api_token", "") or os.getenv("TENIR_API_TOKEN", "")
+    scheme, _, supplied = (authorization or "").partition(" ")
+    if len(expected) < 32:
+        raise HTTPException(status_code=503, detail="TENIR API token is not configured")
+    if scheme.lower() != "bearer" or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Bearer token required")
+
+
+async def require_operator(operator_id: str) -> None:
+    configured = getattr(app.state, "operator_id", "") or os.getenv("TENIR_OPERATOR_ID", "")
+    if not configured or not hmac.compare_digest(operator_id, configured):
+        raise HTTPException(status_code=403, detail="Operator identity is not authorized")
 
 
 # ─── REQUEST / RESPONSE MODELS ────────────────────────────────────────────────
@@ -198,11 +236,15 @@ class AdjudicationResponse(BaseModel):
 
 class TransitionRequest(BaseModel):
     operator_id: str
-    target_mode: str = Field(..., pattern="^(SHADOW|SHADOW_OFF|SHADOW_PASSIVE|SHADOW_CRITICAL|ENFORCE)$")
+    target_mode: str = Field(..., pattern="^(SHADOW_OFF|SHADOW_PASSIVE|SHADOW_CRITICAL|ENFORCE)$")
     oath_text: str
     oath_signature: str
     nonce: str
     timestamp: str
+
+
+class OathSignRequest(BaseModel):
+    operator_id: str
 
 
 class LedgerVerifyResponse(BaseModel):
@@ -224,7 +266,7 @@ class EpochValidateRequest(BaseModel):
 
 # ─── ADJUDICATE ───────────────────────────────────────────────────────────────
 
-@app.post("/api/v1/adjudicate", response_model=AdjudicationResponse)
+@app.post("/api/v1/adjudicate", response_model=None, dependencies=[Depends(require_api_token)])
 async def adjudicate(req: AdjudicationRequest):
     """
     R5 main adjudication endpoint.
@@ -237,6 +279,23 @@ async def adjudicate(req: AdjudicationRequest):
       5. Neo4j graph persist
       6. WebSocket broadcast to all VPS clients
     """
+    if app.state.mode == "SHADOW_OFF":
+        return {
+            "entry_id": None,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "s_score": None,
+            "membrane_decision": "not_evaluated",
+            "operating_mode": app.state.mode,
+            "execution_allowed": True,
+            "execution_disposition": "allow_unobserved",
+            "rationale": "SHADOW_OFF skips parsing, evaluation, and ledger writes.",
+        }
+    if app.state.mode == "ENFORCE":
+        raise HTTPException(
+            status_code=422,
+            detail="This legacy R5 wired runtime cannot enforce schema 1.2 objects; use r5_hardened/IRON_OMEGA_R5.",
+        )
+
     nsl_engine = get_inference_engine()
     ledger = get_ledger()
     hub = get_hub()
@@ -372,12 +431,18 @@ async def adjudicate(req: AdjudicationRequest):
 
 # ─── MODE TRANSITION ─────────────────────────────────────────────────────────
 
-@app.post("/api/v1/transition")
+@app.post("/api/v1/transition", dependencies=[Depends(require_api_token)])
 async def request_transition(req: TransitionRequest):
     """
     R5 sovereign transition endpoint.
     Validates oath signature via KeyCeremony before allowing SHADOW↔ENFORCE.
     """
+    await require_operator(req.operator_id)
+    from_mode = app.state.mode
+    if req.target_mode == "ENFORCE" and from_mode != "SHADOW_CRITICAL":
+        raise HTTPException(status_code=409, detail="ENFORCE requires a prior transition to SHADOW_CRITICAL.")
+    if req.target_mode == from_mode:
+        raise HTTPException(status_code=409, detail="The requested mode is already active.")
     ceremony = get_ceremony()
     ledger = get_ledger()
     hub = get_hub()
@@ -402,9 +467,25 @@ async def request_transition(req: TransitionRequest):
             }
         )
 
-    from_mode = app.state.mode
-    app.state.mode = req.target_mode
     transition_id = str(uuid4())
+
+    try:
+        transition_entry = ledger.append_control_transition(
+            transition=f"{from_mode}_TO_{req.target_mode}",
+            from_mode=from_mode,
+            to_mode=req.target_mode,
+            operator_id=req.operator_id,
+            reason="operator-authenticated oath transition",
+            policy_version=getattr(getattr(app.state, "policy", None), "version", "legacy-unavailable"),
+            override_signature=req.oath_signature,
+            override_operator=req.operator_id,
+            override_nonce=req.nonce,
+        )
+    except Exception as exc:
+        logger.error("[R5] Mode transition ledger append failed; active mode unchanged")
+        raise HTTPException(status_code=503, detail="Transition could not be recorded; mode unchanged.") from exc
+
+    app.state.mode = req.target_mode
 
     logger.info(
         f"[R5] Mode transition: {from_mode} → {req.target_mode} "
@@ -445,40 +526,43 @@ async def request_transition(req: TransitionRequest):
         "from_mode": from_mode,
         "to_mode": req.target_mode,
         "epoch": current_epoch,
+        "ledger_entry_id": transition_entry.get("entry_id"),
+        "ledger_entry_hash": transition_entry.get("entry_hash"),
     }
 
 
 # ─── OATH SIGNING ─────────────────────────────────────────────────────────────
 
-@app.post("/api/v1/oath/sign")
-async def sign_oath(operator_id: str):
+@app.post("/api/v1/oath/sign", dependencies=[Depends(require_api_token)])
+async def sign_oath(req: OathSignRequest):
     """Signs an oath for the current epoch. Call before requesting a transition."""
+    await require_operator(req.operator_id)
     ceremony = get_ceremony()
     ledger = get_ledger()
     epoch_id = ledger.current_epoch.epoch_id
     signed = ceremony.sign_oath(
         oath_text=KeyCeremony.OATH_TEXT,
         epoch_id=epoch_id,
-        operator_id=operator_id,
+        operator_id=req.operator_id,
     )
     return {"oath_text": KeyCeremony.OATH_TEXT, **signed}
 
 
 # ─── LEDGER ENDPOINTS ─────────────────────────────────────────────────────────
 
-@app.get("/api/v1/ledger/verify", response_model=LedgerVerifyResponse)
+@app.get("/api/v1/ledger/verify", response_model=LedgerVerifyResponse, dependencies=[Depends(require_api_token)])
 async def verify_ledger():
     ledger = get_ledger()
     return ledger.verify_full_chain()
 
 
-@app.get("/api/v1/ledger/recent")
+@app.get("/api/v1/ledger/recent", dependencies=[Depends(require_api_token)])
 async def get_recent_entries(n: int = 50):
     ledger = get_ledger()
     return ledger.get_recent_entries(min(n, 200))
 
 
-@app.get("/api/v1/ledger/proof/{entry_id}")
+@app.get("/api/v1/ledger/proof/{entry_id}", dependencies=[Depends(require_api_token)])
 async def get_merkle_proof(entry_id: str):
     ledger = get_ledger()
     proof = ledger.get_merkle_proof(entry_id)
@@ -487,7 +571,7 @@ async def get_merkle_proof(entry_id: str):
     return proof
 
 
-@app.post("/api/v1/ledger/validate_epoch")
+@app.post("/api/v1/ledger/validate_epoch", dependencies=[Depends(require_api_token)])
 async def validate_epoch(req: EpochValidateRequest):
     """Peer consensus endpoint — validates a claimed Merkle root against local ledger."""
     ledger = get_ledger()
@@ -500,7 +584,7 @@ async def validate_epoch(req: EpochValidateRequest):
 
 # ─── GRAPH ENDPOINTS ──────────────────────────────────────────────────────────
 
-@app.get("/api/v1/graph/cp_net")
+@app.get("/api/v1/graph/cp_net", dependencies=[Depends(require_api_token)])
 async def get_cp_net():
     """Returns the live CP-Net graph for VPS 3D rendering."""
     try:
@@ -510,7 +594,7 @@ async def get_cp_net():
         return {"edges": [], "conflicts": [], "error": str(e)}
 
 
-@app.get("/api/v1/graph/fragility")
+@app.get("/api/v1/graph/fragility", dependencies=[Depends(require_api_token)])
 async def get_fragility():
     """Returns structural fragility scores per domain."""
     try:
@@ -528,7 +612,7 @@ async def get_fragility():
 
 # ─── STATE ────────────────────────────────────────────────────────────────────
 
-@app.get("/api/v1/state")
+@app.get("/api/v1/state", dependencies=[Depends(require_api_token)])
 async def get_state():
     ledger = get_ledger()
     hub = get_hub()
@@ -546,6 +630,11 @@ async def get_state():
     }
 
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 # ─── WEBSOCKET ────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws/vps")
@@ -554,6 +643,11 @@ async def vps_websocket(ws: WebSocket):
     Live WebSocket endpoint for the 3D VPS engine.
     All kernel events are streamed here in real-time.
     """
+    expected = getattr(app.state, "api_token", "") or os.getenv("TENIR_API_TOKEN", "")
+    scheme, _, supplied = ws.headers.get("authorization", "").partition(" ")
+    if len(expected) < 32 or scheme.lower() != "bearer" or not hmac.compare_digest(supplied, expected):
+        await ws.close(code=1008, reason="Bearer token required")
+        return
     hub = get_hub()
     await handle_client(ws, hub)
 
@@ -589,6 +683,8 @@ def _membrane_decision(s: float, mode: str,
                        option_space: float = None,
                        horizon_events: int = None) -> str:
     """Sprint 12: delegate to shared PolicyEngine when available."""
+    if mode == "SHADOW_OFF":
+        return "not_evaluated"
     try:
         if getattr(app.state, "policy", None) is not None:
             # Normalize loose mode string to canonical
