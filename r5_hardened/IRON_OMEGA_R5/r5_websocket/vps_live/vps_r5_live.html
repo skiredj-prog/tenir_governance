@@ -548,7 +548,9 @@ function setWsStatus(s) {
 function connectWS() {
   const url = 'ws://localhost:8000/ws/vps';
   try {
-    ws = new WebSocket(url);
+    const token = localStorage.getItem('tenir_api_token') || prompt('TENIR API token (minimum 32 characters):');
+    if (token) localStorage.setItem('tenir_api_token', token);
+    ws = token ? new WebSocket(url, ['bearer.' + token]) : new WebSocket(url);
     ws.onopen = () => { simMode=false; setWsStatus('conn'); };
     ws.onmessage = (ev) => handleFrame(JSON.parse(ev.data));
     ws.onclose = () => { simMode=true; setWsStatus('sim'); setTimeout(connectWS, 4000); };
@@ -698,7 +700,7 @@ document.getElementById('nsl-send').onclick = async () => {
   try {
     if (ws && ws.readyState===1) {
       const resp = await fetch('http://localhost:8000/api/v1/adjudicate', {
-        method:'POST', headers:{'Content-Type':'application/json'},
+        method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+(localStorage.getItem('tenir_api_token')||'')},
         body: JSON.stringify({ raw_input:text })
       });
       const data = await resp.json();
