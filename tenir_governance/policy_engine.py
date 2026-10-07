@@ -70,7 +70,7 @@ class PolicyEngine:
 
     # Identity
     version: str = "tenir-canonical-v1.0.0"
-    scope: str = "canonical"           
+    scope: str = "canonical"
 
     # TAU invariant (canonical: V42CIron origin)
     tau_floor: float = 0.42
@@ -179,6 +179,14 @@ class PolicyEngine:
         """
         alert_reasons: List[str] = []
         block_reasons: List[str] = []
+
+        if operating_mode == OperatingModeNames.SHADOW_OFF:
+            return (
+                MembraneDecisionNames.NOT_EVALUATED,
+                "Governance evaluation is disabled in SHADOW_OFF.",
+                False,
+                False,
+            )
 
         # ── Alert conditions ──────────────────────────────────────────────────
         if s_score <= self.s_alert_floor:
@@ -320,7 +328,7 @@ class PolicyEngine:
         p = cls()
         p.validate()
         return p
-  
+
 
     def to_r4_policy_bundle(self) -> dict:
         """

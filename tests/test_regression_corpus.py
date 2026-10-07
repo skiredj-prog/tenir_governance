@@ -161,6 +161,26 @@ class TestMembraneCoreInvariants:
             assert r >= prev, f"Non-monotone at S={s}: rank {r} < previous {prev}"
             prev = max(prev, r)
 
+    def test_shadow_off_is_not_evaluated(self, default_policy):
+        """SHADOW_OFF must short-circuit: not_evaluated, no alert, no intended block.
+
+        NOT_EVALUATED is not PASS. Evaluation is disabled; no ledger semantics
+        are implied at the policy layer.
+        """
+        # Even at extreme TAU-breach inputs, SHADOW_OFF must not evaluate.
+        d, rationale, alert, intended = default_policy.evaluate_membrane(
+            s_score=0.01,
+            ds_de=-1.0,
+            d2s_de2=-1.0,
+            option_space=0.0,
+            projected_events_to_zero=0,
+            operating_mode=OperatingModeNames.SHADOW_OFF,
+        )
+        assert d == MembraneDecisionNames.NOT_EVALUATED
+        assert alert is False
+        assert intended is False
+        assert "disabled" in rationale.lower() or "SHADOW_OFF" in rationale
+
 
 # ─── SPRINT 0: NOMENCLATURE ──────────────────────────────────────────────────
 
@@ -271,7 +291,8 @@ class TestCorpusInventory:
         for c in CORPUS:
             assert c.id and c.scenario_group and c.description
             assert c.expected_decision in {
-                "allow", "allow_with_alert", "allow_with_intended_block", "block"
+                "allow", "allow_with_alert", "allow_with_intended_block",
+                "block", "not_evaluated",
             }
             assert c.expected_ces_state in {
                 "REST", "METABOLIZING", "TENSION", "SIGNAL_CONFLICT", "COLLAPSE"
@@ -283,7 +304,11 @@ class TestCorpusInventory:
 
     def test_corpus_covers_all_4_decisions(self):
         decisions = {c.expected_decision for c in CORPUS}
-        assert decisions == {"allow", "allow_with_alert", "allow_with_intended_block", "block"}
+        # Core membrane outcomes must remain present; not_evaluated is the
+        # SHADOW_OFF disposition (evaluation disabled, no alert/block).
+        required = {"allow", "allow_with_alert", "allow_with_intended_block", "block"}
+        assert required.issubset(decisions), f"missing core decisions: {required - decisions}"
+        assert "not_evaluated" in decisions, "SHADOW_OFF fixtures must assert not_evaluated"
 
     def test_corpus_covers_all_4_modes(self):
         modes = {c.operating_mode for c in CORPUS}

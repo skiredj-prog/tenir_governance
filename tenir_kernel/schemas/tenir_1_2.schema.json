@@ -1,0 +1,532 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tenir:runtime-object:1.2",
+  "title": "TENIR 2.0 Canonical Runtime Object — Schema 1.2",
+  "type": "object",
+  "required": [
+    "engine_spec_version",
+    "rubric_version",
+    "timestamp_utc",
+    "identity",
+    "tau",
+    "epistemic",
+    "scores",
+    "collapse_flags",
+    "posture",
+    "compliance_class",
+    "degraded_mode",
+    "active_profiles",
+    "suppressed_profiles",
+    "profile_conflicts",
+    "narrative_distortion_summary",
+    "irreversible_pathway_assessment",
+    "assumptions",
+    "trace",
+    "synthesis",
+    "schema_version",
+    "constraint_geometry"
+  ],
+  "properties": {
+    "engine_spec_version": {
+      "type": "string",
+      "const": "TENIR-2.0",
+      "description": "TENIR engine semantics version."
+    },
+    "rubric_version": {
+      "type": "string"
+    },
+    "timestamp_utc": {
+      "type": "string"
+    },
+    "identity": {
+      "type": "object",
+      "required": [
+        "unit_name",
+        "entity_class",
+        "declared_scale"
+      ],
+      "properties": {
+        "unit_name": {
+          "type": "string"
+        },
+        "entity_class": {
+          "enum": [
+            "individual",
+            "organization",
+            "institution",
+            "state",
+            "ecosystem",
+            "other"
+          ]
+        },
+        "declared_scale": {
+          "type": "string"
+        },
+        "scope_note": {
+          "type": "string"
+        }
+      }
+    },
+    "tau": {
+      "type": "object",
+      "required": [
+        "tau_hypothesis",
+        "tau_integrity"
+      ],
+      "properties": {
+        "tau_hypothesis": {
+          "type": "string"
+        },
+        "tau_integrity": {
+          "enum": [
+            "intact",
+            "at_risk",
+            "breached"
+          ]
+        }
+      }
+    },
+    "epistemic": {
+      "type": "object",
+      "required": [
+        "status",
+        "evidence_quality",
+        "manipulation_risk",
+        "drift",
+        "epistemic_surrender_risk",
+        "confidence_ceiling"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "ok",
+            "contested",
+            "invalid"
+          ]
+        },
+        "evidence_quality": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "manipulation_risk": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "drift": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "epistemic_surrender_risk": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "confidence_ceiling": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "tags_summary": {
+          "type": "object"
+        }
+      }
+    },
+    "scores": {
+      "type": "object",
+      "required": [
+        "pressure",
+        "velocity",
+        "capacity",
+        "option_space",
+        "stability",
+        "cooperative_control_score",
+        "trajectory_risk_score",
+        "irreversible_pathway_materiality"
+      ],
+      "properties": {
+        "pressure": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "velocity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "capacity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "option_space": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "stability": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cooperative_control_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "trajectory_risk_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "irreversible_pathway_materiality": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "collapse_flags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "posture": {
+      "enum": [
+        "NORMAL",
+        "CAUTION",
+        "HOLDING-FIRST"
+      ]
+    },
+    "compliance_class": {
+      "enum": [
+        "canonical",
+        "profile-bound",
+        "simplified",
+        "legacy-processable",
+        "illustrative"
+      ]
+    },
+    "degraded_mode": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "none",
+          "missing_agency",
+          "missing_trajectory",
+          "missing_epistemic",
+          "sparse_ingress",
+          "legacy_shape"
+        ]
+      }
+    },
+    "active_profiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "suppressed_profiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "profile_conflicts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "agency_assessment": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "trajectory_assessment": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "narrative_distortion_summary": {
+      "type": "object"
+    },
+    "irreversible_pathway_assessment": {
+      "type": "object",
+      "required": [
+        "materially_affects_irreversible_pathway",
+        "raw_data_human_verification_required",
+        "human_verified_raw_data"
+      ],
+      "properties": {
+        "materially_affects_irreversible_pathway": {
+          "type": "boolean"
+        },
+        "raw_data_human_verification_required": {
+          "type": "boolean"
+        },
+        "human_verified_raw_data": {
+          "type": "boolean"
+        }
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "trace": {
+      "type": "object",
+      "required": [
+        "trace_id",
+        "stages"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "trace_id": {
+          "type": "string"
+        },
+        "export_lineage": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "stage",
+              "status"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "stage": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "warning",
+                  "failed"
+                ]
+              },
+              "summary": {
+                "type": "string"
+              },
+              "inputs_used": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "outputs_emitted": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "assumptions_introduced": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "rules_triggered": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "thresholds_referenced": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "degradations": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "timestamp_utc": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "synthesis": {
+      "type": "object",
+      "required": [
+        "structural_core",
+        "epistemic_state",
+        "final_posture",
+        "rationale",
+        "degraded_inputs"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "structural_core": {
+          "type": "object",
+          "required": [
+            "pressure",
+            "velocity",
+            "capacity",
+            "option_space",
+            "tau_integrity",
+            "stability"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "pressure": {
+              "type": "number"
+            },
+            "velocity": {
+              "type": "number"
+            },
+            "capacity": {
+              "type": "number"
+            },
+            "option_space": {
+              "type": "number"
+            },
+            "tau_integrity": {
+              "type": "string",
+              "enum": [
+                "intact",
+                "at_risk",
+                "breached"
+              ]
+            },
+            "stability": {
+              "type": "number"
+            }
+          }
+        },
+        "epistemic_state": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "agency_state": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
+        "trajectory_state": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
+        "narrative_state": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "final_posture": {
+          "type": "string",
+          "enum": [
+            "NORMAL",
+            "CAUTION",
+            "HOLDING-FIRST"
+          ]
+        },
+        "principal_failure_mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rationale": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "degraded_inputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.2",
+      "description": "Wire-format version for this additive TENIR 2.0 contract."
+    },
+    "constraint_geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "geometry_id",
+        "coordinates"
+      ],
+      "properties": {
+        "geometry_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+          "description": "Identifier for a server-configured geometry policy; clients cannot supply facets."
+        },
+        "coordinates": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "authority",
+            "context_fit",
+            "authority_source",
+            "context_source"
+          ],
+          "properties": {
+            "authority": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "context_fit": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "authority_source": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "context_source": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "description": "Normalized, externally evidenced transition coordinates. Geometry facets are policy-owned."
+        }
+      },
+      "description": "TENIR 2.0 constraint-space point and trusted geometry selector."
+    }
+  }
+}

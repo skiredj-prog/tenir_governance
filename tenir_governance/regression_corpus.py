@@ -209,12 +209,12 @@ CORPUS: List[GoldenCase] = [
         tags=["tau", "boundary"]),
 
     GoldenCase("G044", "tau_breach",
-        "SHADOW_OFF mode — no intervention even at TAU breach",
+        "SHADOW_OFF mode — evaluation disabled even at TAU breach",
         pressure=2.0, velocity=2.0, capacity=1.0, option_space=0.2,
         operating_mode="SHADOW_OFF",
-        expected_decision="allow_with_intended_block", expected_ces_state="COLLAPSE",
-        expected_alert=True, expected_intended_block=True,
-        tags=["tau", "shadow_off"]),
+        expected_decision="not_evaluated", expected_ces_state="COLLAPSE",
+        expected_alert=False, expected_intended_block=False,
+        tags=["tau", "shadow_off", "not_evaluated"]),
 
     # ── GROUP 6: Option space collapse ────────────────────────────────────────
     GoldenCase("G050", "option_space_collapse",
@@ -253,12 +253,12 @@ CORPUS: List[GoldenCase] = [
 
     # ── GROUP 7: Shadow mode boundary ─────────────────────────────────────────
     GoldenCase("G060", "shadow_mode",
-        "SHADOW_OFF — same event that would alert in SHADOW_PASSIVE",
+        "SHADOW_OFF — evaluation disabled (same inputs that alert in SHADOW_PASSIVE)",
         pressure=1.0, velocity=1.0, capacity=0.85, option_space=0.45,
         operating_mode="SHADOW_OFF",
-        expected_decision="allow_with_alert", expected_ces_state="TENSION",
-        expected_alert=True, expected_intended_block=False,
-        tags=["shadow_off", "mode_boundary"]),
+        expected_decision="not_evaluated", expected_ces_state="TENSION",
+        expected_alert=False, expected_intended_block=False,
+        tags=["shadow_off", "mode_boundary", "not_evaluated"]),
 
     GoldenCase("G061", "shadow_mode",
         "SHADOW_PASSIVE to SHADOW_CRITICAL escalation path",

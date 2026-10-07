@@ -1,0 +1,74 @@
+{
+  "engine_spec_version": "TENIR-2.0",
+  "rubric_version": "quickstart-1.0",
+  "timestamp_utc": "2026-10-04T00:00:00Z",
+  "identity": {
+    "unit_name": "sample-team",
+    "entity_class": "organization",
+    "declared_scale": "team"
+  },
+  "tau": {
+    "tau_hypothesis": "Preserve accountable human authority.",
+    "tau_integrity": "intact"
+  },
+  "epistemic": {
+    "status": "ok",
+    "evidence_quality": 0.85,
+    "manipulation_risk": 0.05,
+    "drift": 0.05,
+    "epistemic_surrender_risk": 0.05,
+    "confidence_ceiling": "high"
+  },
+  "scores": {
+    "pressure": 0.3,
+    "velocity": 0.2,
+    "capacity": 0.9,
+    "option_space": 0.8,
+    "stability": 0.9,
+    "cooperative_control_score": 0.8,
+    "trajectory_risk_score": 0.1,
+    "irreversible_pathway_materiality": 0.1
+  },
+  "collapse_flags": [],
+  "posture": "NORMAL",
+  "compliance_class": "illustrative",
+  "degraded_mode": ["none"],
+  "active_profiles": [],
+  "suppressed_profiles": [],
+  "profile_conflicts": [],
+  "narrative_distortion_summary": {},
+  "irreversible_pathway_assessment": {
+    "materially_affects_irreversible_pathway": false,
+    "raw_data_human_verification_required": false,
+    "human_verified_raw_data": false
+  },
+  "assumptions": [],
+  "trace": {
+    "trace_id": "quickstart-demo",
+    "stages": []
+  },
+  "synthesis": {
+    "structural_core": {
+      "pressure": 0.3,
+      "velocity": 0.2,
+      "capacity": 0.9,
+      "option_space": 0.8,
+      "tau_integrity": "intact",
+      "stability": 0.9
+    },
+    "epistemic_state": {},
+    "final_posture": "NORMAL",
+    "rationale": ["Illustrative quickstart input."],
+    "degraded_inputs": []
+  },
+  "schema_version": "1.2",
+  "constraint_geometry": {
+    "geometry_id": "tenir-2.0-reference",
+    "coordinates": {
+      "authority": 0.95,
+      "context_fit": 0.95,
+      "authority_source": "sample fixture",
+      "context_source": "sample fixture"
+    }
+  }
+}
