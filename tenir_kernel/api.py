@@ -4,6 +4,8 @@ import hmac
 import os
 from typing import Any
 
+from fastapi.concurrency import run_in_threadpool
+
 from .kernel import TenirKernel
 
 
@@ -47,7 +49,8 @@ def create_app():
     ) -> dict[str, Any]:
         await authenticate(authorization)
         try:
-            return app.state.kernel.adjudicate_runtime_object(
+            return await run_in_threadpool(
+                app.state.kernel.adjudicate_runtime_object,
                 payload.runtime_object,
                 mode=app.state.mode,
             )
