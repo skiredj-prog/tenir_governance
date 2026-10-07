@@ -171,7 +171,7 @@ def evaluate_geometry(
         }
         facet_results.append(result)
         if margin < -1e-9:
-            (hard_violations if facet.severity == "hard" else soft_violations).append(result)
+            (soft_violations if facet.severity == "soft" else hard_violations).append(result)
 
     return {
         "geometry_id": geometry_id,
