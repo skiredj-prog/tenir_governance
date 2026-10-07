@@ -9,12 +9,12 @@ Integrates all four R5 components into the V42CIron API:
   R5.4 Distributed Crypto → Merkle ledger with consensus broadcast
 
 Usage:
-  uvicorn r5_server:app --host 0.0.0.0 --port 8000 --reload
+  uvicorn r5_server:app --host 127.0.0.1 --port 8000
 
 Environment variables:
   NEO4J_URI          bolt://localhost:7687
   NEO4J_USER         neo4j
-  NEO4J_PASSWORD     tenir_password
+  NEO4J_PASSWORD     <required when enabling Neo4j>
   NEO4J_DATABASE     tenir
   NEO4J_SEED         true  (seed partner_a/partner_b ontology on first run)
   OLLAMA_MODEL       tenir-nsl:latest  (or "grammar" for grammar-only mode)
@@ -28,14 +28,18 @@ import os
 import json
 import logging
 import hashlib
+import hmac
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Optional, List
 from uuid import uuid4
 
-from fastapi import FastAPI, WebSocket, HTTPException, Depends
+from fastapi import FastAPI, WebSocket, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from tenir_kernel import KernelPolicy, TenirKernel
+from tenir_kernel.schema import validate_runtime_object
 
 # R5 components
 from r5_neuro_symbolic.inference.nsl_inference import (
@@ -56,7 +60,7 @@ from r5_distributed_crypto.merkle.distributed_ledger import (
 from core.trajectory import TrajectoryKernel
 from core.ces_matrix import CESMatrix, CESState
 from tenir_governance.policy_engine import PolicyEngine
-from tenir_governance.nomenclature import OperatingModeNames
+from tenir_governance.nomenclature import MembraneDecisionNames, OperatingModeNames
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("r5.server")
@@ -68,14 +72,24 @@ logger = logging.getLogger("r5.server")
 async def lifespan(app: FastAPI):
     logger.info("[R5] Starting IRON OMEGA R5 server…")
 
+    api_token = os.getenv("TENIR_API_TOKEN", "")
+    if len(api_token) < 32:
+        raise RuntimeError("TENIR_API_TOKEN must be configured with at least 32 characters.")
+    app.state.api_token = api_token
+    app.state.operator_id = os.getenv("TENIR_OPERATOR_ID", "").strip()
+    if not app.state.operator_id:
+        raise RuntimeError("TENIR_OPERATOR_ID is required for signed mode transitions.")
+
     # Initialize Neo4j
     neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     neo4j_user = os.getenv("NEO4J_USER", "neo4j")
-    neo4j_pass = os.getenv("NEO4J_PASSWORD", "tenir_password")
+    neo4j_pass = os.getenv("NEO4J_PASSWORD", "").strip()
     neo4j_db = os.getenv("NEO4J_DATABASE", "tenir")
     neo4j_seed = os.getenv("NEO4J_SEED", "false").lower() == "true"
 
     try:
+        if not neo4j_pass:
+            raise RuntimeError("NEO4J_PASSWORD is unset; graph features are disabled")
         await db_startup(
             uri=neo4j_uri,
             auth=(neo4j_user, neo4j_pass),
@@ -111,9 +125,9 @@ async def lifespan(app: FastAPI):
     # Initialize distributed ledger + key ceremony
     ledger_path = os.getenv("LEDGER_PATH", "ledger/tenir_ledger.jsonl")
     oath_secret = os.getenv("OATH_SECRET", "").strip()
-    if not oath_secret:
+    if len(oath_secret) < 32:
         raise RuntimeError(
-            "OATH_SECRET environment variable is required and must not be empty. "
+            "OATH_SECRET environment variable is required and must contain at least 32 characters. "
             "This secret signs the SHADOW->ENFORCE oath ceremony (KeyCeremony). "
             "There is no safe default: refusing to start with an unset or "
             "well-known signing secret would allow forged mode-transition oaths."
@@ -127,16 +141,32 @@ async def lifespan(app: FastAPI):
     peer_urls = [u.strip() for u in os.getenv("PEER_NODES", "").split(",") if u.strip()]
     if peer_urls:
         peers = [PeerNode(node_id=f"peer-{i}", url=url, public_key="") for i, url in enumerate(peer_urls)]
-        app.state.consensus = ConsensusBroadcast(peers)
+        app.state.consensus = ConsensusBroadcast(peers, api_token=app.state.api_token)
         logger.info(f"[R5] Consensus peers: {peer_urls}")
     else:
-        app.state.consensus = ConsensusBroadcast([])
+        app.state.consensus = ConsensusBroadcast([], api_token=app.state.api_token)
         logger.info("[R5] Single-node mode (no peers)")
 
     # Initialize kernel (stateful trajectory engine)
     app.state.kernel = TrajectoryKernel(epsilon=app.state.policy.epsilon)
+    app.state.tenir_kernel = TenirKernel(
+        KernelPolicy(
+            version=f"tenir-kernel-adapter-2.0:{app.state.policy.version}",
+            epsilon=app.state.policy.epsilon,
+            hard_veto_below=app.state.policy.s_block_floor,
+            flag_below=app.state.policy.s_alert_floor,
+        )
+    )
     app.state.ces = CESMatrix()
-    app.state.mode = ledger.recover_last_mode(default=OperatingModeNames.SHADOW_PASSIVE)
+    configured_mode = os.getenv("TENIR_MODE", OperatingModeNames.SHADOW_PASSIVE).upper()
+    if configured_mode not in {"SHADOW_OFF", "SHADOW_PASSIVE", "SHADOW_CRITICAL", "ENFORCE"}:
+        raise RuntimeError("TENIR_MODE must be SHADOW_OFF, SHADOW_PASSIVE, SHADOW_CRITICAL, or ENFORCE")
+    if ledger.entry_count == 0 and configured_mode in {"SHADOW_CRITICAL", "ENFORCE"}:
+        raise RuntimeError(
+            "An empty ledger must bootstrap in SHADOW_OFF or SHADOW_PASSIVE; "
+            "use signed transitions to enter SHADOW_CRITICAL and then ENFORCE."
+        )
+    app.state.mode = ledger.recover_last_mode(default=configured_mode)
     app.state.tenant_id = os.getenv("TENANT_ID", "partner_a")
 
     logger.info("[R5] IRON OMEGA R5 ready")
@@ -154,14 +184,33 @@ app = FastAPI(
     version="5.0.0",
     description="Neuro-Symbolic Governance Platform: NSL + Neo4j + Live VPS + Distributed Crypto",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
+cors_origins = [origin.strip() for origin in os.getenv("TENIR_CORS_ORIGINS", "").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+
+async def require_api_token(authorization: Optional[str] = Header(default=None)) -> None:
+    expected = getattr(app.state, "api_token", "") or os.getenv("TENIR_API_TOKEN", "")
+    scheme, _, supplied = (authorization or "").partition(" ")
+    if len(expected) < 32:
+        raise HTTPException(status_code=503, detail="TENIR API token is not configured")
+    if scheme.lower() != "bearer" or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Bearer token required")
+
+
+async def require_operator(operator_id: str) -> None:
+    configured = getattr(app.state, "operator_id", "") or os.getenv("TENIR_OPERATOR_ID", "")
+    if not configured or not hmac.compare_digest(operator_id, configured):
+        raise HTTPException(status_code=403, detail="Operator identity is not authorized")
 
 
 # ─── REQUEST / RESPONSE MODELS ────────────────────────────────────────────────
@@ -172,26 +221,31 @@ class AdjudicationRequest(BaseModel):
       - Strict JSON EventSample (legacy V42CIron format)
       - Raw natural language (routed through NSL inference engine)
     """
-    raw_input: str = Field(..., description="Natural language OR JSON EventSample")
+    raw_input: Optional[str] = Field(None, description="Legacy natural language or JSON; shadow modes only")
+    runtime_object: Optional[dict] = Field(None, description="Canonical TENIR 2.0 schema 1.2 object")
     case_id: Optional[str] = Field(None, description="Optional case identifier")
     actor_ref: Optional[str] = Field(None, description="Operator ID or service ref")
 
 
 class AdjudicationResponse(BaseModel):
-    entry_id: str
+    entry_id: Optional[str]
     timestamp: str
-    s_score: float
-    ds_de: float
-    d2s_de2: float
+    s_score: Optional[float]
+    ds_de: Optional[float]
+    d2s_de2: Optional[float]
     horizon_events: Optional[int]
     ces_state: str
     membrane_decision: str
     rationale: str
     operating_mode: str
-    nsl_backend: str          # "llm" | "grammar" | "json"
-    nsl_confidence: float
-    entry_hash: str
-    merkle_epoch: int
+    nsl_backend: Optional[str]  # "llm" | "grammar" | "json" | "schema-1.2"
+    nsl_confidence: Optional[float]
+    entry_hash: Optional[str]
+    merkle_epoch: Optional[int]
+    execution_allowed: bool = True
+    execution_disposition: str = "allow"
+    constraint_geometry: Optional[dict] = None
+    schema_version: Optional[str] = None
 
 
 class TransitionRequest(BaseModel):
@@ -201,6 +255,10 @@ class TransitionRequest(BaseModel):
     oath_signature: str
     nonce: str
     timestamp: str
+
+
+class OathSignRequest(BaseModel):
+    operator_id: str
 
 
 class LedgerVerifyResponse(BaseModel):
@@ -222,7 +280,7 @@ class EpochValidateRequest(BaseModel):
 
 # ─── ADJUDICATE ───────────────────────────────────────────────────────────────
 
-@app.post("/api/v1/adjudicate", response_model=AdjudicationResponse)
+@app.post("/api/v1/adjudicate", response_model=AdjudicationResponse, dependencies=[Depends(require_api_token)])
 async def adjudicate(req: AdjudicationRequest):
     """
     R5 main adjudication endpoint.
@@ -235,29 +293,76 @@ async def adjudicate(req: AdjudicationRequest):
       5. Neo4j graph persist
       6. WebSocket broadcast to all VPS clients
     """
-    nsl_engine = get_inference_engine()
-    ledger = get_ledger()
-    hub = get_hub()
-
-    # ── Step 1: NSL Inference ─────────────────────────────────────────────────
-    record = nsl_engine.infer(req.raw_input)
-
-    if not record.validation_passed or not record.compiled_params:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "NSL_PARSE_FAILURE",
-                "message": record.error or "Could not parse input",
-                "input": req.raw_input[:200],
-                "backend": record.inference_backend,
-            }
+    if app.state.mode == "SHADOW_OFF":
+        return AdjudicationResponse(
+            entry_id=None,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            s_score=None,
+            ds_de=None,
+            d2s_de2=None,
+            horizon_events=None,
+            ces_state="NOT_EVALUATED",
+            membrane_decision=MembraneDecisionNames.NOT_EVALUATED,
+            rationale="Governance evaluation is disabled in SHADOW_OFF; no input was parsed or recorded.",
+            operating_mode=app.state.mode,
+            nsl_backend=None,
+            nsl_confidence=None,
+            entry_hash=None,
+            merkle_epoch=None,
+            execution_allowed=True,
+            execution_disposition="allow_unobserved",
+            schema_version=None,
         )
 
-    params = record.compiled_params
-    pressure = float(params.get("pressure", 0.5))
-    velocity = float(params.get("velocity", 0.5))
-    capacity = float(params.get("capacity", 0.85))
-    option_space = float(params.get("option_space", 0.75))
+    if (req.runtime_object is None) == (req.raw_input is None):
+        raise HTTPException(status_code=422, detail="Provide exactly one of runtime_object or raw_input.")
+
+    geometry_result = None
+    if req.runtime_object is not None:
+        try:
+            runtime_object = validate_runtime_object(req.runtime_object)
+            kernel_result = app.state.tenir_kernel.adjudicate_runtime_object(
+                runtime_object,
+                mode=app.state.mode,
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        params = runtime_object["scores"]
+        pressure = float(params["pressure"])
+        velocity = float(params["velocity"])
+        capacity = float(params["capacity"])
+        option_space = float(params["option_space"])
+        geometry_result = kernel_result["constraint_geometry"]
+        record = SimpleNamespace(
+            inference_backend="schema-1.2",
+            confidence=float(runtime_object["epistemic"]["evidence_quality"]),
+            final_ast=runtime_object,
+        )
+    else:
+        if app.state.mode == "ENFORCE":
+            raise HTTPException(
+                status_code=422,
+                detail="ENFORCE requires a canonical TENIR 2.0 schema 1.2 runtime_object.",
+            )
+        record = get_inference_engine().infer(req.raw_input or "")
+        if not record.validation_passed or not record.compiled_params:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "NSL_PARSE_FAILURE",
+                    "message": record.error or "Could not parse input",
+                    "input": (req.raw_input or "")[:200],
+                    "backend": record.inference_backend,
+                },
+            )
+        params = record.compiled_params
+        pressure = float(params.get("pressure", 0.5))
+        velocity = float(params.get("velocity", 0.5))
+        capacity = float(params.get("capacity", 0.85))
+        option_space = float(params.get("option_space", 0.75))
+
+    ledger = get_ledger()
+    hub = get_hub()
 
     # ── Step 2: Trajectory Kernel ─────────────────────────────────────────────
     trajectory = app.state.kernel.compute(pressure, velocity, capacity)
@@ -272,6 +377,25 @@ async def adjudicate(req: AdjudicationRequest):
         projected_events_to_zero=trajectory.horizon_events,
         operating_mode=_policy_mode(app.state.mode),
     )
+    if geometry_result:
+        policy_rationale = (
+            f"{policy_rationale} Geometry={geometry_result['geometry_id']}"
+            f"/{geometry_result['policy_version']} feasible={geometry_result['feasible']}"
+            f" minimum_signed_margin={geometry_result['minimum_signed_margin']}."
+        )
+        if kernel_result["decision"] == "HARD_VETO":
+            intended_block = True
+            alert = True
+            membrane_decision = (
+                MembraneDecisionNames.BLOCK
+                if app.state.mode == "ENFORCE"
+                else MembraneDecisionNames.ALLOW_WITH_INTENDED_BLOCK
+            )
+            policy_rationale = f"{policy_rationale} TENIR 2.0 runtime gates: {kernel_result['rationale']}"
+        elif kernel_result["decision"] == "FLAG" and membrane_decision == MembraneDecisionNames.ALLOW:
+            alert = True
+            membrane_decision = MembraneDecisionNames.ALLOW_WITH_ALERT
+            policy_rationale = f"{policy_rationale} Constraint geometry: {kernel_result['rationale']}"
     rationale = _build_rationale(trajectory, ces_state, membrane_decision, record, policy_rationale)
 
     # ── Step 4: Distributed Ledger Append ────────────────────────────────────
@@ -279,7 +403,9 @@ async def adjudicate(req: AdjudicationRequest):
         json.dumps(record.final_ast or {}, sort_keys=True).encode()
     ).hexdigest() if record.final_ast else "NO_AST"
 
-    workflow_id = req.case_id or record.final_ast.get("entity_identifier") or "WF-UNKNOWN" if record.final_ast else "WF-UNKNOWN"
+    ast = record.final_ast or {}
+    identity = ast.get("identity", {}) if isinstance(ast, dict) else {}
+    workflow_id = req.case_id or ast.get("entity_identifier") or identity.get("unit_name") or "WF-UNKNOWN"
 
     entry = await ledger.append(
         tenant_id=app.state.tenant_id,
@@ -365,17 +491,35 @@ async def adjudicate(req: AdjudicationRequest):
         nsl_confidence=record.confidence,
         entry_hash=entry.entry_hash,
         merkle_epoch=entry.epoch,
+        execution_allowed=membrane_decision != MembraneDecisionNames.BLOCK,
+        execution_disposition=(
+            "block" if membrane_decision == MembraneDecisionNames.BLOCK
+            else "allow_with_intended_block" if membrane_decision == MembraneDecisionNames.ALLOW_WITH_INTENDED_BLOCK
+            else "allow_with_alert" if membrane_decision == MembraneDecisionNames.ALLOW_WITH_ALERT
+            else "allow"
+        ),
+        constraint_geometry=geometry_result,
+        schema_version="1.2" if req.runtime_object is not None else None,
     )
 
 
 # ─── MODE TRANSITION ─────────────────────────────────────────────────────────
 
-@app.post("/api/v1/transition")
+@app.post("/api/v1/transition", dependencies=[Depends(require_api_token)])
 async def request_transition(req: TransitionRequest):
     """
     R5 sovereign transition endpoint.
     Validates oath signature via KeyCeremony before allowing mode transitions.
     """
+    await require_operator(req.operator_id)
+    from_mode = app.state.mode
+    if req.target_mode == "ENFORCE" and from_mode != "SHADOW_CRITICAL":
+        raise HTTPException(
+            status_code=409,
+            detail="ENFORCE requires a prior transition to SHADOW_CRITICAL.",
+        )
+    if req.target_mode == from_mode:
+        raise HTTPException(status_code=409, detail="The requested mode is already active.")
     ceremony = get_ceremony()
     ledger = get_ledger()
     hub = get_hub()
@@ -400,25 +544,30 @@ async def request_transition(req: TransitionRequest):
             }
         )
 
-    from_mode = app.state.mode
-    app.state.mode = req.target_mode
     transition_id = str(uuid4())
 
+    try:
+        transition_entry = ledger.append_control_transition(
+            transition=f"{from_mode}_TO_{req.target_mode}",
+            from_mode=from_mode,
+            to_mode=req.target_mode,
+            operator_id=req.operator_id,
+            reason="operator-authenticated oath transition",
+            policy_version=app.state.policy.version,
+            override_signature=req.oath_signature,
+            override_operator=req.operator_id,
+            override_nonce=req.nonce,
+        )
+    except Exception as exc:
+        logger.error("[R5] Mode transition ledger append failed; active mode unchanged")
+        raise HTTPException(status_code=503, detail="Transition could not be recorded; mode unchanged.") from exc
+
+    # The local append-only ledger is authoritative; only advance live mode once
+    # it has durably accepted the signed control transition.
+    app.state.mode = req.target_mode
     logger.info(
         f"[R5] Mode transition: {from_mode} → {req.target_mode} "
         f"by operator={req.operator_id}"
-    )
-
-    transition_entry = ledger.append_control_transition(
-        transition=f"{from_mode}_TO_{req.target_mode}",
-        from_mode=from_mode,
-        to_mode=req.target_mode,
-        operator_id=req.operator_id,
-        reason="operator-authenticated oath transition",
-        policy_version=app.state.policy.version,
-        override_signature=req.oath_signature,
-        override_operator=req.operator_id,
-        nonce=req.nonce,
     )
 
     # Persist transition to Neo4j
@@ -462,35 +611,36 @@ async def request_transition(req: TransitionRequest):
 
 # ─── OATH SIGNING ─────────────────────────────────────────────────────────────
 
-@app.post("/api/v1/oath/sign")
-async def sign_oath(operator_id: str):
+@app.post("/api/v1/oath/sign", dependencies=[Depends(require_api_token)])
+async def sign_oath(req: OathSignRequest):
     """Signs an oath for the current epoch. Call before requesting a transition."""
+    await require_operator(req.operator_id)
     ceremony = get_ceremony()
     ledger = get_ledger()
     epoch_id = ledger.current_epoch.epoch_id
     signed = ceremony.sign_oath(
         oath_text=KeyCeremony.OATH_TEXT,
         epoch_id=epoch_id,
-        operator_id=operator_id,
+        operator_id=req.operator_id,
     )
     return {"oath_text": KeyCeremony.OATH_TEXT, **signed}
 
 
 # ─── LEDGER ENDPOINTS ─────────────────────────────────────────────────────────
 
-@app.get("/api/v1/ledger/verify", response_model=LedgerVerifyResponse)
+@app.get("/api/v1/ledger/verify", response_model=LedgerVerifyResponse, dependencies=[Depends(require_api_token)])
 async def verify_ledger():
     ledger = get_ledger()
     return ledger.verify_full_chain()
 
 
-@app.get("/api/v1/ledger/recent")
+@app.get("/api/v1/ledger/recent", dependencies=[Depends(require_api_token)])
 async def get_recent_entries(n: int = 50):
     ledger = get_ledger()
     return ledger.get_recent_entries(min(n, 200))
 
 
-@app.get("/api/v1/ledger/proof/{entry_id}")
+@app.get("/api/v1/ledger/proof/{entry_id}", dependencies=[Depends(require_api_token)])
 async def get_merkle_proof(entry_id: str):
     ledger = get_ledger()
     proof = ledger.get_merkle_proof(entry_id)
@@ -499,7 +649,7 @@ async def get_merkle_proof(entry_id: str):
     return proof
 
 
-@app.post("/api/v1/ledger/validate_epoch")
+@app.post("/api/v1/ledger/validate_epoch", dependencies=[Depends(require_api_token)])
 async def validate_epoch(req: EpochValidateRequest):
     """Peer consensus endpoint — validates a claimed Merkle root against local ledger."""
     ledger = get_ledger()
@@ -512,7 +662,7 @@ async def validate_epoch(req: EpochValidateRequest):
 
 # ─── GRAPH ENDPOINTS ──────────────────────────────────────────────────────────
 
-@app.get("/api/v1/graph/cp_net")
+@app.get("/api/v1/graph/cp_net", dependencies=[Depends(require_api_token)])
 async def get_cp_net():
     """Returns the live CP-Net graph for VPS 3D rendering."""
     try:
@@ -522,7 +672,7 @@ async def get_cp_net():
         return {"edges": [], "conflicts": [], "error": str(e)}
 
 
-@app.get("/api/v1/graph/fragility")
+@app.get("/api/v1/graph/fragility", dependencies=[Depends(require_api_token)])
 async def get_fragility():
     """Returns structural fragility scores per domain."""
     try:
@@ -540,7 +690,7 @@ async def get_fragility():
 
 # ─── STATE ────────────────────────────────────────────────────────────────────
 
-@app.get("/api/v1/state")
+@app.get("/api/v1/state", dependencies=[Depends(require_api_token)])
 async def get_state():
     ledger = get_ledger()
     hub = get_hub()
@@ -558,6 +708,11 @@ async def get_state():
     }
 
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 # ─── WEBSOCKET ────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws/vps")
@@ -566,6 +721,11 @@ async def vps_websocket(ws: WebSocket):
     Live WebSocket endpoint for the 3D VPS engine.
     All kernel events are streamed here in real-time.
     """
+    expected = getattr(app.state, "api_token", "") or os.getenv("TENIR_API_TOKEN", "")
+    scheme, _, supplied = (ws.headers.get("authorization", "")).partition(" ")
+    if len(expected) < 32 or scheme.lower() != "bearer" or not hmac.compare_digest(supplied, expected):
+        await ws.close(code=1008, reason="Bearer token required")
+        return
     hub = get_hub()
     await handle_client(ws, hub)
 
