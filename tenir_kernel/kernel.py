@@ -56,6 +56,7 @@ class TenirKernel:
         geometry_id: str = GEOMETRY_ID,
         mode: str = "SHADOW_PASSIVE",
         hard_gate_reasons: tuple[str, ...] = (),
+        soft_gate_reasons: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         mode = mode.upper()
         if mode not in VALID_MODES:
@@ -107,7 +108,7 @@ class TenirKernel:
             hard_reasons.append(f"S={score:.6f} is at or below hard-veto floor {self.policy.hard_veto_below}")
         hard_reasons.extend(v["rationale"] for v in geometry_result["hard_violations"])
 
-        soft_reasons: list[str] = []
+        soft_reasons: list[str] = list(soft_gate_reasons)
         if score < self.policy.flag_below:
             soft_reasons.append(f"S={score:.6f} is below flag floor {self.policy.flag_below}")
         soft_reasons.extend(v["rationale"] for v in geometry_result["soft_violations"])
@@ -173,6 +174,7 @@ class TenirKernel:
         ):
             hard_reasons.append("Material irreversible-pathway evidence lacks required human verification.")
 
+        soft_gate_reasons = ("Runtime posture is CAUTION.",) if validated["posture"] == "CAUTION" else ()
         coordinates = coordinates_from_runtime_object(validated)
         return self.adjudicate(
             pressure=scores["pressure"],
@@ -182,6 +184,7 @@ class TenirKernel:
             geometry_id=validated["constraint_geometry"]["geometry_id"],
             mode=mode,
             hard_gate_reasons=tuple(hard_reasons),
+            soft_gate_reasons=soft_gate_reasons,
         )
 
 
