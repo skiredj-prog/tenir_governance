@@ -19,7 +19,7 @@ Governance Branch:    tenir_governance/
 
 Version: 5.2.0 (TENIR 2.0 runtime kernel)
 Policy: tenir-canonical-v1.0.0
-Policy fingerprint: cb96dd8d35197ab0
+Policy fingerprint: d083e0b82a16c04d0
 """
 
 from .nomenclature import (
