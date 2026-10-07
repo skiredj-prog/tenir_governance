@@ -188,6 +188,7 @@ class CESStateNames:
 # ─── MEMBRANE DECISION NAMES ─────────────────────────────────────────────────
 
 class MembraneDecisionNames:
+    NOT_EVALUATED              = "not_evaluated"
     ALLOW                      = "allow"
     ALLOW_WITH_ALERT           = "allow_with_alert"
     ALLOW_WITH_INTENDED_BLOCK  = "allow_with_intended_block"
