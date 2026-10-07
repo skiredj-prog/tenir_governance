@@ -6,6 +6,7 @@
 #   docker compose exec tenir-middleware pytest -v --cov=tenir_governance
 #
 # With Neo4j graph features enabled:
+#   Set NEO4J_PASSWORD in .env before enabling the graph profile, then run:
 #   docker compose --profile graph up -d --build
 
 services:
@@ -57,7 +58,7 @@ services:
       - "127.0.0.1:7474:7474"
       - "127.0.0.1:7687:7687"
     environment:
-      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-}
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env for the graph profile}
       NEO4J_PLUGINS: '["apoc"]'
     volumes:
       - neo4j-data:/data
