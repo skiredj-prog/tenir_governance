@@ -66,7 +66,7 @@ class HTTPConnector:
             },
         )
         try:
-            with _opener_for_url(self.base_url).open(request, timeout=self.timeout) as response:
+            with _opener_for_url(self.base_url, _RejectRedirects).open(request, timeout=self.timeout) as response:
                 result = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             raise RuntimeError(f"TENIR API returned HTTP {exc.code}") from None
@@ -92,7 +92,7 @@ class HTTPConnector:
         In shadow modes, intended blocks remain executable by design.
         """
         decision = self.adjudicate(runtime_object)
-        if not decision.get("execution_allowed", False):
+        if decision.get("execution_allowed") is not True:
             raise GovernanceBlockedError(decision)
 
         parts = urlsplit(action_url)
