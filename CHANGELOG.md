@@ -6,6 +6,29 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [5.2.0] — 2026-10-07 — TENIR 2.0 Kernel & Security Hardening
+
+### Added
+- `tenir_kernel` dependency-light execution kernel with schema 1.2 validation, constraint geometry, CLI, API wrapper, and Python/HTTP connectors.
+- Secure-schema12 runtime object path and browser-compatible WebSocket authentication.
+
+### Changed
+- Package version and public API metadata updated to `5.2.0`.
+- R5 HTTP services require bearer authentication and operator/oath secrets; Docker network bindings are localhost-only by default.
+- Mode recovery and signed transition recording are aligned across wired and hardened R5 surfaces.
+
+### Fixed
+- SHADOW_OFF now returns `NOT_EVALUATED` without evaluating inputs.
+- Malformed connector authorization responses fail closed.
+- Unknown geometry severities fail closed.
+- CAUTION posture is surfaced as a `FLAG` rather than silently passing.
+- Legacy wired transition ledger calls use the canonical nonce field.
+
+### Validation
+- Release branch validation is performed through the repository CI gate and kernel/runtime regression suites.
+
+---
+
 ## [5.1.0] — 2026-07-01 — Coverage Uplift & Governance Kernel
 
 ### Added
