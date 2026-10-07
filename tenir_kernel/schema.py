@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from importlib.resources import files
+
+SCHEMA_VERSION = "1.2"
+ENGINE_SPEC_VERSION = "2.0"
 import json
 from typing import Any, Mapping
 
