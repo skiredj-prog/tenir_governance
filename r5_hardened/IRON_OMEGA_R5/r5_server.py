@@ -723,7 +723,14 @@ async def vps_websocket(ws: WebSocket):
     """
     expected = getattr(app.state, "api_token", "") or os.getenv("TENIR_API_TOKEN", "")
     scheme, _, supplied = (ws.headers.get("authorization", "")).partition(" ")
-    if len(expected) < 32 or scheme.lower() != "bearer" or not hmac.compare_digest(supplied, expected):
+    if scheme.lower() != "bearer":
+        supplied = ""
+        for protocol in ws.headers.get("sec-websocket-protocol", "").split(","):
+            protocol = protocol.strip()
+            if protocol.startswith("bearer."):
+                supplied = protocol[7:]
+                break
+    if len(expected) < 32 or not hmac.compare_digest(supplied, expected):
         await ws.close(code=1008, reason="Bearer token required")
         return
     hub = get_hub()
