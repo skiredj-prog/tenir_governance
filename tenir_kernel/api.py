@@ -4,7 +4,6 @@ import hmac
 import os
 from typing import Any
 
-from fastapi.concurrency import run_in_threadpool
 
 from .kernel import TenirKernel
 
@@ -12,6 +11,7 @@ from .kernel import TenirKernel
 def create_app():
     try:
         from fastapi import FastAPI, Header, HTTPException
+        from fastapi.concurrency import run_in_threadpool
         from pydantic import BaseModel, ConfigDict
     except ImportError as exc:  # pragma: no cover - depends on optional install
         raise RuntimeError("Install the API extra: pip install -e '.[api]'") from exc
