@@ -596,6 +596,13 @@ class DistributedLedger:
         self._all_entries.append(entry)
         return asdict(entry)
 
+    def recover_last_mode(self, default: str = "SHADOW_PASSIVE") -> str:
+        """Recover the last effective operating mode from recorded transitions."""
+        for entry in reversed(self._all_entries):
+            if entry.entry_type == "control_transition" and entry.transition_to_mode:
+                return entry.transition_to_mode
+        return default
+
     def verify_chain(self) -> Dict[str, Any]:
         """Public sync alias of verify_full_chain for r5_server compatibility."""
         report = self.verify_full_chain()
