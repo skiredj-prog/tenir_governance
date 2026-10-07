@@ -123,10 +123,10 @@ async def lifespan(app: FastAPI):
     peer_urls = [u.strip() for u in os.getenv("PEER_NODES", "").split(",") if u.strip()]
     if peer_urls:
         peers = [PeerNode(node_id=f"peer-{i}", url=url, public_key="") for i, url in enumerate(peer_urls)]
-        app.state.consensus = ConsensusBroadcast(peers, api_token=app.state.api_token)
+        app.state.consensus = ConsensusBroadcast(peers)
         logger.info(f"[R5] Consensus peers: {peer_urls}")
     else:
-        app.state.consensus = ConsensusBroadcast([], api_token=app.state.api_token)
+        app.state.consensus = ConsensusBroadcast([])
         logger.info("[R5] Single-node mode (no peers)")
 
     # Initialize kernel with shared governance policy (Sprint 12 wiring).
@@ -479,6 +479,7 @@ async def request_transition(req: TransitionRequest):
             policy_version=getattr(getattr(app.state, "policy", None), "version", "legacy-unavailable"),
             override_signature=req.oath_signature,
             override_operator=req.operator_id,
+            nonce=req.nonce,
             override_nonce=req.nonce,
         )
     except Exception as exc:
