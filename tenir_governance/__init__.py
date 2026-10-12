@@ -104,6 +104,13 @@ from .operations import (
     DurableOperationRegistry,
     OperationRecord,
     OperationState,
+    HoldRecord,
+    ExitReceipt,
+    HoldManager,
+)
+from .composition import (
+    CompositionHoldStrategy,
+    CompositionHoldManager,
 )
 
 __version__ = "5.3.0"

@@ -21,7 +21,7 @@ It does not replace an LLM, an identity system, an observability stack, a policy
 
 1. **Problem:** Models reason and agents propose actions — but a consequential action needs a runtime decision about whether it is admissible before execution.
 2. **Solution:** TENIR-Gov provides a deterministic execution-control layer at the decision → action boundary, with explicit policy thresholds and fail-closed defaults.
-3. **Proof:** The R5.0.0 repository includes an independently deployable governance kernel, a full middleware implementation, automated validation, and Merkle-backed decision records.
+3. **Proof:** The v5.3.0 package includes a two-kernel composition layer (continuous risk monitor + discrete invariant enforcer), a HOLD lifecycle for governed suspension of agency, automated validation (501 tests), and hash-chained decision records.
 
 ---
 
@@ -140,7 +140,7 @@ This separation prevents downstream valuation or analytics signals from becoming
 
 # Core Decision Model
 
-The R5.0.0 kernel uses:
+The v5.3.0 kernel uses:
 
 ```text
 S = K / (P × V + ε)
@@ -153,10 +153,10 @@ Where:
 | `K`    | Current system capacity                         |
 | `P`    | Action pressure                                 |
 | `V`    | Action volatility / consequence exposure        |
-| `ε`    | Stability floor; canonical R5.0.0 value: `1e-6` |
+| `ε`    | Stability floor; canonical value: `1e-6` |
 | `S`    | Calculated admissibility score                  |
 
-The formula is an implementation construct of the R5.0.0 policy model. It should not be interpreted as a universal measure of safety, risk, or organizational capacity.
+The formula is an implementation construct of the v5.3.0 policy model. It should not be interpreted as a universal measure of safety, risk, or organizational capacity.
 
 ### Kernel verdicts
 
@@ -184,7 +184,7 @@ Institutional deployments should calibrate them against their declared operating
 
 # Fail-Closed Semantics
 
-R5.0.0 is designed around a fail-closed control posture at the kernel decision boundary.
+v5.3.0 is designed around a fail-closed control posture at the kernel decision boundary.
 
 Where the active policy determines that a request falls outside the admissible operating region, the kernel produces:
 
@@ -199,6 +199,18 @@ The wider system may additionally implement review, escalation, recovery, or alt
 ---
 
 # Quick Start
+
+## Install
+
+```bash
+pip install tenir-governance
+```
+
+Or with the composition layer and CLI tools (included by default):
+
+```bash
+pip install tenir-governance[test]
+```
 
 ## Core — Standalone Kernel
 
@@ -253,7 +265,7 @@ print(result.to_business_payload())
 
 # Repository Architecture
 
-## R5.0.0 · IRON OMEGA
+## v5.3.0 · IRON OMEGA
 
 ```text
 tenir-gov/
@@ -370,14 +382,13 @@ It does not, by itself, prove that a policy was correct, that an input was truth
 
 # Test Suite
 
-R5.0.0 contains separate validation scopes.
+v5.3.0 contains separate validation scopes.
 
 | Suite            | Count | Scope                                           |
 | ---------------- | ----: | ----------------------------------------------- |
 | Kernel           |     8 | Core formula, policy, ledger and API validation |
-| Full middleware  |   547 | `tenir_governance` unit/integration coverage    |
-| R4 monitor       |    61 | R4 monitor runtime                              |
-| Repository total |   557 | Published R5 validation set                     |
+| Full middleware  |   501 | `tenir_governance` unit/integration coverage    |
+| Repository total |   501 | Published v5.3.0 validation set                 |
 
 The reported coverage figure is:
 
@@ -427,7 +438,7 @@ Conformance to these checks should not be interpreted as proof of organizational
 
 # Performance
 
-R5.0.0 includes an internal benchmark performed on:
+v5.3.0 includes an internal benchmark performed on:
 
 ```text
 AMD Ryzen 9 7950X
@@ -470,7 +481,7 @@ These include:
 
 Their presence in the repository does not mean that every component is part of the minimal deterministic kernel or has the same implementation status.
 
-The **kernel and full middleware should therefore be distinguished from experimental, integration, and historical components** when evaluating R5.0.0.
+The **kernel and full middleware should therefore be distinguished from experimental, integration, and historical components** when evaluating v5.3.0.
 
 ---
 
@@ -506,7 +517,7 @@ CES is an internal/experimental governance-state model in the R5 repository. It 
 
 # Terminology
 
-R5.0.0 replaces several historical internal terms with neutral canonical terminology.
+v5.3.0 replaces several historical internal terms with neutral canonical terminology.
 
 | Historical term       | Canonical R5 term       |
 | --------------------- | ----------------------- |
@@ -561,9 +572,9 @@ The purpose of TENIR-Gov is narrower:
 
 TENIR-Gov is part of the broader TENIR research and engineering program concerning runtime admissibility, autonomous systems, governance boundaries, and preservation of decision integrity under pressure.
 
-The R5.0.0 repository implements the **deterministic governance spine**.
+The v5.3.0 repository implements the **deterministic governance spine**.
 
-Broader TENIR concepts and ontological structures may appear in research materials and future releases, but they should not be inferred to be implemented by the R5.0.0 kernel merely because they exist in the broader framework.
+Broader TENIR concepts and ontological structures may appear in research materials and future releases, but they should not be inferred to be implemented by the v5.3.0 kernel merely because they exist in the broader framework.
 
 ---
 

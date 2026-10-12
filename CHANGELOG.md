@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased] — HOLD Lifecycle
+
+### Added
+- **`tenir_governance/operations/hold.py`** — `HoldManager` class implementing the full HOLD lifecycle: `enter_hold()`, `resolve_hold()`, `escalate_hold()`, `authorize_exit()`, `expire_hold()`, `expire_escalated()`, `check_tau_k_expiry()`, `find_holds()`, `find_escalated()`, `find_unresolved_holds()`.
+- **`HoldRecord`** dataclass (hold_start, tau_k_seconds, tau_k_source, escalated_at, escalated_by, exit_reason, exit_receipt) with durable persistence across restarts.
+- **`ExitReceipt`** dataclass (authorized_by, scope, timestamp, authorization, reason) for authenticated exit from ESCALATED state.
+- **`OperationState.HOLD`** and **`OperationState.ESCALATED`** states with legal transitions: CREATED→HOLD, HOLD→RESERVED|FAILED|ESCALATED, ESCALATED→RESERVED|FAILED|UNKNOWN.
+- **`tenir_governance/composition/hold_strategy.py`** — `CompositionHoldManager` with 5 strategies (Priority-Enforce, Serialize, Pareto-Restore, Escalate, Fail-Closed-Collectif) and progressive unblock (Déblocage progressif post Fail-Closed).
+- **QUARANTINE_LOCK** in membrane — `lock_quarantine()` / `release_quarantine()` with authenticated authorization and receipt. Distinct from HOLD: blocks ALL admission/dispatch for an LEI until authorized release.
+- **Governor HOLD integration** — `adjudicate()` transitions to HOLD state; `resolve_hold()` re-adjudicates with new evidence; `resume_existing()` returns `resolve_or_escalate` for HOLD and `await_authorized_exit` for ESCALATED; `recover()` includes HOLD and ESCALATED operations.
+- **Tests** — 59 new tests in `test_hold_lifecycle.py` covering HOLD lifecycle, authorized exit, τ_K expiry, governor integration, QUARANTINE_LOCK, composition-level HOLD, state transitions, and persistence. Total: 501 tests passing.
+
+### Doctrine Compliance
+- HOLD is a designed suspension of agency, not a system failure (v7.1 §6).
+- ESCALATED is absorbing — no time-based exit; τ_K expiry → UNKNOWN, not resolution (v7.1 §19).
+- QUARANTINE_LOCK is distinct from HOLD — blocks everything until authorized release (v7.1 §6).
+- τ_K is derived from existing org SLAs, never invented (Blueprint v4.4 §0.5).
+- Progressive unblock verifies invariants before each TAU release (Blueprint v4.4 §8).
+
+---
+
 ## [5.3.0] — 2026-10-12 — Two-Kernel Composition (Agentic Governance Profile v1.0.0)
 
 ### Added
