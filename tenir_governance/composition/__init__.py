@@ -23,6 +23,7 @@ from .decisions import Decision, ExecutionStatus, CheckType
 from .policy import CompositionPolicy
 from .lattice import compose, HashChainedLedger, LedgerEntry
 from .governor import DualKernelGovernor, ScoringKernelAdapter
+from .hold_strategy import CompositionHoldStrategy, CompositionHoldManager
 from .schema_adapter import (
     conform_to_schema,
     POSTURE_MAP,
@@ -34,6 +35,7 @@ __all__ = [
     "Decision", "ExecutionStatus", "CheckType", "CompositionPolicy",
     "compose", "HashChainedLedger", "LedgerEntry",
     "DualKernelGovernor", "ScoringKernelAdapter",
+    "CompositionHoldStrategy", "CompositionHoldManager",
     "conform_to_schema", "POSTURE_MAP", "EXECUTION_DISPOSITION_MAP",
     "DISCLOSURE",
 ]

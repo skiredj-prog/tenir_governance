@@ -22,11 +22,17 @@ from .._profile_meta import DISCLOSURE
 
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ..objects import Agent, Passage, Trajectory, Delegation, Resource, MissionInvariant
 from ..objects.passage import ExecutionStatus as PassageStatus
 from ..composition.decisions import Decision, CheckType
+
+
+def _utc_now() -> str:
+    """Return current UTC time as ISO 8601 string."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -37,6 +43,9 @@ class MembraneState:
     trajectories: dict[str, Trajectory] = field(default_factory=dict)
     passages: dict[str, Passage] = field(default_factory=dict)
     quarantine: bool = False
+    quarantine_locked_at: str = ""
+    quarantine_locked_by: str = ""
+    quarantine_release_receipt: dict | None = None
     invariants: list[MissionInvariant] = field(default_factory=list)
     # Per-resource locks for atomic budget reservations
     _locks: dict[str, threading.Lock] = field(default_factory=dict)
@@ -59,6 +68,72 @@ class MembraneState:
         if resource_id not in self._locks:
             self._locks[resource_id] = threading.Lock()
         return self._locks[resource_id]
+
+    def lock_quarantine(self, locked_by: str = "") -> None:
+        """Activate QUARANTINE_LOCK — blocks all new admission and dispatch.
+
+        Per v7.1 §6: QUARANTINE_LOCK blocks new attempt admission and
+        execution dispatch for the LEI until an authorized release or
+        resolution transition succeeds.
+
+        This is distinct from a HOLD decision — QUARANTINE_LOCK is a
+        persistent LEI-level guard, not a per-operation disposition.
+        """
+        self.quarantine = True
+        self.quarantine_locked_at = _utc_now()
+        self.quarantine_locked_by = locked_by
+        self.quarantine_release_receipt = None
+
+    def release_quarantine(
+        self,
+        authorized_by: str,
+        scope: str,
+        authorization: str,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """Release QUARANTINE_LOCK — requires authenticated authorization.
+
+        Per v7.1 §6: Release must be authenticated and authorized under
+        the applicable governance contract.
+
+        Per Blueprint v4.4 §5: overrides constitutionnels uniquement via
+        Ceremony G-R5-001 (authentification opérateur).
+
+        Returns:
+            dict with released (bool), receipt, and reason
+        """
+        if not self.quarantine:
+            return {
+                "released": False,
+                "reason": "No quarantine lock active.",
+                "receipt": None,
+            }
+
+        receipt = {
+            "authorized_by": authorized_by,
+            "scope": scope,
+            "timestamp": _utc_now(),
+            "authorization": authorization,
+            "reason": reason,
+            "locked_at": self.quarantine_locked_at,
+            "locked_by": self.quarantine_locked_by,
+        }
+
+        self.quarantine = False
+        self.quarantine_release_receipt = receipt
+        self.quarantine_locked_at = ""
+        self.quarantine_locked_by = ""
+
+        return {
+            "released": True,
+            "receipt": receipt,
+            "reason": f"Quarantine lock released by {authorized_by} via {authorization}.",
+        }
+
+    @property
+    def quarantine_active(self) -> bool:
+        """Check if quarantine lock is currently active."""
+        return self.quarantine
 
 
 @dataclass
@@ -257,6 +332,63 @@ class TransitionMembrane:
         # For the prototype, we return "unknown" and leave the passage in HOLD.
         passage.execution_status = PassageStatus.HELD
         return "unknown"
+
+    def lock_quarantine(self, locked_by: str = "") -> None:
+        """Activate QUARANTINE_LOCK — blocks all new admission and dispatch.
+
+        Per v7.1 §6: QUARANTINE_LOCK blocks new attempt admission and
+        execution dispatch for the LEI until an authorized release or
+        resolution transition succeeds.
+
+        This is distinct from a HOLD decision — QUARANTINE_LOCK is a
+        persistent LEI-level guard, not a per-operation disposition.
+        """
+        self.state.lock_quarantine(locked_by)
+
+    def release_quarantine(
+        self,
+        authorized_by: str,
+        scope: str,
+        authorization: str,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """Release QUARANTINE_LOCK — requires authenticated authorization.
+
+        Per v7.1 §6: Release must be authenticated and authorized under
+        the applicable governance contract.
+
+        Per Blueprint v4.4 §5: overrides constitutionnels uniquement via
+        Ceremony G-R5-001 (authentification opérateur).
+
+        Args:
+            authorized_by: who is authorizing the release (operator ID)
+            scope: scope of the authorization
+            authorization: authorization mechanism (e.g., "ceremony-G-R5-001")
+            reason: why the release is being authorized
+
+        Returns:
+            dict with released (bool), receipt, and reason
+        """
+        return self.state.release_quarantine(
+            authorized_by, scope, authorization, reason,
+        )
+
+    @property
+    def quarantine_active(self) -> bool:
+        """Check if quarantine lock is currently active."""
+        return self.state.quarantine_active
+
+    @property
+    def quarantine_locked_by(self) -> str:
+        return self.state.quarantine_locked_by
+
+    @property
+    def quarantine_locked_at(self) -> str:
+        return self.state.quarantine_locked_at
+
+    @property
+    def quarantine_release_receipt(self) -> dict | None:
+        return self.state.quarantine_release_receipt
 
 
 __all__ = [

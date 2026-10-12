@@ -50,13 +50,33 @@ class OperationState(str, Enum):
     Per review 3 §1: every legal state transition, its durable write, and
     the behavior if the process dies immediately before or after it must be
     defined.
+
+    HOLD lifecycle (per doctrine v7.1 and Blueprint v4.4):
+        HOLD is a first-class protocol state — a designed suspension of agency
+        under pressure, not a system failure. The operation is not denied; it
+        is pending evidence or review. HOLD may resolve to:
+          - RESERVED (evidence becomes sufficient → PASS/FLAG)
+          - FAILED (τ_K expires → fail-closed, NOT auto-resolve)
+          - ESCALATED (escalation to risk officer — absorbing until authorized)
+
+        ESCALATED is an absorbing state: it remains until an authorization
+        model defines who signs, under what scope, and with which receipt.
+        A time-based exit from ESCALATED is rejected: τ_K expiry produces
+        UNKNOWN, not resolution (per v7.1 §19).
+
+    QUARANTINE_LOCK is distinct from HOLD (per v7.1 §6):
+        HOLD withholds admission for the specific decision. QUARANTINE_LOCK
+        blocks ALL new admission and dispatch for the LEI until an authorized
+        release. The two must not be treated as interchangeable.
     """
     CREATED = "created"
+    HOLD = "hold"                    # Suspended pending evidence/review
     RESERVED = "reserved"
     DISPATCHING = "dispatching"
     CONFIRMED = "confirmed"
     FAILED = "failed"
     UNKNOWN = "unknown"
+    ESCALATED = "escalated"          # Absorbing — awaiting authorized exit
 
     @property
     def is_terminal(self) -> bool:
@@ -79,21 +99,98 @@ class OperationState(str, Enum):
         dispatched' from 'may have been dispatched'.
 
         DISPATCHING and UNKNOWN mean the operation may have been dispatched.
-        CONFIRMED means it definitely was. CREATED and RESERVED mean it
-        definitely was not.
+        CONFIRMED means it definitely was. CREATED, HOLD, RESERVED, and
+        ESCALATED mean it definitely was not.
         """
         return self in (OperationState.DISPATCHING, OperationState.CONFIRMED, OperationState.UNKNOWN)
+
+    @property
+    def is_holding(self) -> bool:
+        """Is this operation in a HOLD-related state (not yet authorized)?"""
+        return self in (OperationState.HOLD, OperationState.ESCALATED)
 
 
 # Legal transitions
 _LEGAL_TRANSITIONS = {
-    OperationState.CREATED: {OperationState.RESERVED, OperationState.FAILED},
+    OperationState.CREATED: {OperationState.RESERVED, OperationState.HOLD, OperationState.FAILED},
+    OperationState.HOLD: {OperationState.RESERVED, OperationState.FAILED, OperationState.ESCALATED},
     OperationState.RESERVED: {OperationState.DISPATCHING, OperationState.FAILED},
     OperationState.DISPATCHING: {OperationState.CONFIRMED, OperationState.FAILED, OperationState.UNKNOWN},
+    OperationState.ESCALATED: {OperationState.RESERVED, OperationState.FAILED, OperationState.UNKNOWN},
     OperationState.CONFIRMED: set(),  # terminal
     OperationState.FAILED: set(),  # terminal
     OperationState.UNKNOWN: set(),  # terminal (needs human)
 }
+
+
+@dataclass
+class ExitReceipt:
+    """Receipt for an authorized exit from HOLD or QUARANTINE_LOCK.
+
+    Per v7.1 §19: ESCALATED remains absorbing until an authorization model
+    defines who signs, under what scope, and with which receipt. A time-based
+    exit is rejected: expiry produces UNKNOWN, not resolution.
+
+    Per Blueprint v4.4 §5: overrides constitutionnels uniquement via
+    Ceremony G-R5-001 (authentification opérateur).
+    """
+    authorized_by: str = ""
+    scope: str = ""
+    timestamp: str = ""
+    authorization: str = ""  # e.g., "ceremony-G-R5-001", "risk-officer-override"
+    reason: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ExitReceipt":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class HoldRecord:
+    """Metadata for the HOLD lifecycle of an operation.
+
+    Per doctrine v7.1: HOLD is a first-class protocol state — a designed
+    suspension of agency under pressure, not a system failure. The operation
+    is not denied; it is pending evidence or review.
+
+    Fields:
+        hold_start: ISO timestamp when HOLD was entered
+        tau_k_seconds: temporal validity bound — the organization's reaction
+                       time to understand a situation and exercise its veto
+        tau_k_source: where τ_K was derived from (SLA, regulatory, etc.)
+        escalated_at: ISO timestamp when escalated to ESCALATED (if applicable)
+        escalated_by: who initiated the escalation
+        exit_reason: why the hold ended ("resolved", "expired", "escalated",
+                     "authorized_exit", "failed")
+        exit_receipt: receipt for authorized exits (None for expired/failed)
+    """
+    hold_start: str = ""
+    tau_k_seconds: float = 0.0
+    tau_k_source: str = ""
+    escalated_at: str = ""
+    escalated_by: str = ""
+    exit_reason: str = ""
+    exit_receipt: ExitReceipt | None = None
+
+    @property
+    def is_escalated(self) -> bool:
+        return bool(self.escalated_at)
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["exit_receipt"] = self.exit_receipt.to_dict() if self.exit_receipt else None
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "HoldRecord":
+        d = dict(d)
+        er = d.pop("exit_receipt", None)
+        exit_receipt = ExitReceipt.from_dict(er) if er else None
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__},
+                   exit_receipt=exit_receipt)
 
 
 @dataclass
@@ -102,6 +199,9 @@ class OperationRecord:
 
     Per review 3 §1: the key should be durably claimed before dispatch, with
     an explicit state machine. This record is the durable claim.
+
+    HOLD lifecycle fields are populated when the operation enters HOLD state
+    and updated through the hold lifecycle (resolve, escalate, expire, exit).
     """
     idempotency_key: str
     passage_id: str
@@ -116,17 +216,25 @@ class OperationRecord:
     composed_decision: str = ""
     # Which worker/process claimed the dispatch (for cross-process coordination)
     dispatch_claimed_by: str = ""
+    # HOLD lifecycle metadata (None unless operation has been in HOLD)
+    hold_record: HoldRecord | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["state"] = self.state.value
+        d["hold_record"] = self.hold_record.to_dict() if self.hold_record else None
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "OperationRecord":
         d = dict(d)
         d["state"] = OperationState(d.get("state", "created"))
-        return cls(**d)
+        hr = d.pop("hold_record", None)
+        hold_record = HoldRecord.from_dict(hr) if hr else None
+        # Remove hold_record from d since we'll pass it separately
+        d.pop("hold_record", None)
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__},
+                   hold_record=hold_record)
 
 
 class DurableOperationRegistry:
@@ -182,14 +290,32 @@ class DurableOperationRegistry:
         (fail-closed — refuse to proceed with stale data). A corrupt store
         sets the _corrupted flag so register() and transition_to() can refuse
         new operations, preventing silent duplicate adjudication.
+
+        Preserves hold_record from existing in-memory records when reloading,
+        so that HoldManager modifications are not lost during state transitions
+        that trigger a disk reload.
         """
         if not self._store_path or not os.path.exists(self._store_path):
             return
         try:
             with open(self._store_path, "r") as f:
                 data = json.load(f)
+            # Preserve hold_records from existing in-memory records.
+            # In-memory hold_records are always more up-to-date than disk
+            # because HoldManager modifies them in memory before calling
+            # transition_to(), which triggers this reload. Without this
+            # preservation, exit_reason and exit_receipt set by
+            # resolve_hold() / authorize_exit() would be lost.
+            existing_hold_records = {
+                k: v.hold_record for k, v in self._records.items() if v.hold_record
+            }
+            self._records = {}
             for key, rec in data.items():
-                self._records[key] = OperationRecord.from_dict(rec)
+                record = OperationRecord.from_dict(rec)
+                if key in existing_hold_records:
+                    # Always prefer in-memory hold_record (most up-to-date)
+                    record.hold_record = existing_hold_records[key]
+                self._records[key] = record
             self._corrupted = False
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
             # Corrupted store — fail-closed. Do NOT start fresh silently.

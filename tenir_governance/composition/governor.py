@@ -50,7 +50,10 @@ from ..operations.registry import (
     DurableOperationRegistry,
     OperationRecord,
     OperationState,
+    HoldRecord,
+    ExitReceipt,
 )
+from ..operations.hold import HoldManager
 
 
 # ── Scoring Adapter ─────────────────────────────────────────────────────
@@ -297,6 +300,7 @@ class DualKernelGovernor:
         self.registry = registry or DurableOperationRegistry()
         self.budget_coordinator = budget_coordinator
         self._worker_id = str(uuid4())
+        self.hold_manager = HoldManager(self.registry)
 
     def adjudicate(
         self,
@@ -462,7 +466,10 @@ class DualKernelGovernor:
                     with self.membrane.state.get_lock(resource_id):
                         resource.release(amount)
         elif composed_decision == Decision.HOLD.value:
-            pass  # Stay in CREATED — not yet authorized
+            # Transition to HOLD state — a governed lifecycle state, not
+            # just a decision verdict. Per doctrine v7.1: HOLD is a first-class
+            # protocol state — a designed suspension of agency under pressure.
+            self.registry.transition_to(idem_key, OperationState.HOLD)
 
         return {
             "passage_id": passage.passage_id,
@@ -496,8 +503,10 @@ class DualKernelGovernor:
         | State         | Resume action                                    |
         |---------------|--------------------------------------------------|
         | CREATED       | Re-adjudicate (no checks were run yet)            |
+        | HOLD          | Resolve with new evidence or escalate            |
         | RESERVED      | Safe to dispatch (checks passed, budget reserved) |
         | DISPATCHING   | Reconcile — do NOT resend                        |
+        | ESCALATED     | Awaiting authorized exit (absorbing state)        |
         | CONFIRMED     | Return existing confirmed result                 |
         | FAILED        | Return existing failed result                    |
         | UNKNOWN       | Human review required                            |
@@ -520,6 +529,20 @@ class DualKernelGovernor:
                 "reason": "Operation in CREATED state — no checks were run yet. Safe to re-adjudicate.",
                 "operation_state": state.value,
                 "passage_id": record.passage_id,
+            }
+        elif state == OperationState.HOLD:
+            tau_status = self.hold_manager.check_tau_k_expiry(idempotency_key)
+            return {
+                "idempotency_key": idempotency_key,
+                "action": "resolve_or_escalate",
+                "reason": (
+                    f"Operation in HOLD state — evidence or governance question unresolved. "
+                    f"Resolve with new evidence, or escalate. {tau_status['reason']}."
+                ),
+                "operation_state": state.value,
+                "passage_id": record.passage_id,
+                "tau_k_remaining": tau_status.get("tau_k_remaining", 0.0),
+                "tau_k_expired": tau_status.get("expired", False),
             }
         elif state == OperationState.RESERVED:
             return {
@@ -562,6 +585,19 @@ class DualKernelGovernor:
                 "reason": "Operation in UNKNOWN state — outcome uncertain. Human review required, do NOT resend.",
                 "operation_state": state.value,
                 "passage_id": record.passage_id,
+            }
+        elif state == OperationState.ESCALATED:
+            return {
+                "idempotency_key": idempotency_key,
+                "action": "await_authorized_exit",
+                "reason": (
+                    "Operation in ESCALATED state — absorbing until authorized exit. "
+                    "An authorization model must define who signs, under what scope, "
+                    "and with which receipt. Time-based exit is rejected."
+                ),
+                "operation_state": state.value,
+                "passage_id": record.passage_id,
+                "hold_record": record.hold_record.to_dict() if record.hold_record else None,
             }
         else:
             return {
@@ -641,19 +677,345 @@ class DualKernelGovernor:
         return success
 
     def recover(self) -> dict[str, Any]:
-        """Recovery procedure: find all unresolved operations and report them."""
+        """Recovery procedure: find all unresolved operations and report them.
+
+        Includes operations in DISPATCHING, UNKNOWN (dispatch-related),
+        HOLD, and ESCALATED (hold-lifecycle) states.
+        """
         unresolved = self.registry.find_unresolved()
+        holds = self.hold_manager.find_holds()
+        escalated = self.hold_manager.find_escalated()
+        all_unresolved = unresolved + holds + escalated
+
+        def _recommendation(state: OperationState) -> str:
+            if state == OperationState.DISPATCHING:
+                return "reconcile"
+            elif state == OperationState.UNKNOWN:
+                return "human_review"
+            elif state == OperationState.HOLD:
+                return "resolve_or_escalate"
+            elif state == OperationState.ESCALATED:
+                return "await_authorized_exit"
+            else:
+                return "unknown"
+
         return {
-            "unresolved_count": len(unresolved),
+            "unresolved_count": len(all_unresolved),
             "unresolved": [
                 {
                     "idempotency_key": r.idempotency_key,
                     "passage_id": r.passage_id,
                     "state": r.state.value,
-                    "recommendation": "reconcile" if r.state == OperationState.DISPATCHING
-                    else "human_review" if r.state == OperationState.UNKNOWN
-                    else "unknown",
+                    "recommendation": _recommendation(r.state),
+                    "hold_record": r.hold_record.to_dict() if r.hold_record else None,
                 }
-                for r in unresolved
+                for r in all_unresolved
             ],
         }
+
+    # ── HOLD Lifecycle Methods ──────────────────────────────────────────
+    # Per doctrine v7.1 and Blueprint v4.4: HOLD is a first-class protocol
+    # state — a designed suspension of agency under pressure, not a system
+    # failure. These methods manage the governed lifecycle that follows
+    # a HOLD decision.
+
+    def resolve_hold(
+        self,
+        idempotency_key: str,
+        passage=None,
+        pressure: float = 0.5,
+        velocity: float = 0.5,
+        capacity: float = 1.0,
+        option_space: float | None = None,
+        authority: float = 1.0,
+        context_fit: float = 1.0,
+        evidence_quality: float = 1.0,
+        irreversibility_materiality: float = 0.0,
+        delegation=None,
+        resource_id: str | None = None,
+        amount: float = 0.0,
+        trajectory_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Re-adjudicate a HOLD operation with new evidence.
+
+        Per doctrine: when evidence becomes sufficient, the operator
+        re-runs adjudication. If the new decision is PASS or FLAG,
+        transition HOLD → RESERVED. If still HOLD, stay in HOLD. If
+        HARD_VETO, transition to FAILED.
+
+        The caller MUST provide the same passage (or a new one with the
+        same idempotency key) and the updated evidence parameters.
+
+        Returns the adjudication result dict with an additional
+        'hold_resolved' field indicating whether the hold was resolved.
+        """
+        record = self.registry.get(idempotency_key)
+        if record is None:
+            return {"hold_resolved": False, "reason": f"Operation '{idempotency_key}' not found."}
+
+        if record.state != OperationState.HOLD:
+            return {
+                "hold_resolved": False,
+                "operation_state": record.state.value,
+                "reason": f"Operation is in state {record.state.value}, not HOLD.",
+            }
+
+        if passage is None:
+            # Without a passage, just transition to RESERVED
+            result = self.hold_manager.resolve_hold(idempotency_key)
+            return {
+                "hold_resolved": result["resolved"],
+                "operation_state": result["operation_state"],
+                "reason": result["reason"],
+            }
+
+        # Re-run adjudication with new evidence
+        # The passage must have the same idempotency key
+        if passage.idempotency_key != idempotency_key:
+            passage.idempotency_key = idempotency_key
+
+        # Temporarily remove the record so re-registration succeeds
+        # (the key is already claimed in HOLD state)
+        # We bypass the register() check by directly transitioning
+        result = self._re_adjudicate_hold(
+            passage, pressure, velocity, capacity, option_space,
+            authority, context_fit, evidence_quality, irreversibility_materiality,
+            delegation, resource_id, amount, trajectory_id,
+        )
+        return result
+
+    def _re_adjudicate_hold(
+        self,
+        passage,
+        pressure: float, velocity: float, capacity: float,
+        option_space: float | None, authority: float, context_fit: float,
+        evidence_quality: float, irreversibility_materiality: float,
+        delegation, resource_id: str | None, amount: float,
+        trajectory_id: str | None,
+    ) -> dict[str, Any]:
+        """Internal: re-adjudicate a HOLD operation with new evidence.
+
+        Runs both kernels with the new evidence. If the composed decision
+        is PASS or FLAG, transitions HOLD → RESERVED. If HARD_VETO,
+        transitions HOLD → FAILED. If still HOLD, stays in HOLD.
+        """
+        idem_key = passage.idempotency_key
+
+        # 1. Scoring kernel — fail-closed
+        scoring_result = None
+        scoring_error = ""
+        try:
+            scoring_result = self.scoring.adjudicate(
+                pressure=pressure, velocity=velocity, capacity=capacity,
+                option_space=option_space, authority=authority,
+                context_fit=context_fit, evidence_quality=evidence_quality,
+                irreversibility_materiality=irreversibility_materiality,
+            )
+        except Exception as e:
+            scoring_result = None
+            scoring_error = str(e)
+
+        # 2. Membrane kernel — fail-closed
+        membrane_result = None
+        membrane_error = ""
+        try:
+            membrane_result = self.membrane.adjudicate(
+                passage=passage, delegation=delegation,
+                resource_id=resource_id, amount=amount,
+                trajectory_id=trajectory_id,
+            )
+        except Exception as e:
+            membrane_result = None
+            membrane_error = str(e)
+
+        # 3. Compute budget utilization
+        budget_utilization = None
+        if resource_id and amount > 0:
+            resource = self.membrane.state.resources.get(resource_id)
+            if resource and resource.capacity > 0:
+                budget_utilization = (resource.consumed + resource.reserved) / resource.capacity
+
+        # 4. Compose
+        budget_in_scope = resource_id is not None and amount > 0
+        composed_decision, composed_rationale = compose(
+            scoring_result["decision"] if scoring_result else None,
+            membrane_result["decision"] if membrane_result else None,
+            scoring_ces=scoring_result.get("ces_state") if scoring_result else None,
+            membrane_checks=membrane_result.get("checks") if membrane_result else None,
+            budget_utilization=budget_utilization,
+            budget_in_scope=budget_in_scope,
+            policy=self.policy,
+        )
+
+        # 5. Ledger
+        self.ledger.append(
+            kernel="scoring",
+            decision=scoring_result["decision"] if scoring_result else "HOLD",
+            rationale=scoring_result["rationale"] if scoring_result else f"Scoring kernel error: {scoring_error}",
+            passage_id=passage.passage_id,
+            idempotency_key=idem_key,
+        )
+        self.ledger.append(
+            kernel="membrane",
+            decision=membrane_result["decision"] if membrane_result else "HOLD",
+            rationale=membrane_result["rationale"] if membrane_result else f"Membrane kernel error: {membrane_error}",
+            passage_id=passage.passage_id,
+            idempotency_key=idem_key,
+        )
+        self.ledger.append(
+            kernel="composed",
+            decision=composed_decision,
+            rationale=composed_rationale,
+            passage_id=passage.passage_id,
+            idempotency_key=idem_key,
+            scoring_result=scoring_result or {},
+            membrane_result=membrane_result or {},
+            composed_decision=composed_decision,
+        )
+
+        # 6. State transitions from HOLD
+        hold_resolved = False
+        if composed_decision in (Decision.PASS.value, Decision.FLAG.value):
+            success, _prev = self.registry.transition_to(idem_key, OperationState.RESERVED)
+            if success:
+                hold_resolved = True
+                if record := self.registry.get(idem_key):
+                    if record.hold_record:
+                        record.hold_record.exit_reason = "resolved"
+            else:
+                # Transition failed — stay in HOLD
+                composed_decision = Decision.HOLD.value
+                composed_rationale = "Re-adjudication produced PASS/FLAG but RESERVED transition failed — staying in HOLD."
+        elif composed_decision == Decision.HARD_VETO.value:
+            self.registry.transition_to(idem_key, OperationState.FAILED)
+            hold_resolved = True  # Resolved (as denied)
+            if resource_id and amount > 0:
+                resource = self.membrane.state.resources.get(resource_id)
+                if resource:
+                    with self.membrane.state.get_lock(resource_id):
+                        resource.release(amount)
+            if record := self.registry.get(idem_key):
+                if record.hold_record:
+                    record.hold_record.exit_reason = "resolved_veto"
+        elif composed_decision == Decision.HOLD.value:
+            # Still HOLD — update the hold record's timestamp
+            if record := self.registry.get(idem_key):
+                if record.hold_record:
+                    # Keep the original hold_start — τ_K continues counting
+                    pass
+
+        return {
+            "passage_id": passage.passage_id,
+            "idempotency_key": idem_key,
+            "scoring_decision": scoring_result["decision"] if scoring_result else None,
+            "scoring_rationale": scoring_result["rationale"] if scoring_result else None,
+            "scoring_s": scoring_result.get("s_score") if scoring_result else None,
+            "membrane_decision": membrane_result["decision"] if membrane_result else None,
+            "membrane_rationale": membrane_result["rationale"] if membrane_result else None,
+            "membrane_checks": membrane_result.get("checks", []) if membrane_result else [],
+            "composed_decision": composed_decision,
+            "composed_rationale": composed_rationale,
+            "execution_status": membrane_result.get("execution_status", "pending") if membrane_result else "unknown",
+            "operation_state": self.registry.get(idem_key).state.value if self.registry.get(idem_key) else "unknown",
+            "ledger_entries": self.ledger.entry_count,
+            "ledger_valid": self.ledger.verify_chain(),
+            "hold_resolved": hold_resolved,
+        }
+
+    def escalate_hold(
+        self,
+        idempotency_key: str,
+        escalated_by: str = "",
+    ) -> dict[str, Any]:
+        """Escalate a HOLD operation to ESCALATED state.
+
+        Per v7.1 §19: ESCALATED is absorbing. It remains until an
+        authorization model defines who signs, under what scope, and with
+        which receipt. No automatic time-based exit.
+
+        Per Blueprint v4.4: Escalate strategy = HOLD global + escalation
+        to Risk Officer.
+        """
+        return self.hold_manager.escalate_hold(idempotency_key, escalated_by)
+
+    def authorize_exit(
+        self,
+        idempotency_key: str,
+        authorized_by: str,
+        scope: str,
+        authorization: str,
+        reason: str = "",
+        approve: bool = True,
+    ) -> dict[str, Any]:
+        """Authorized exit from ESCALATED state.
+
+        Per v7.1 §19: ESCALATED remains absorbing until an authorization
+        model defines who signs, under what scope, and with which receipt.
+
+        Per Blueprint v4.4 §5: overrides constitutionnels uniquement via
+        Ceremony G-R5-001 (authentification opérateur).
+
+        Args:
+            authorized_by: who is authorizing the exit (operator ID)
+            scope: scope of the authorization
+            authorization: authorization mechanism (e.g., "ceremony-G-R5-001")
+            reason: why the exit is being authorized
+            approve: True → proceed (RESERVED); False → deny (FAILED)
+        """
+        result = self.hold_manager.authorize_exit(
+            idempotency_key, authorized_by, scope, authorization, reason, approve,
+        )
+        # If approved and there's a resource to reserve, re-reserve it
+        if result.get("exited") and approve:
+            record = self.registry.get(idempotency_key)
+            if record and record.resource_id and record.amount > 0:
+                resource = self.membrane.state.resources.get(record.resource_id)
+                if resource:
+                    with self.membrane.state.get_lock(record.resource_id):
+                        if resource.available >= record.amount:
+                            resource.reserve(record.amount)
+        return result
+
+    def expire_hold(self, idempotency_key: str) -> dict[str, Any]:
+        """Expire a HOLD when τ_K is exhausted — FAIL-CLOSED.
+
+        Per doctrine: when τ_K expires on an unresolved HOLD, the default
+        behavior is FAIL-CLOSED: the action is rejected. This is NOT a
+        resolution — it is a fail-closed rejection.
+
+        Releases any reserved budget.
+        """
+        record = self.registry.get(idempotency_key)
+        if record is None:
+            return {"expired": False, "reason": f"Operation '{idempotency_key}' not found."}
+
+        result = self.hold_manager.expire_hold(idempotency_key)
+
+        # Release any reserved budget
+        if result.get("expired") and record.resource_id and record.amount > 0:
+            resource = self.membrane.state.resources.get(record.resource_id)
+            if resource:
+                with self.membrane.state.get_lock(record.resource_id):
+                    resource.release(record.amount)
+
+        return result
+
+    def expire_escalated(self, idempotency_key: str) -> dict[str, Any]:
+        """Expire an ESCALATED operation when τ_K expires → UNKNOWN.
+
+        Per v7.1 §19: a time-based exit from ESCALATED is rejected.
+        Expiry produces UNKNOWN, not resolution.
+        """
+        return self.hold_manager.expire_escalated(idempotency_key)
+
+    def check_hold_expiry(self, idempotency_key: str) -> dict[str, Any]:
+        """Check whether τ_K has expired for a HOLD or ESCALATED operation."""
+        return self.hold_manager.check_tau_k_expiry(idempotency_key)
+
+    def find_holds(self) -> list[OperationRecord]:
+        """Find all operations currently in HOLD state."""
+        return self.hold_manager.find_holds()
+
+    def find_escalated(self) -> list[OperationRecord]:
+        """Find all operations currently in ESCALATED state."""
+        return self.hold_manager.find_escalated()
