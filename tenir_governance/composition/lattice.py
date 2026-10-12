@@ -190,7 +190,10 @@ class HashChainedLedger:
             "idempotency_key": entry.idempotency_key,
             "previous_hash": entry.previous_hash,
             "timestamp": entry.timestamp,
-        }, sort_keys=True, separators=(",", ":"))
+            "scoring_result": entry.scoring_result,
+            "membrane_result": entry.membrane_result,
+            "composed_decision": entry.composed_decision,
+        }, sort_keys=True, separators=(",", ":"), default=str)
         entry.chain_hash = hashlib.sha256(payload.encode()).hexdigest()
         self._last_hash = entry.chain_hash
         self._entries.append(entry)
@@ -209,7 +212,10 @@ class HashChainedLedger:
                 "idempotency_key": entry.idempotency_key,
                 "previous_hash": entry.previous_hash,
                 "timestamp": entry.timestamp,
-            }, sort_keys=True, separators=(",", ":"))
+                "scoring_result": entry.scoring_result,
+                "membrane_result": entry.membrane_result,
+                "composed_decision": entry.composed_decision,
+            }, sort_keys=True, separators=(",", ":"), default=str)
             computed = hashlib.sha256(payload.encode()).hexdigest()
             if entry.chain_hash != computed:
                 return False

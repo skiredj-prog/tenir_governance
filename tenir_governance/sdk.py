@@ -432,21 +432,47 @@ class DualKernelCompositionClient:
         self,
         tenir_kernel=None,
         policy=None,
+        store_path: str | None = None,
+        require_persistence: bool = False,
     ) -> None:
+        """Initialize the dual-kernel composition client.
+
+        Args:
+            tenir_kernel: Optional TenirKernel instance. If None, a default
+                instance is created.
+            policy: Optional CompositionPolicy. If None, the default is used.
+            store_path: Path to a persistent store file for the durable
+                operation registry. If None, the registry is in-memory only
+                (claims are lost on restart). If require_persistence is True
+                and store_path is None, a ValueError is raised.
+            require_persistence: If True, refuse to initialize without a
+                persistent store_path. Use this in production deployments where
+                idempotency guarantees must survive restarts.
+        """
         from .composition.governor import DualKernelGovernor, ScoringKernelAdapter
         from .composition.lattice import HashChainedLedger
         from .composition.policy import CompositionPolicy
         from .membrane import TransitionMembrane, MembraneState
+        from .operations.registry import DurableOperationRegistry
         from tenir_kernel.kernel import TenirKernel as _TK
+
+        if require_persistence and not store_path:
+            raise ValueError(
+                "require_persistence=True requires a store_path. "
+                "Without persistent storage, idempotency claims are lost on "
+                "restart, allowing duplicate adjudication."
+            )
 
         self._kernel = tenir_kernel or _TK()
         self._scoring = ScoringKernelAdapter(self._kernel)
         self._membrane_state = MembraneState()
         self._membrane = TransitionMembrane(self._membrane_state)
         self._policy = policy or CompositionPolicy()
+        self._registry = DurableOperationRegistry(store_path=store_path)
         self._governor = DualKernelGovernor(
             self._scoring, self._membrane,
             policy=self._policy,
+            registry=self._registry,
         )
 
     @property

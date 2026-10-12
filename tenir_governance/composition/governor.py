@@ -97,21 +97,52 @@ class ScoringKernelAdapter:
 
         All axes in ALLOWED_AXES are populated. Missing axes would cause
         a hard "missing-geometry-point" violation.
+
+        Per peer review P2: coordinates that are not measured must not be
+        filled with favorable defaults. Missing mandatory data (authority,
+        context_fit, evidence_quality) is signaled via gate reasons so the
+        composition layer can HOLD rather than silently proceeding with a
+        favorable score. Optional axes without measurement input are set to
+        neutral (not favorable) values and flagged as unmeasured.
         """
-        return {
+        # Track which axes are unmeasured so the caller can add gate reasons
+        self._unmeasured_axes: list[str] = []
+
+        coords: dict[str, float] = {
             "pressure": pressure,
             "velocity": velocity,
             "capacity": capacity,
-            "option_space": option_space if option_space is not None else 1.0,
-            "cooperative_control_score": 1.0,
-            "trajectory_risk_score": 0.0,
             "irreversible_pathway_materiality": irreversibility_materiality,
-            "evidence_quality": evidence_quality,
-            "manipulation_risk": 0.0,
-            "drift": 0.0,
             "authority": authority,
             "context_fit": context_fit,
+            "evidence_quality": evidence_quality,
         }
+
+        # option_space: if not provided, do NOT default to 1.0 (favorable).
+        # Use a neutral 0.5 and flag as unmeasured. The caller will add a
+        # soft gate reason for missing option_space.
+        if option_space is not None:
+            coords["option_space"] = option_space
+        else:
+            coords["option_space"] = 0.5  # neutral, not favorable
+            self._unmeasured_axes.append("option_space")
+
+        # Axes that have no measurement input: set to NEUTRAL (not favorable)
+        # and flag as unmeasured. These must not be 1.0 or 0.0 which would
+        # make the geometry treat missing data as ideal conditions.
+        coords["cooperative_control_score"] = 0.5  # neutral
+        self._unmeasured_axes.append("cooperative_control_score")
+
+        coords["trajectory_risk_score"] = 0.5  # neutral
+        self._unmeasured_axes.append("trajectory_risk_score")
+
+        coords["manipulation_risk"] = 0.5  # neutral
+        self._unmeasured_axes.append("manipulation_risk")
+
+        coords["drift"] = 0.5  # neutral
+        self._unmeasured_axes.append("drift")
+
+        return coords
 
     def adjudicate(
         self,
@@ -168,6 +199,25 @@ class ScoringKernelAdapter:
             evidence_quality=evidence_quality,
             irreversibility_materiality=irreversibility_materiality,
         )
+
+        # Add soft gate reasons for unmeasured axes so the composition
+        # layer is aware that these coordinates are not based on real
+        # measurements. This prevents a favorable score from being
+        # interpreted as evidence of safety on unmeasured dimensions.
+        unmeasured = getattr(self, "_unmeasured_axes", [])
+        for axis in unmeasured:
+            soft_reasons.append(f"unmeasured axis: {axis} (neutral default, not favorable)")
+
+        # If mandatory data is missing (authority, context_fit, evidence_quality
+        # at their default sentinel values), escalate to a hard gate reason.
+        # These are required for a trustworthy adjudication — their absence
+        # means the score cannot be relied upon.
+        if authority <= 0.0:
+            hard_reasons.append("authority missing (≤0.0): cannot adjudicate without authority assessment")
+        if context_fit <= 0.0:
+            hard_reasons.append("context_fit missing (≤0.0): cannot adjudicate without context assessment")
+        if evidence_quality <= 0.0:
+            hard_reasons.append("evidence_quality missing (≤0.0): cannot adjudicate without evidence")
 
         # Delegate core scoring to TenirKernel
         tk_result = self._kernel.adjudicate(
@@ -374,8 +424,36 @@ class DualKernelGovernor:
         )
 
         # 6. State machine transitions
-        if composed_decision == Decision.PASS.value:
-            self.registry.transition_to(idem_key, OperationState.RESERVED)
+        if composed_decision == Decision.PASS.value or composed_decision == Decision.FLAG.value:
+            success, _prev = self.registry.transition_to(idem_key, OperationState.RESERVED)
+            if not success:
+                # Transition failed — the operation cannot be reserved.
+                # This is an inconsistent state: the decision is PASS but
+                # the durable state does not confirm it. Return HOLD, not PASS.
+                self.ledger.append(
+                    kernel="composed",
+                    decision=Decision.HOLD.value,
+                    rationale=f"PASS decision but RESERVED transition failed — fail-closed HOLD.",
+                    passage_id=passage.passage_id,
+                    idempotency_key=idem_key,
+                )
+                return {
+                    "passage_id": passage.passage_id,
+                    "idempotency_key": idem_key,
+                    "scoring_decision": scoring_result["decision"] if scoring_result else None,
+                    "scoring_rationale": scoring_result["rationale"] if scoring_result else None,
+                    "scoring_ces": scoring_result.get("ces_state") if scoring_result else None,
+                    "scoring_s": scoring_result.get("s_score") if scoring_result else None,
+                    "membrane_decision": membrane_result["decision"] if membrane_result else None,
+                    "membrane_rationale": membrane_result["rationale"] if membrane_result else None,
+                    "membrane_checks": membrane_result.get("checks", []) if membrane_result else [],
+                    "composed_decision": Decision.HOLD.value,
+                    "composed_rationale": "PASS decision but RESERVED transition failed — fail-closed HOLD.",
+                    "execution_status": "pending",
+                    "operation_state": self.registry.get(idem_key).state.value if self.registry.get(idem_key) else "unknown",
+                    "ledger_entries": self.ledger.entry_count,
+                    "ledger_valid": self.ledger.verify_chain(),
+                }
         elif composed_decision == Decision.HARD_VETO.value:
             self.registry.transition_to(idem_key, OperationState.FAILED)
             if resource_id and amount > 0:

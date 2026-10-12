@@ -171,19 +171,32 @@ class DurableOperationRegistry:
         self._lock = threading.Lock()
         self._records: dict[str, OperationRecord] = {}
         self._store_path = store_path
+        self._corrupted = False
         if store_path and os.path.exists(store_path):
             self._load()
 
     def _load(self):
-        """Load records from the durable store (simulated)."""
+        """Load records from the durable store.
+
+        Distinguishes absent file (normal — first start) from corrupt file
+        (fail-closed — refuse to proceed with stale data). A corrupt store
+        sets the _corrupted flag so register() and transition_to() can refuse
+        new operations, preventing silent duplicate adjudication.
+        """
+        if not self._store_path or not os.path.exists(self._store_path):
+            return
         try:
             with open(self._store_path, "r") as f:
                 data = json.load(f)
             for key, rec in data.items():
                 self._records[key] = OperationRecord.from_dict(rec)
-        except (json.JSONDecodeError, KeyError, ValueError):
-            # Corrupted store — start fresh (in production, use WAL recovery)
-            pass
+            self._corrupted = False
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            # Corrupted store — fail-closed. Do NOT start fresh silently.
+            # The _corrupted flag prevents new adjudication, which would
+            # risk duplicate operations if previously-claimed keys are
+            # invisible due to corruption.
+            self._corrupted = True
 
     def _persist(self):
         """Persist records to the durable store.
@@ -236,18 +249,38 @@ class DurableOperationRegistry:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         return f
 
+    @property
+    def is_corrupted(self) -> bool:
+        """True if the persistent store was corrupted on load."""
+        return self._corrupted
+
     def register(self, record: OperationRecord) -> bool:
         """Register a new operation. Returns False if key already exists.
+
+        Fail-closed: if the persistent store is corrupted, refuses to register
+        new operations. A corrupted store may have lost previously-claimed
+        keys; allowing new operations would risk duplicate adjudication.
 
         Cross-process safe: acquires a file lock, reloads from disk to check
         for concurrent registrations, then persists atomically.
         """
         with self._lock:
+            if self._corrupted:
+                raise RuntimeError(
+                    "Registry store is corrupted — refuse to register new "
+                    "operations. Preserve the corrupt file for investigation "
+                    "and recover explicitly before proceeding."
+                )
             flock = self._lock_file()
             try:
                 # Reload from disk to see if another process registered first
                 if self._store_path and os.path.exists(self._store_path):
                     self._load()
+                if self._corrupted:
+                    raise RuntimeError(
+                        "Registry store became corrupted on reload — refuse "
+                        "to register new operations."
+                    )
                 if record.idempotency_key in self._records:
                     return False
                 self._records[record.idempotency_key] = record
@@ -294,11 +327,21 @@ class DurableOperationRegistry:
         persists.
         """
         with self._lock:
+            if self._corrupted:
+                raise RuntimeError(
+                    "Registry store is corrupted — refuse to transition "
+                    "operations. Preserve the corrupt file and recover."
+                )
             flock = self._lock_file()
             try:
                 # Reload from disk to see the latest state from other processes
                 if self._store_path and os.path.exists(self._store_path):
                     self._load()
+                if self._corrupted:
+                    raise RuntimeError(
+                        "Registry store became corrupted on reload — refuse "
+                        "to transition operations."
+                    )
 
                 record = self._records.get(idempotency_key)
                 if record is None:

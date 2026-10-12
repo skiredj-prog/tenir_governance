@@ -189,9 +189,9 @@ class TestCrossProcessRegistry:
         adjudicate_results = [r[2] for r in results if r[0] == "adjudicate"]
         assert len(adjudicate_results) == 2, f"Expected 2 results, got {len(adjudicate_results)}"
 
-        passes = sum(1 for d in adjudicate_results if d == "PASS")
+        allowed = sum(1 for d in adjudicate_results if d in ("PASS", "FLAG"))
         vetoes = sum(1 for d in adjudicate_results if d == "HARD_VETO")
-        assert passes == 1, f"Expected 1 PASS, got {passes}"
+        assert allowed == 1, f"Expected 1 allowed (PASS or FLAG), got {allowed}"
         assert vetoes == 1, f"Expected 1 HARD_VETO, got {vetoes}"
 
     def test_two_processes_dispatch_same_key_one_wins(self, tmp_path):
@@ -268,5 +268,5 @@ class TestCrossProcessBudgetConservation:
             results.append(queue.get())
 
         adjudicate_results = [r[2] for r in results if r[0] == "adjudicate"]
-        passes = sum(1 for d in adjudicate_results if d == "PASS")
-        assert passes == 1, f"Expected 1 PASS across processes, got {passes}"
+        allowed = sum(1 for d in adjudicate_results if d in ("PASS", "FLAG"))
+        assert allowed == 1, f"Expected 1 allowed (PASS or FLAG) across processes, got {allowed}"
