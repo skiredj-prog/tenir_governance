@@ -289,6 +289,7 @@ class DualKernelGovernor:
         policy: CompositionPolicy | None = None,
         registry: DurableOperationRegistry | None = None,
         budget_coordinator: BudgetCoordinator | None = None,
+        provider: Any = None,
     ):
         # scoring_kernel is a ScoringKernelAdapter wrapping TenirKernel,
         # or any object with a compatible adjudicate() interface.
@@ -299,6 +300,7 @@ class DualKernelGovernor:
         self.policy.validate()
         self.registry = registry or DurableOperationRegistry()
         self.budget_coordinator = budget_coordinator
+        self.provider = provider
         self._worker_id = str(uuid4())
         self.hold_manager = HoldManager(self.registry)
 
@@ -647,6 +649,194 @@ class DualKernelGovernor:
             "operation_state": OperationState.DISPATCHING.value,
         }
 
+    def dispatch_and_execute(
+        self,
+        idempotency_key: str,
+        resource_id: str | None = None,
+        amount: float = 0.0,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically claim dispatch, then call the external provider.
+
+        This is the production dispatch path. It:
+        1. Atomically transitions RESERVED → DISPATCHING (the durable claim)
+        2. Calls the provider's execute() with the idempotency key
+        3. Transitions to CONFIRMED, FAILED, or UNKNOWN based on the result
+
+        Per doctrine v7.1: a timeout does NOT prove no effect occurred.
+        Provider timeouts and ambiguous responses produce UNKNOWN, not FAILED.
+
+        If no provider is configured, falls back to the manual dispatch()
+        method (state transition only, no external call).
+        """
+        # 1. Atomic claim
+        dispatch_result = self.dispatch(idempotency_key, resource_id, amount)
+        if not dispatch_result.get("dispatched"):
+            return dispatch_result
+
+        # 2. If no provider, return the manual dispatch result
+        if self.provider is None:
+            return dispatch_result
+
+        # 3. Get the operation record for metadata
+        record = self.registry.get(idempotency_key)
+        if record is None:
+            return dispatch_result
+
+        # 4. Call the provider
+        from ..operations.provider import ProviderOutcome
+        try:
+            prov_result = self.provider.execute(
+                idempotency_key=idempotency_key,
+                action_type=record.action_type or "payment",
+                amount=amount,
+                agent_id=record.agent_id,
+                metadata=metadata,
+            )
+        except Exception as e:
+            # Provider call threw an exception — fail closed to UNKNOWN
+            self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+            return {
+                "dispatched": True,
+                "executed": False,
+                "idempotency_key": idempotency_key,
+                "operation_state": OperationState.UNKNOWN.value,
+                "provider_error": str(e),
+                "reason": "Provider call failed — outcome UNKNOWN (fail-closed).",
+            }
+
+        # 5. Transition based on provider outcome
+        if prov_result.outcome == ProviderOutcome.CONFIRMED:
+            self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+            return {
+                "dispatched": True,
+                "executed": True,
+                "idempotency_key": idempotency_key,
+                "operation_state": OperationState.CONFIRMED.value,
+                "provider_reference": prov_result.provider_reference,
+                "provider_latency_ms": prov_result.latency_ms,
+            }
+        elif prov_result.outcome == ProviderOutcome.FAILED:
+            self.fail(idempotency_key, resource_id, amount)
+            return {
+                "dispatched": True,
+                "executed": False,
+                "idempotency_key": idempotency_key,
+                "operation_state": OperationState.FAILED.value,
+                "provider_error": prov_result.error,
+                "provider_latency_ms": prov_result.latency_ms,
+            }
+        elif prov_result.outcome == ProviderOutcome.PENDING:
+            # Pending — stay in DISPATCHING, caller should poll/reconcile
+            return {
+                "dispatched": True,
+                "executed": False,
+                "idempotency_key": idempotency_key,
+                "operation_state": OperationState.DISPATCHING.value,
+                "provider_reference": prov_result.provider_reference,
+                "provider_latency_ms": prov_result.latency_ms,
+                "reason": "Provider returned PENDING — reconcile later.",
+            }
+        else:
+            # UNKNOWN — timeout or ambiguous response
+            self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+            return {
+                "dispatched": True,
+                "executed": False,
+                "idempotency_key": idempotency_key,
+                "operation_state": OperationState.UNKNOWN.value,
+                "provider_error": prov_result.error,
+                "provider_latency_ms": prov_result.latency_ms,
+                "reason": "Provider returned UNKNOWN — reconciliation required.",
+            }
+
+    def reconcile_unknown(
+        self,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Reconcile an operation in UNKNOWN state with the provider.
+
+        Per doctrine v7.1: UNKNOWN means the outcome is uncertain after
+        reconciliation. This method calls the provider's reconcile() to
+        determine whether the external effect occurred.
+
+        If the provider resolves the outcome:
+        - CONFIRMED → transition to CONFIRMED
+        - FAILED → transition to FAILED (with budget release)
+
+        If the provider cannot resolve:
+        - Stay in UNKNOWN (human review required)
+
+        If no provider is configured, returns a recommendation for human review.
+        """
+        record = self.registry.get(idempotency_key)
+        if record is None:
+            return {"reconciled": False, "reason": "Operation not registered."}
+
+        if record.state != OperationState.UNKNOWN:
+            return {
+                "reconciled": False,
+                "operation_state": record.state.value,
+                "reason": f"Operation is in state {record.state.value}, not UNKNOWN.",
+            }
+
+        if self.provider is None:
+            return {
+                "reconciled": False,
+                "idempotency_key": idempotency_key,
+                "operation_state": OperationState.UNKNOWN.value,
+                "recommendation": "human_review",
+                "reason": "No provider configured — manual reconciliation required.",
+            }
+
+        from ..operations.provider import ProviderOutcome
+        try:
+            recon = self.provider.reconcile(
+                idempotency_key=idempotency_key,
+            )
+        except Exception as e:
+            return {
+                "reconciled": False,
+                "idempotency_key": idempotency_key,
+                "operation_state": OperationState.UNKNOWN.value,
+                "provider_error": str(e),
+                "recommendation": "human_review",
+            }
+
+        if recon.resolved and recon.outcome == ProviderOutcome.CONFIRMED:
+            self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+            return {
+                "reconciled": True,
+                "idempotency_key": idempotency_key,
+                "operation_state": OperationState.CONFIRMED.value,
+                "provider_reference": recon.provider_reference,
+            }
+        elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
+            self.registry.transition_to(idempotency_key, OperationState.FAILED)
+            if record.resource_id and record.amount > 0:
+                resource = self.membrane.state.resources.get(record.resource_id)
+                if resource:
+                    with self.membrane.state.get_lock(record.resource_id):
+                        resource.refund(record.amount)
+            return {
+                "reconciled": True,
+                "idempotency_key": idempotency_key,
+                "operation_state": OperationState.FAILED.value,
+                "provider_reference": recon.provider_reference,
+                "reason": "Provider confirmed no effect occurred.",
+            }
+        else:
+            # Still UNKNOWN — human review required
+            return {
+                "reconciled": False,
+                "idempotency_key": idempotency_key,
+                "operation_state": OperationState.UNKNOWN.value,
+                "provider_reference": recon.provider_reference,
+                "provider_error": recon.error,
+                "recommendation": "human_review",
+                "reason": "Provider could not determine outcome.",
+            }
+
     def confirm(self, idempotency_key: str) -> bool:
         """Transition DISPATCHING → CONFIRMED. The external effect occurred."""
         success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
@@ -691,7 +881,7 @@ class DualKernelGovernor:
             if state == OperationState.DISPATCHING:
                 return "reconcile"
             elif state == OperationState.UNKNOWN:
-                return "human_review"
+                return "reconcile" if self.provider is not None else "human_review"
             elif state == OperationState.HOLD:
                 return "resolve_or_escalate"
             elif state == OperationState.ESCALATED:

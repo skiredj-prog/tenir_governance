@@ -82,11 +82,10 @@ class OperationState(str, Enum):
     def is_terminal(self) -> bool:
         """Terminal states: no further transitions possible.
 
-        CONFIRMED and FAILED are fully terminal. UNKNOWN is terminal in the
-        sense that the system cannot resolve it automatically — it requires
-        human intervention or external reconciliation.
+        CONFIRMED and FAILED are fully terminal. UNKNOWN is not terminal:
+        it can be reconciled to CONFIRMED or FAILED via the provider.
         """
-        return self in (OperationState.CONFIRMED, OperationState.FAILED, OperationState.UNKNOWN)
+        return self in (OperationState.CONFIRMED, OperationState.FAILED)
 
     @property
     def is_dispatched(self) -> bool:
@@ -117,9 +116,9 @@ _LEGAL_TRANSITIONS = {
     OperationState.RESERVED: {OperationState.DISPATCHING, OperationState.FAILED},
     OperationState.DISPATCHING: {OperationState.CONFIRMED, OperationState.FAILED, OperationState.UNKNOWN},
     OperationState.ESCALATED: {OperationState.RESERVED, OperationState.FAILED, OperationState.UNKNOWN},
+    OperationState.UNKNOWN: {OperationState.CONFIRMED, OperationState.FAILED},  # reconcilable
     OperationState.CONFIRMED: set(),  # terminal
     OperationState.FAILED: set(),  # terminal
-    OperationState.UNKNOWN: set(),  # terminal (needs human)
 }
 
 
