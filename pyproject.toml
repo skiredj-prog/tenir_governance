@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tenir-governance"
-version = "5.2.0"
+version = "5.3.0"
 description = "TENIR-Gov: Governance Middleware for AI-Enabled Operational Systems"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -68,7 +68,7 @@ test = [
 ]
 
 [tool.setuptools]
-packages = ["tenir_governance", "tenir_kernel", "tenir_kernel.connectors"]
+packages = ["tenir_governance", "tenir_governance.objects", "tenir_governance.composition", "tenir_governance.membrane", "tenir_governance.operations", "tenir_kernel", "tenir_kernel.connectors"]
 include-package-data = true
 
 [tool.setuptools.package-data]

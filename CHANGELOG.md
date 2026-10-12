@@ -6,6 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [5.3.0] — 2026-10-12 — Two-Kernel Composition (Agentic Governance Profile v1.0.0)
+
+### Added
+- **`tenir_governance/objects/`** — Governed object types for object-centric governance: `Agent`, `Passage`, `Trajectory`, `Resource`, `Relationship`, `MissionInvariant`. These are the domain objects the composition layer operates on.
+- **`tenir_governance/composition/`** — Two-kernel composition layer:
+  - `decisions.py` — `Decision` enum (PASS/FLAG/HOLD/HARD_VETO), `ExecutionStatus`, `CheckType` with KB3 posture mapping (PASS→NORMAL, FLAG→CAUTION, HOLD→HOLDING-FIRST, HARD_VETO→HOLDING-FIRST).
+  - `policy.py` — `CompositionPolicy` (frozen, versioned, configurable budget escalation threshold, default 85%).
+  - `lattice.py` — Decision lattice `compose()` function and `HashChainedLedger` with tamper-evident hash chaining.
+  - `governor.py` — `DualKernelGovernor` bridging the continuous risk monitor (`TenirKernel` via `ScoringKernelAdapter`) with the discrete invariant enforcer (`TransitionMembrane`). Durable dispatch state machine: CREATED→RESERVED→DISPATCHING→CONFIRMED|FAILED|UNKNOWN. `resume_existing()` for crash recovery. Fail-closed: kernel exceptions → HOLD, never PASS.
+  - `schema_adapter.py` — `conform_to_schema()` mapping governor outputs to TENIR 2.0 schema 1.2 canonical fields (posture, execution_mode, compliance_class, degraded_mode, synthesis, trace, disclosure metadata).
+- **`tenir_governance/membrane/`** — `TransitionMembrane` and `MembraneState` implementing discrete invariant enforcement (I3–I9: delegation trust, budget limits, quarantine, terminality, trajectory, temporal constraints).
+- **`tenir_governance/operations/`** — Durable operation infrastructure:
+  - `budget.py` — `BudgetCoordinator` protocol + `InProcessBudgetCoordinator`.
+  - `registry.py` — `DurableOperationRegistry` with `fcntl.flock` cross-process locking, atomic `transition_to()` returning `(bool, prev_state)`, directory fsync for power-loss durability.
+- **`tenir_governance/_profile_meta.py`** — `ProfileDisclosure` dataclass declaring `agentic-governance-profile-v1.0.0`, `profile-bound` compliance class, TENIR 2.0 schema 1.2.
+- **`DualKernelCompositionClient`** in `sdk.py` — Optional SDK client wrapping the governor for consumers that need two-kernel agentic governance. The standard `TENIRGovernanceClient.adjudicate()` path is unchanged.
+- **Validator checks** — `COMP-001` (composition lattice rules: fail-closed, escalation, veto) and `DISC-001` (profile disclosure metadata compliance per versioning policy §6).
+- **Tests** — 65 composition tests, 15 membrane tests, 13 fault injection tests, 6 cross-process tests, 17 object tests (116 new tests total).
+
+### Changed
+- Package version bumped to `5.3.0` (minor, additive — no breaking changes).
+- `__init__.py` exports updated to include composition layer, objects, membrane, and operations packages.
+- Validator `validate_all()` now includes composition lattice and profile disclosure checks.
+
+### Compliance
+- **KB3**: Posture and execution mode are separate output fields, never collapsed. Implementation states (OperationState, Decision enum) are not rendered as doctrine. Degraded status and compliance class remain visible. No overconfident wording — all guarantees scoped explicitly.
+- **TENIR 2.0 schema 1.2**: All module outputs conform to the canonical schema via `conform_to_schema()`. Schema field names are stable; new modules add fields but don't rename existing ones.
+- **Versioning policy**: New modules are Profile/Module namespace (§2.3), not canon. `profile-bound` compliance class. Platform version 5.3.0 (minor bump). Profile version `agentic-governance-profile-v1.0.0`. Disclosure metadata per §6. Hard prohibitions §3 observed: no module imitates canonical version line, no API implies authority it doesn't hold.
+
+### Guarantee Boundary
+- **Locally guaranteed (in-process)**: At-most-once dispatch through the governance gate, fail-closed composition, mandatory invariant checks not skippable by healthy score, atomic budget reservations, hash-chained ledger integrity.
+- **Requires distributed infrastructure**: Cross-host budget coordination, distributed idempotency key registry, exactly-once external effects across service boundaries.
+- **Depends on external provider behavior**: Provider-side idempotency key support for exactly-once external effects.
+
+---
+
 ## [5.2.0] — 2026-10-07 — TENIR 2.0 Kernel & Security Hardening
 
 ### Added
