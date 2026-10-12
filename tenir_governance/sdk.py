@@ -390,6 +390,154 @@ class TENIRGovernanceClient:
         return True
 
 
+# ─── COMPOSITION CLIENT (Optional path — agentic-governance-profile-v1.0.0) ──
+# Profile: agentic-governance-profile-v1.0.0
+# Compliance class: profile-bound
+# This is an OPTIONAL path for consumers that need two-kernel composition
+# (continuous risk monitor + discrete invariant enforcer). The standard
+# TENIRGovernanceClient.adjudicate() path is unchanged.
+
+class DualKernelCompositionClient:
+    """
+    Optional SDK client for two-kernel composition governance.
+
+    This client wraps the DualKernelGovernor, bridging the continuous risk
+    monitor (TenirKernel via ScoringKernelAdapter) with the discrete invariant
+    enforcer (TransitionMembrane). It provides the full composition layer
+    with durable dispatch state machine, hash-chained ledger, and schema
+    conformance.
+
+    Profile: agentic-governance-profile-v1.0.0
+    Compliance class: profile-bound
+    Schema: TENIR 2.0 schema 1.2
+
+    This is NOT a replacement for TENIRGovernanceClient. It is an optional
+    path for consumers that need agentic governance with delegation trust,
+    budget coordination, and durable dispatch guarantees.
+
+    Usage:
+        from tenir_governance.sdk import DualKernelCompositionClient
+        from tenir_governance.objects import Agent, Passage, Resource
+
+        client = DualKernelCompositionClient()
+        client.register_agent(Agent(agent_id="alice", authority_score=0.9))
+        client.register_resource(Resource(resource_id="budget", capacity=100.0))
+
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        result = client.adjudicate(p, pressure=0.2, velocity=0.3, capacity=1.0,
+                                   resource_id="budget", amount=10.0)
+    """
+
+    def __init__(
+        self,
+        tenir_kernel=None,
+        policy=None,
+    ) -> None:
+        from .composition.governor import DualKernelGovernor, ScoringKernelAdapter
+        from .composition.lattice import HashChainedLedger
+        from .composition.policy import CompositionPolicy
+        from .membrane import TransitionMembrane, MembraneState
+        from tenir_kernel.kernel import TenirKernel as _TK
+
+        self._kernel = tenir_kernel or _TK()
+        self._scoring = ScoringKernelAdapter(self._kernel)
+        self._membrane_state = MembraneState()
+        self._membrane = TransitionMembrane(self._membrane_state)
+        self._policy = policy or CompositionPolicy()
+        self._governor = DualKernelGovernor(
+            self._scoring, self._membrane,
+            policy=self._policy,
+        )
+
+    @property
+    def governor(self):
+        """Direct access to the underlying DualKernelGovernor."""
+        return self._governor
+
+    @property
+    def membrane_state(self):
+        """Direct access to the membrane state (for registering agents/resources)."""
+        return self._membrane_state
+
+    def register_agent(self, agent) -> None:
+        """Register an agent with the membrane."""
+        self._membrane_state.register_agent(agent)
+
+    def register_resource(self, resource) -> None:
+        """Register a resource/budget with the membrane."""
+        self._membrane_state.register_resource(resource)
+
+    def adjudicate(
+        self,
+        passage,
+        pressure: float = 0.5,
+        velocity: float = 0.5,
+        capacity: float = 1.0,
+        option_space: float | None = None,
+        authority: float = 1.0,
+        context_fit: float = 1.0,
+        evidence_quality: float = 1.0,
+        irreversibility_materiality: float = 0.0,
+        delegation=None,
+        resource_id: str | None = None,
+        amount: float = 0.0,
+        trajectory_id: str | None = None,
+    ) -> dict:
+        """
+        Run both-kernel composition adjudication.
+
+        Returns the governor's implementation-level result dict.
+        Use conform_to_schema() to get TENIR 2.0 schema 1.2 conformant output.
+        """
+        return self._governor.adjudicate(
+            passage,
+            pressure=pressure, velocity=velocity, capacity=capacity,
+            option_space=option_space, authority=authority,
+            context_fit=context_fit, evidence_quality=evidence_quality,
+            irreversibility_materiality=irreversibility_materiality,
+            delegation=delegation,
+            resource_id=resource_id, amount=amount,
+            trajectory_id=trajectory_id,
+        )
+
+    def adjudicate_schema(
+        self,
+        passage,
+        **kwargs,
+    ) -> dict:
+        """
+        Adjudicate and return TENIR 2.0 schema 1.2 conformant output.
+
+        This calls adjudicate() then maps the result through the schema
+        conformance adapter.
+        """
+        from .composition.schema_adapter import conform_to_schema
+        result = self.adjudicate(passage, **kwargs)
+        return conform_to_schema(result)
+
+    def dispatch(self, idempotency_key: str, resource_id: str | None = None,
+                 amount: float = 0.0) -> dict:
+        """Atomically claim the dispatch slot."""
+        return self._governor.dispatch(idempotency_key, resource_id, amount)
+
+    def confirm(self, idempotency_key: str) -> bool:
+        """Confirm the external effect occurred."""
+        return self._governor.confirm(idempotency_key)
+
+    def fail(self, idempotency_key: str, resource_id: str | None = None,
+             amount: float = 0.0) -> bool:
+        """Mark the operation as failed and release/refund budget."""
+        return self._governor.fail(idempotency_key, resource_id, amount)
+
+    def resume_existing(self, idempotency_key: str, **kwargs) -> dict:
+        """Resume an existing operation for recovery."""
+        return self._governor.resume_existing(idempotency_key, **kwargs)
+
+    def recover(self) -> dict:
+        """Find all unresolved operations."""
+        return self._governor.recover()
+
+
 # ─── CLI ENTRY POINT ──────────────────────────────────────────────────────────
 
 def main() -> None:

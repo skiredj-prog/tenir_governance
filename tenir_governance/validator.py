@@ -131,6 +131,8 @@ class TENIRValidator:
         self._check_ces_classification_coverage()
         self._check_nomenclature_alignment()
         self._check_tau_floor_ordering()
+        self._check_composition_lattice()
+        self._check_profile_disclosure()
         return self._report
 
     def validate_event_sample(self, event: Dict) -> ValidationReport:
@@ -407,6 +409,115 @@ class TENIRValidator:
             self._warn("LED-001", "Ledger is empty")
         else:
             self._pass("LED-001", f"Ledger chain valid: {count} entries, 0 broken links")
+
+    # ── Check: Composition lattice (agentic-governance-profile-v1.0.0) ─────────
+
+    def _check_composition_lattice(self) -> None:
+        """Verify the decision lattice composition rules are correct.
+
+        Profile: agentic-governance-profile-v1.0.0
+        Compliance class: profile-bound
+
+        This check validates the composition layer's fail-closed semantics
+        and decision lattice rules without requiring the full governor.
+        """
+        try:
+            from .composition.lattice import compose
+            from .composition.decisions import Decision
+            from .composition.policy import CompositionPolicy
+        except ImportError:
+            self._warn("COMP-001", "Composition layer not available — skipping lattice checks")
+            return
+
+        policy = CompositionPolicy()
+        errors = []
+
+        # Rule 1: HARD_VETO from either → HARD_VETO
+        d, _ = compose(Decision.HARD_VETO.value, Decision.PASS.value, policy=policy)
+        if d != Decision.HARD_VETO.value:
+            errors.append("HARD_VETO+PASS should be HARD_VETO")
+        d, _ = compose(Decision.PASS.value, Decision.HARD_VETO.value, policy=policy)
+        if d != Decision.HARD_VETO.value:
+            errors.append("PASS+HARD_VETO should be HARD_VETO")
+
+        # Rule 2: HOLD from membrane → HOLD
+        d, _ = compose(Decision.PASS.value, Decision.HOLD.value, policy=policy)
+        if d != Decision.HOLD.value:
+            errors.append("PASS+HOLD should be HOLD")
+
+        # Rule 3: FLAG + near-limit budget → HOLD
+        d, _ = compose(Decision.FLAG.value, Decision.PASS.value,
+                       budget_utilization=0.90, budget_in_scope=True, policy=policy)
+        if d != Decision.HOLD.value:
+            errors.append("FLAG+90% budget should be HOLD")
+
+        # Rule 4: FLAG from either → FLAG (without budget escalation)
+        d, _ = compose(Decision.FLAG.value, Decision.PASS.value, policy=policy)
+        if d != Decision.FLAG.value:
+            errors.append("FLAG+PASS (no budget) should be FLAG")
+
+        # Rule 5: PASS from both → PASS
+        d, _ = compose(Decision.PASS.value, Decision.PASS.value, policy=policy)
+        if d != Decision.PASS.value:
+            errors.append("PASS+PASS should be PASS")
+
+        # Fail-closed: None decisions → HOLD
+        d, _ = compose(None, Decision.PASS.value, policy=policy)
+        if d != Decision.HOLD.value:
+            errors.append("None+PASS should be HOLD (fail-closed)")
+        d, _ = compose(Decision.PASS.value, None, policy=policy)
+        if d != Decision.HOLD.value:
+            errors.append("PASS+None should be HOLD (fail-closed)")
+        d, _ = compose(None, None, policy=policy)
+        if d != Decision.HOLD.value:
+            errors.append("None+None should be HOLD (fail-closed)")
+
+        # Fail-closed: None + HARD_VETO → HARD_VETO (veto overrides)
+        d, _ = compose(None, Decision.HARD_VETO.value, policy=policy)
+        if d != Decision.HARD_VETO.value:
+            errors.append("None+HARD_VETO should be HARD_VETO")
+
+        if errors:
+            self._fail("COMP-001", "Composition lattice rules violated",
+                       "; ".join(errors))
+        else:
+            self._pass("COMP-001", "Composition lattice rules verified (fail-closed, escalation, veto)")
+
+    def _check_profile_disclosure(self) -> None:
+        """Verify profile disclosure metadata is present and correct.
+
+        Per versioning policy §6: every exposed API must declare disclosure
+        metadata (doctrinal version, platform version, contract version,
+        compliance class, active profiles, semantic authority held/not held).
+        """
+        try:
+            from ._profile_meta import DISCLOSURE
+        except ImportError:
+            self._warn("DISC-001", "Profile metadata module not available")
+            return
+
+        errors = []
+
+        if DISCLOSURE.doctrinal_version != "TENIR 2.0":
+            errors.append(f"doctrinal_version: expected 'TENIR 2.0', got {DISCLOSURE.doctrinal_version!r}")
+        if DISCLOSURE.schema_version != "1.2":
+            errors.append(f"schema_version: expected '1.2', got {DISCLOSURE.schema_version!r}")
+        if DISCLOSURE.compliance_class != "profile-bound":
+            errors.append(f"compliance_class: expected 'profile-bound', got {DISCLOSURE.compliance_class!r}")
+        if not DISCLOSURE.profile_version.startswith("agentic-governance-profile"):
+            errors.append(f"profile_version: expected 'agentic-governance-profile-v*', got {DISCLOSURE.profile_version!r}")
+
+        # Per §3 hard prohibitions: no module may imitate canonical version
+        if "canonical" in DISCLOSURE.compliance_class:
+            errors.append("compliance_class must not claim canonical authority")
+
+        if errors:
+            self._fail("DISC-001", "Profile disclosure metadata invalid",
+                       "; ".join(errors))
+        else:
+            self._pass("DISC-001",
+                       f"Profile disclosure correct: {DISCLOSURE.profile_version}, "
+                       f"{DISCLOSURE.compliance_class}, schema {DISCLOSURE.schema_version}")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

@@ -76,8 +76,40 @@ from .polymorphic_surface import (
 from .copy_lint import CopyLinter, LintReport as CopyLintReport, Finding as CopyLintFinding
 from .ledger_migrate import migrate_ledger, verify_migrated_ledger, MigrationReport
 
-__version__ = "5.2.0"
+# ── Agentic Governance Profile (profile-bound, v1.0.0) ──────────────────
+# These are optional composition-layer extensions. The standard SDK path
+# (TENIRGovernanceClient) is unchanged. These exports provide the two-kernel
+# composition API for consumers that need agentic governance.
+from ._profile_meta import DISCLOSURE as PROFILE_DISCLOSURE
+from .composition import (
+    Decision as CompositionDecision,
+    ExecutionStatus,
+    CheckType,
+    CompositionPolicy,
+    compose,
+    HashChainedLedger,
+    LedgerEntry,
+    DualKernelGovernor,
+    ScoringKernelAdapter,
+    conform_to_schema,
+    POSTURE_MAP,
+    EXECUTION_DISPOSITION_MAP,
+)
+from .sdk import DualKernelCompositionClient
+from .objects import Agent, Passage, Trajectory, Resource, Relationship, Delegation, MissionInvariant
+from .membrane import TransitionMembrane, MembraneState
+from .operations import (
+    BudgetCoordinator,
+    InProcessBudgetCoordinator,
+    DurableOperationRegistry,
+    OperationRecord,
+    OperationState,
+)
+
+__version__ = "5.3.0"
 __policy_version__ = "tenir-canonical-v1.0.0"
+__profile_version__ = "agentic-governance-profile-v1.0.0"
+__schema_version__ = "1.2"
 
 __all__ = [
     # Nomenclature
