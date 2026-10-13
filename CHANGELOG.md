@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [5.4.1] — 2026-10-13 — Patch: Assessment Semantics Hardening
+
+This patch corrects two semantic issues in the τ⁻¹ classifier identified during the v5.4.0 hardening review.
+
+### Fixed
+- **Callback exception now returns INDETERMINATE, not IRREVERSIBLE** — If the return-transition callback raises an exception, the classifier previously reported IRREVERSIBLE. A failed assessment does not prove that no authorized inverse exists; it means the assessment could not be completed. Both deterministic and non-deterministic callback paths now return INDETERMINATE.
+- **Numeric input validation** — distance_q, return_cost, and λ must be finite and non-negative. NaN, infinite, or negative values from the callback now return INDETERMINATE instead of producing meaningless classifications or loss calculations.
+
+### Tests
+- 10 new tests for numeric validation (NaN, infinite, negative distance/cost/λ)
+- 2 existing tests updated to expect INDETERMINATE instead of IRREVERSIBLE for callback exceptions
+- Total: 653 tests passing, 0 failures, 0 regressions
+
+---
+
 ## [5.4.0] — 2026-10-13 — Minor: τ⁻¹ (Partial Tau Inversion) and EVP (Intended Value Preservation) Assessment Layer
 
 This minor release adds the post-execution assessment layer: τ⁻¹ (partial tau inversion) and EVP (intended value preservation). Both are **ex-post** assessment concepts — they run AFTER execution, not before. Neither is an input to the admissibility function. Both are **opt-in** — `dispatch_and_execute()` does not auto-trigger assessment.

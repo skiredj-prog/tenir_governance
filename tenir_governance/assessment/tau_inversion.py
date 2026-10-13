@@ -59,6 +59,7 @@ governance enforcement authority only.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -392,10 +393,11 @@ class TauInversionClassifier:
                 try:
                     dist, cost, desc = return_transition(nd_metadata)
                 except Exception as e:
-                    # If the return transition fails for any result,
-                    # signal the limitation
+                    # A failed assessment does not prove that no authorized
+                    # inverse exists — it means the assessment could not be
+                    # completed. Report as indeterminate, not irreversible.
                     return TauInversionResult(
-                        classification=InversionClassification.IRREVERSIBLE,
+                        classification=InversionClassification.INDETERMINATE,
                         retained_properties=retained_properties,
                         distance_q=None,
                         return_cost=None,
@@ -403,8 +405,9 @@ class TauInversionClassifier:
                         lambda_weight=lam,
                         rationale=(
                             f"Non-deterministic transition: return transition "
-                            f"failed for result {nd_result}. Limitation "
-                            f"signaled: τ⁻¹ not established for all results."
+                            f"callback raised an exception for result {nd_result}. "
+                            f"Assessment could not be completed — indeterminate, "
+                            f"not proven irreversible."
                         ),
                         return_transition_description=f"Failed: {e}",
                         non_determinism_handled=True,
@@ -421,22 +424,49 @@ class TauInversionClassifier:
             try:
                 distance_q, return_cost, description = return_transition(metadata)
             except Exception as e:
+                # A failed assessment does not prove that no authorized
+                # inverse exists — it means the assessment could not be
+                # completed. Report as indeterminate, not irreversible.
                 return TauInversionResult(
-                    classification=InversionClassification.IRREVERSIBLE,
+                    classification=InversionClassification.INDETERMINATE,
                     retained_properties=retained_properties,
                     distance_q=None,
                     return_cost=None,
                     loss=None,
                     lambda_weight=lam,
                     rationale=(
-                        f"Return transition failed: {e}. No authorized "
-                        f"operation satisfies the return criterion."
+                        f"Return transition callback raised an exception: {e}. "
+                        f"Assessment could not be completed — indeterminate, "
+                        f"not proven irreversible."
                     ),
                     return_transition_description=f"Failed: {e}",
                     non_determinism_handled=False,
                 )
 
-        # ── 4. Classify based on distance_Q ─────────────────────────────
+        # ── 4. Validate numeric inputs ──────────────────────────────────
+
+        def _is_valid(x: float) -> bool:
+            return isinstance(x, (int, float)) and math.isfinite(x) and x >= 0
+
+        if not _is_valid(distance_q) or not _is_valid(return_cost) or not _is_valid(lam):
+            return TauInversionResult(
+                classification=InversionClassification.INDETERMINATE,
+                retained_properties=retained_properties,
+                distance_q=None,
+                return_cost=None,
+                loss=None,
+                lambda_weight=lam,
+                rationale=(
+                    f"Indeterminate: invalid numeric inputs from return "
+                    f"transition. distance_q={distance_q!r}, "
+                    f"return_cost={return_cost!r}, λ={lam!r}. "
+                    f"All must be finite and non-negative."
+                ),
+                return_transition_description=description,
+                non_determinism_handled=non_determinism_handled,
+            )
+
+        # ── 5. Classify based on distance_Q ─────────────────────────────
         loss = distance_q + lam * return_cost
 
         if distance_q == 0.0:

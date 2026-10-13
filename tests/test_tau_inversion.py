@@ -322,7 +322,13 @@ class TestIrreversibility:
         )
         assert result.classification == InversionClassification.IRREVERSIBLE
 
-    def test_return_transition_that_raises_is_irreversible(self):
+    def test_return_transition_that_raises_is_indeterminate(self):
+        """A failed assessment does not prove no authorized inverse exists.
+
+        If the return-transition callback raises an exception, the classifier
+        cannot complete the assessment. This is INDETERMINATE, not IRREVERSIBLE —
+        a failed assessment is not evidence of irreversibility.
+        """
         classifier = TauInversionClassifier()
 
         def failing_return(metadata):
@@ -333,8 +339,8 @@ class TestIrreversibility:
             retained_properties=["balance"],
             return_transition=failing_return,
         )
-        assert result.classification == InversionClassification.IRREVERSIBLE
-        assert result.is_reversible is False
+        assert result.classification == InversionClassification.INDETERMINATE
+        assert result.classification.is_determined is False
 
 
 class TestP1EmptyQ:
@@ -466,8 +472,11 @@ class TestNonDeterminism:
         assert result.return_cost == 3.0
         assert result.non_determinism_handled is True
 
-    def test_non_deterministic_one_result_irreversible(self):
-        """If ANY result cannot be reversed, the limitation is signaled."""
+    def test_non_deterministic_one_result_indeterminate(self):
+        """If the return-transition callback raises for ANY result, the
+        assessment is indeterminate — a failed assessment does not prove
+        no authorized inverse exists for that result.
+        """
         classifier = TauInversionClassifier()
 
         def return_transition(metadata):
@@ -488,7 +497,7 @@ class TestNonDeterminism:
             return_transition=return_transition,
             non_deterministic_results=results,
         )
-        assert result.classification == InversionClassification.IRREVERSIBLE
+        assert result.classification == InversionClassification.INDETERMINATE
         assert result.non_determinism_handled is True
 
     def test_non_deterministic_all_exact(self):
@@ -630,3 +639,146 @@ class TestFailedWithExternalEffect:
             return_transition=None,
         )
         assert result.classification == InversionClassification.IRREVERSIBLE
+
+class TestNumericValidation:
+    """Tests for distance, return_cost, and λ input validation.
+
+    The classifier must reject invalid numeric inputs from the return-transition
+    callback: NaN, infinite, or negative values. These indicate a broken callback,
+    not a meaningful assessment. Report INDETERMINATE.
+    """
+
+    def test_nan_distance_is_indeterminate(self):
+        classifier = TauInversionClassifier()
+
+        def bad_distance(metadata):
+            return (float("nan"), 1.0, "Bad")
+
+        result = classifier.classify(
+            operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=bad_distance,
+        )
+        assert result.classification == InversionClassification.INDETERMINATE
+
+    def test_infinite_distance_is_indeterminate(self):
+        classifier = TauInversionClassifier()
+
+        def inf_distance(metadata):
+            return (float("inf"), 1.0, "Infinite")
+
+        result = classifier.classify(
+            operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=inf_distance,
+        )
+        assert result.classification == InversionClassification.INDETERMINATE
+
+    def test_negative_distance_is_indeterminate(self):
+        classifier = TauInversionClassifier()
+
+        def neg_distance(metadata):
+            return (-0.5, 1.0, "Negative")
+
+        result = classifier.classify(
+            operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=neg_distance,
+        )
+        assert result.classification == InversionClassification.INDETERMINATE
+
+    def test_nan_return_cost_is_indeterminate(self):
+        classifier = TauInversionClassifier()
+
+        def bad_cost(metadata):
+            return (0.0, float("nan"), "Bad cost")
+
+        result = classifier.classify(
+            operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=bad_cost,
+        )
+        assert result.classification == InversionClassification.INDETERMINATE
+
+    def test_negative_return_cost_is_indeterminate(self):
+        classifier = TauInversionClassifier()
+
+        def neg_cost(metadata):
+            return (0.0, -2.0, "Negative cost")
+
+        result = classifier.classify(
+            operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=neg_cost,
+        )
+        assert result.classification == InversionClassification.INDETERMINATE
+
+    def test_infinite_return_cost_is_indeterminate(self):
+        classifier = TauInversionClassifier()
+
+        def inf_cost(metadata):
+            return (0.0, float("inf"), "Infinite cost")
+
+        result = classifier.classify(
+            operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=inf_cost,
+        )
+        assert result.classification == InversionClassification.INDETERMINATE
+
+    def test_nan_lambda_is_indeterminate(self):
+        classifier = TauInversionClassifier()
+
+        def good_return(metadata):
+            return (0.0, 1.0, "Exact")
+
+        result = classifier.classify(
+            operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=good_return,
+            lambda_weight=float("nan"),
+        )
+        assert result.classification == InversionClassification.INDETERMINATE
+
+    def test_negative_lambda_is_indeterminate(self):
+        classifier = TauInversionClassifier()
+
+        def good_return(metadata):
+            return (0.0, 1.0, "Exact")
+
+        result = classifier.classify(
+            operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=good_return,
+            lambda_weight=-0.5,
+        )
+        assert result.classification == InversionClassification.INDETERMINATE
+
+    def test_infinite_lambda_is_indeterminate(self):
+        classifier = TauInversionClassifier()
+
+        def good_return(metadata):
+            return (0.0, 1.0, "Exact")
+
+        result = classifier.classify(
+            operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=good_return,
+            lambda_weight=float("inf"),
+        )
+        assert result.classification == InversionClassification.INDETERMINATE
+
+    def test_valid_inputs_still_classify_correctly(self):
+        """Ensure valid inputs are not rejected by the validation."""
+        classifier = TauInversionClassifier()
+
+        def good_return(metadata):
+            return (0.0, 0.0, "Exact return, no cost")
+
+        result = classifier.classify(
+            operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=good_return,
+            lambda_weight=0.1,
+        )
+        assert result.classification == InversionClassification.EXACT_INVERSE
