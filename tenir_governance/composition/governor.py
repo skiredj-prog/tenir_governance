@@ -54,6 +54,7 @@ from ..operations.registry import (
     ExitReceipt,
 )
 from ..operations.hold import HoldManager
+from ..assessment.assessor import PostExecutionAssessor, AssessmentReport
 
 
 # ── Scoring Adapter ─────────────────────────────────────────────────────
@@ -290,6 +291,7 @@ class DualKernelGovernor:
         registry: DurableOperationRegistry | None = None,
         budget_coordinator: BudgetCoordinator | None = None,
         provider: Any = None,
+        assessor: PostExecutionAssessor | None = None,
     ):
         # scoring_kernel is a ScoringKernelAdapter wrapping TenirKernel,
         # or any object with a compatible adjudicate() interface.
@@ -303,6 +305,10 @@ class DualKernelGovernor:
         self.provider = provider
         self._worker_id = str(uuid4())
         self.hold_manager = HoldManager(self.registry)
+        # Post-execution assessor (optional). When set, the governor can
+        # run τ⁻¹ and EVP assessments after terminal states. The assessor
+        # does NOT feed back into admissibility — it is a pure measurement.
+        self.assessor = assessor
 
     def adjudicate(
         self,
@@ -1209,3 +1215,95 @@ class DualKernelGovernor:
     def find_escalated(self) -> list[OperationRecord]:
         """Find all operations currently in ESCALATED state."""
         return self.hold_manager.find_escalated()
+
+    # ── Post-Execution Assessment (τ⁻¹ + EVP) ──────────────────────────
+    # Per doctrine: both τ⁻¹ (partial tau inversion) and EVP (intended value
+    # preservation) are EX-POST assessments. They run AFTER the dispatch
+    # state machine reaches a terminal state (CONFIRMED or FAILED), never
+    # before. They do NOT feed back into the admissibility function D.
+    # The assessor is OPTIONAL — the governor operates correctly without it.
+
+    def assess_post_execution(
+        self,
+        idempotency_key: str,
+        retained_properties: list[str] | None = None,
+        return_transition: Any = None,
+        intended_value: float = 0.0,
+        realized_value: float | None = None,
+        confidence: float = 1.0,
+        execution_loss: float = 0.0,
+        denied_opportunity_value: float = 0.0,
+        metadata: dict[str, Any] | None = None,
+    ) -> AssessmentReport | None:
+        """Run τ⁻¹ and EVP assessment for a completed operation.
+
+        This method runs AFTER the operation reaches a terminal state
+        (CONFIRMED or FAILED). It produces an AssessmentReport containing
+        both the τ⁻¹ classification and the EVP measurement.
+
+        CRITICAL: This assessment does NOT feed back into admissibility.
+        It is a pure post-execution measurement for audit, reporting, and
+        continuous improvement. It does NOT affect the operation's state
+        or any future admissibility decision.
+
+        Args:
+            idempotency_key: The operation's idempotency key.
+            retained_properties: Properties Q for τ⁻¹ evaluation.
+            return_transition: Return transition function for τ⁻¹.
+            intended_value: Value the operation was designed to produce.
+            realized_value: Actual value produced.
+            confidence: Prior confidence of success (0-1).
+            execution_loss: Value lost to execution failures.
+            denied_opportunity_value: Value of denied opportunities.
+            metadata: Additional context for both assessments.
+
+        Returns:
+            AssessmentReport with both τ⁻¹ and EVP results, or None if
+            the assessor is not configured or the operation is not in a
+            terminal state.
+        """
+        if self.assessor is None:
+            return None
+
+        record = self.registry.get(idempotency_key)
+        if record is None:
+            return None
+
+        # Only assess terminal states
+        if record.state not in (OperationState.CONFIRMED, OperationState.FAILED):
+            return None
+
+        # Extract hold/escalation durations from the hold record
+        hold_duration_seconds = 0.0
+        escalated_duration_seconds = 0.0
+        if record.hold_record:
+            from datetime import datetime, timezone
+            try:
+                hold_start = datetime.fromisoformat(record.hold_record.hold_start) if record.hold_record.hold_start else None
+                if hold_start:
+                    now = datetime.now(timezone.utc)
+                    hold_duration = (now - hold_start).total_seconds()
+                    if record.hold_record.is_escalated and record.hold_record.escalated_at:
+                        esc_start = datetime.fromisoformat(record.hold_record.escalated_at)
+                        escalated_duration_seconds = (now - esc_start).total_seconds()
+                        hold_duration_seconds = max(0, (esc_start - hold_start).total_seconds())
+                    else:
+                        hold_duration_seconds = max(0, hold_duration)
+            except (ValueError, TypeError):
+                pass  # Timestamp parsing failed — durations stay at 0
+
+        return self.assessor.assess(
+            idempotency_key=idempotency_key,
+            passage_id=record.passage_id,
+            operation_state=record.state.value,
+            retained_properties=retained_properties,
+            return_transition=return_transition,
+            intended_value=intended_value,
+            realized_value=realized_value,
+            confidence=confidence,
+            hold_duration_seconds=hold_duration_seconds,
+            escalated_duration_seconds=escalated_duration_seconds,
+            execution_loss=execution_loss,
+            denied_opportunity_value=denied_opportunity_value,
+            metadata=metadata,
+        )

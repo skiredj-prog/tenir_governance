@@ -112,6 +112,19 @@ from .composition import (
     CompositionHoldStrategy,
     CompositionHoldManager,
 )
+from .assessment import (
+    TauInversionClassifier,
+    TauInversionResult,
+    InversionClassification,
+    EVPAssessor,
+    EVPReport,
+    EVPGross,
+    EVPNet,
+    FrictionCost,
+    GovernanceDebt,
+    PostExecutionAssessor,
+    AssessmentReport,
+)
 
 __version__ = "5.3.0"
 __policy_version__ = "tenir-canonical-v1.0.0"
@@ -144,4 +157,9 @@ __all__ = [
     # Tooling
     "CopyLinter", "CopyLintReport", "CopyLintFinding",
     "migrate_ledger", "verify_migrated_ledger", "MigrationReport",
+    # Assessment (τ⁻¹ + EVP)
+    "TauInversionClassifier", "TauInversionResult", "InversionClassification",
+    "EVPAssessor", "EVPReport", "EVPGross", "EVPNet",
+    "FrictionCost", "GovernanceDebt",
+    "PostExecutionAssessor", "AssessmentReport",
 ]

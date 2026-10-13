@@ -434,6 +434,7 @@ class DualKernelCompositionClient:
         policy=None,
         store_path: str | None = None,
         require_persistence: bool = False,
+        enable_assessor: bool = False,
     ) -> None:
         """Initialize the dual-kernel composition client.
 
@@ -448,6 +449,9 @@ class DualKernelCompositionClient:
             require_persistence: If True, refuse to initialize without a
                 persistent store_path. Use this in production deployments where
                 idempotency guarantees must survive restarts.
+            enable_assessor: If True, enable the post-execution assessor
+                (τ⁻¹ and EVP). The assessor runs AFTER terminal states and
+                does NOT feed back into admissibility.
         """
         from .composition.governor import DualKernelGovernor, ScoringKernelAdapter
         from .composition.lattice import HashChainedLedger
@@ -480,10 +484,20 @@ class DualKernelCompositionClient:
         self._membrane = TransitionMembrane(self._membrane_state)
         self._policy = policy or CompositionPolicy()
         self._registry = DurableOperationRegistry(store_path=store_path)
+
+        # Post-execution assessor (optional). When enabled, the governor
+        # can run τ⁻¹ and EVP assessments after terminal states. The
+        # assessor does NOT feed back into admissibility.
+        assessor = None
+        if enable_assessor:
+            from .assessment.assessor import PostExecutionAssessor
+            assessor = PostExecutionAssessor()
+
         self._governor = DualKernelGovernor(
             self._scoring, self._membrane,
             policy=self._policy,
             registry=self._registry,
+            assessor=assessor,
         )
 
     @property
@@ -573,6 +587,43 @@ class DualKernelCompositionClient:
     def recover(self) -> dict:
         """Find all unresolved operations."""
         return self._governor.recover()
+
+    def assess_post_execution(
+        self,
+        idempotency_key: str,
+        retained_properties: list[str] | None = None,
+        return_transition=None,
+        intended_value: float = 0.0,
+        realized_value: float | None = None,
+        confidence: float = 1.0,
+        execution_loss: float = 0.0,
+        denied_opportunity_value: float = 0.0,
+        metadata: dict | None = None,
+    ):
+        """Run τ⁻¹ and EVP post-execution assessment for a completed operation.
+
+        This is a convenience method that delegates to the governor's
+        assess_post_execution(). It requires the assessor to be enabled
+        (enable_assessor=True in the constructor).
+
+        The assessment does NOT feed back into admissibility — it is a
+        pure post-execution measurement for audit and reporting.
+
+        Returns:
+            AssessmentReport, or None if the assessor is not enabled or
+            the operation is not in a terminal state.
+        """
+        return self._governor.assess_post_execution(
+            idempotency_key=idempotency_key,
+            retained_properties=retained_properties,
+            return_transition=return_transition,
+            intended_value=intended_value,
+            realized_value=realized_value,
+            confidence=confidence,
+            execution_loss=execution_loss,
+            denied_opportunity_value=denied_opportunity_value,
+            metadata=metadata,
+        )
 
 
 # ─── CLI ENTRY POINT ──────────────────────────────────────────────────────────

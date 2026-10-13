@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en" data-writer-dashboard-theme="org-default">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TENIR-Gov · Execution Control Plane Demo</title>
+<script>
+const saved = localStorage.getItem("writer-dashboard-color-scheme");
+if (saved) document.documentElement.setAttribute("data-writer-dashboard-color-scheme", saved);
+</script>
+<style id="writer-dashboard-theme-values">
+:root {
+  --writer-dashboard-page: #0d1117;
+  --writer-dashboard-surface: #161b22;
+  --writer-dashboard-text: #e6edf3;
+  --writer-dashboard-muted-text: #7d8590;
+  --writer-dashboard-border: #30363d;
+  --writer-dashboard-accent: #2f81f7;
+  --writer-dashboard-accent-foreground: #ffffff;
+  --writer-dashboard-surface-muted: #21262d;
+  --writer-dashboard-chart-1: #2f81f7;
+  --writer-dashboard-chart-2: #3fb950;
+  --writer-dashboard-chart-3: #d29922;
+  --writer-dashboard-chart-4: #f85149;
+  --writer-dashboard-chart-5: #a371f7;
+  --writer-dashboard-chart-track: #30363d;
+  --writer-dashboard-comparison: #161b22;
+  --writer-dashboard-comparison-foreground: #e6edf3;
+  --writer-dashboard-font-family: 'Georgia', 'Times New Roman', serif;
+}
+[data-writer-dashboard-color-scheme="light"] {
+  --writer-dashboard-page: #ffffff;
+  --writer-dashboard-surface: #f6f8fa;
+  --writer-dashboard-text: #1f2328;
+  --writer-dashboard-muted-text: #636c76;
+  --writer-dashboard-border: #d0d7de;
+  --writer-dashboard-accent: #0969da;
+  --writer-dashboard-accent-foreground: #ffffff;
+  --writer-dashboard-surface-muted: #eaeef2;
+  --writer-dashboard-chart-1: #0969da;
+  --writer-dashboard-chart-2: #1a7f37;
+  --writer-dashboard-chart-3: #9a6700;
+  --writer-dashboard-chart-4: #cf222e;
+  --writer-dashboard-chart-5: #8250df;
+  --writer-dashboard-chart-track: #d0d7de;
+  --writer-dashboard-comparison: #f6f8fa;
+  --writer-dashboard-comparison-foreground: #1f2328;
+}
+</style>
+<style id="writer-dashboard-styles">
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: var(--writer-dashboard-font-family);
+  background: var(--writer-dashboard-page);
+  color: var(--writer-dashboard-text);
+  line-height: 1.6;
+  min-height: 100vh;
+}
+.mono { font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; }
+
+/* ── Header ─────────────────────────────── */
+header {
+  position: sticky; top: 0; z-index: 100;
+  background: var(--writer-dashboard-surface);
+  border-bottom: 1px solid var(--writer-dashboard-border);
+  padding: 0.75rem 1.5rem;
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 0.5rem;
+}
+header .brand { display: flex; align-items: center; gap: 0.75rem; }
+header .brand .logo {
+  width: 32px; height: 32px; border-radius: 8px;
+  background: var(--writer-dashboard-accent);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--writer-dashboard-accent-foreground);
+  font-weight: bold; font-size: 14px; flex-shrink: 0;
+}
+header .brand h1 { font-size: 1.1rem; font-weight: 600; }
+header .brand .tagline { font-size: 0.8rem; color: var(--writer-dashboard-muted-text); }
+header .controls { display: flex; align-items: center; gap: 0.5rem; }
+#theme-toggle {
+  background: var(--writer-dashboard-surface-muted);
+  border: 1px solid var(--writer-dashboard-border);
+  border-radius: 6px; padding: 0.4rem 0.75rem;
+  color: var(--writer-dashboard-text); cursor: pointer; font-size: 0.85rem;
+  font-family: var(--writer-dashboard-font-family);
+}
+#theme-toggle:hover { border-color: var(--writer-dashboard-accent); }
+
+/* ── Nav ───────────────────────────────── */
+nav.scenes {
+  display: flex; gap: 0.5rem; padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid var(--writer-dashboard-border);
+  background: var(--writer-dashboard-surface-muted);
+  overflow-x: auto; flex-wrap: nowrap;
+}
+nav.scenes a {
+  padding: 0.4rem 0.9rem; border-radius: 6px;
+  text-decoration: none; color: var(--writer-dashboard-muted-text);
+  font-size: 0.85rem; white-space: nowrap;
+  transition: all 0.2s;
+}
+nav.scenes a:hover { background: var(--writer-dashboard-surface); color: var(--writer-dashboard-text); }
+nav.scenes a.active { background: var(--writer-dashboard-accent); color: var(--writer-dashboard-accent-foreground); font-weight: 600; }
+
+/* ── Layout ────────────────────────────── */
+main { max-width: 960px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+.scene { display: none; }
+.scene.active { display: block; animation: fadeIn 0.3s ease; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.scene h2 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+.scene .desc { color: var(--writer-dashboard-muted-text); margin-bottom: 1.5rem; font-size: 0.95rem; }
+
+/* ── Cards ─────────────────────────────── */
+.card {
+  background: var(--writer-dashboard-surface);
+  border: 1px solid var(--writer-dashboard-border);
+  border-radius: 10px; padding: 1.25rem; margin-bottom: 1rem;
+}
+.card h3 { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--writer-dashboard-muted-text); margin-bottom: 0.75rem; }
+
+/* ── State badges ──────────────────────── */
+.badge {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  padding: 0.25rem 0.65rem; border-radius: 20px;
+  font-size: 0.8rem; font-weight: 600;
+  border: 1px solid transparent;
+}
+.badge-created { background: rgba(45,129,247,0.12); color: var(--writer-dashboard-chart-1); border-color: rgba(45,129,247,0.3); }
+.badge-reserved { background: rgba(63,185,80,0.12); color: var(--writer-dashboard-chart-2); border-color: rgba(63,185,80,0.3); }
+.badge-dispatching { background: rgba(210,153,34,0.12); color: var(--writer-dashboard-chart-3); border-color: rgba(210,153,34,0.3); }
+.badge-confirmed { background: rgba(63,185,80,0.15); color: var(--writer-dashboard-chart-2); border-color: rgba(63,185,80,0.4); }
+.badge-failed { background: rgba(248,81,73,0.12); color: var(--writer-dashboard-chart-4); border-color: rgba(248,81,73,0.3); }
+.badge-unknown { background: rgba(163,113,247,0.12); color: var(--writer-dashboard-chart-5); border-color: rgba(163,113,247,0.3); }
+.badge-hold { background: rgba(210,153,34,0.15); color: var(--writer-dashboard-chart-3); border-color: rgba(210,153,34,0.4); }
+.badge-escalated { background: rgba(248,81,73,0.15); color: var(--writer-dashboard-chart-4); border-color: rgba(248,81,73,0.4); }
+.badge-veto { background: rgba(248,81,73,0.15); color: var(--writer-dashboard-chart-4); border-color: rgba(248,81,73,0.4); }
+.badge-pass { background: rgba(63,185,80,0.12); color: var(--writer-dashboard-chart-2); border-color: rgba(63,185,80,0.3); }
+.badge-flag { background: rgba(210,153,34,0.12); color: var(--writer-dashboard-chart-3); border-color: rgba(210,153,34,0.3); }
+
+/* ── Kernel diagram ────────────────────── */
+.kernel-flow { display: flex; align-items: stretch; gap: 0.5rem; margin: 1rem 0; flex-wrap: wrap; }
+.kernel-box {
+  flex: 1; min-width: 140px; padding: 1rem; border-radius: 10px;
+  text-align: center; position: relative;
+}
+.kernel-scoring { background: rgba(45,129,247,0.08); border: 1px solid rgba(45,129,247,0.25); }
+.kernel-membrane { background: rgba(163,113,247,0.08); border: 1px solid rgba(163,113,247,0.25); }
+.kernel-compose { background: rgba(63,185,80,0.08); border: 1px solid rgba(63,185,80,0.25); }
+.kernel-box .kernel-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--writer-dashboard-muted-text); margin-bottom: 0.35rem; }
+.kernel-box .kernel-name { font-size: 0.95rem; font-weight: 600; margin-bottom: 0.25rem; }
+.kernel-box .kernel-desc { font-size: 0.8rem; color: var(--writer-dashboard-muted-text); }
+.kernel-arrow { display: flex; align-items: center; color: var(--writer-dashboard-muted-text); font-size: 1.2rem; }
+
+/* ── State machine ─────────────────────── */
+.state-machine { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0; }
+.state-node {
+  padding: 0.5rem 0.9rem; border-radius: 8px; font-size: 0.8rem; font-weight: 600;
+  border: 2px solid var(--writer-dashboard-border); background: var(--writer-dashboard-surface-muted);
+  transition: all 0.3s;
+}
+.state-node.highlight {
+  border-color: var(--writer-dashboard-accent);
+  background: rgba(45,129,247,0.1);
+  box-shadow: 0 0 0 3px rgba(45,129,247,0.15);
+}
+.state-node.terminal { border-color: var(--writer-dashboard-chart-2); }
+.state-node.danger { border-color: var(--writer-dashboard-chart-4); }
+.state-node.warning { border-color: var(--writer-dashboard-chart-3); }
+.state-arrow { color: var(--writer-dashboard-muted-text); font-size: 0.9rem; }
+
+/* ── Code blocks ──────────────────────── */
+.code-block {
+  background: var(--writer-dashboard-page);
+  border: 1px solid var(--writer-dashboard-border);
+  border-radius: 8px; padding: 0.9rem; margin: 0.75rem 0;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.82rem; overflow-x: auto; line-height: 1.5;
+  color: var(--writer-dashboard-text);
+}
+.code-block .kw { color: var(--writer-dashboard-chart-5); }
+.code-block .str { color: var(--writer-dashboard-chart-2); }
+.code-block .com { color: var(--writer-dashboard-muted-text); }
+.code-block .num { color: var(--writer-dashboard-chart-3); }
+
+/* ── Buttons ─────────────────────────── */
+.btn {
+  background: var(--writer-dashboard-accent); color: var(--writer-dashboard-accent-foreground);
+  border: none; border-radius: 8px; padding: 0.6rem 1.2rem;
+  font-size: 0.9rem; font-family: var(--writer-dashboard-font-family);
+  cursor: pointer; transition: opacity 0.2s, transform 0.1s;
+  font-weight: 600;
+}
+.btn:hover { opacity: 0.88; }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-secondary {
+  background: var(--writer-dashboard-surface-muted); color: var(--writer-dashboard-text);
+  border: 1px solid var(--writer-dashboard-border);
+}
+.btn-danger { background: var(--writer-dashboard-chart-4); color: white; }
+.btn-success { background: var(--writer-dashboard-chart-2); color: white; }
+
+/* ── Result display ──────────────────── */
+.result-row { display: flex; justify-content: space-between; align-items: center; padding: 0.4rem 0; border-bottom: 1px solid var(--writer-dashboard-border); }
+.result-row:last-child { border-bottom: none; }
+.result-row .label { color: var(--writer-dashboard-muted-text); font-size: 0.85rem; }
+.result-row .value { font-weight: 600; font-size: 0.9rem; }
+
+/* ── Comparison ─────────────────────── */
+.comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1rem 0; }
+@media (max-width: 640px) { .comparison { grid-template-columns: 1fr; } }
+.compare-card { padding: 1.25rem; border-radius: 10px; }
+.compare-card.mem { background: rgba(248,81,73,0.06); border: 1px solid rgba(248,81,73,0.2); }
+.compare-card.persist { background: rgba(63,185,80,0.06); border: 1px solid rgba(63,185,80,0.2); }
+.compare-card h4 { font-size: 0.9rem; margin-bottom: 0.5rem; }
+.compare-card .outcome { font-size: 0.85rem; margin-top: 0.5rem; padding: 0.5rem; border-radius: 6px; }
+.compare-card .outcome.bad { background: rgba(248,81,73,0.1); color: var(--writer-dashboard-chart-4); }
+.compare-card .outcome.good { background: rgba(63,185,80,0.1); color: var(--writer-dashboard-chart-2); }
+
+/* ── Guarantee table ────────────────── */
+.guarantee-table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+.guarantee-table th { text-align: left; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--writer-dashboard-muted-text); padding: 0.6rem 0.75rem; border-bottom: 2px solid var(--writer-dashboard-border); }
+.guarantee-table td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--writer-dashboard-border); font-size: 0.88rem; }
+.guarantee-table tr:last-child td { border-bottom: none; }
+.level-local { color: var(--writer-dashboard-chart-2); font-weight: 600; }
+.level-distributed { color: var(--writer-dashboard-chart-3); font-weight: 600; }
+.level-provider { color: var(--writer-dashboard-chart-5); font-weight: 600; }
+.level-packaging { color: var(--writer-dashboard-muted-text); font-weight: 600; }
+
+/* ── Timeline ───────────────────────── */
+.timeline { position: relative; padding-left: 1.5rem; margin: 1rem 0; }
+.timeline::before { content: ''; position: absolute; left: 0.45rem; top: 0; bottom: 0; width: 2px; background: var(--writer-dashboard-border); }
+.timeline-item { position: relative; margin-bottom: 1rem; }
+.timeline-item::before { content: ''; position: absolute; left: -1.15rem; top: 0.35rem; width: 10px; height: 10px; border-radius: 50%; background: var(--writer-dashboard-accent); border: 2px solid var(--writer-dashboard-surface); }
+.timeline-item .time { font-size: 0.78rem; color: var(--writer-dashboard-muted-text); }
+.timeline-item .content { font-size: 0.88rem; margin-top: 0.15rem; }
+
+/* ── Exit receipt ───────────────────── */
+.receipt { background: var(--writer-dashboard-surface-muted); border: 1px dashed var(--writer-dashboard-border); border-radius: 8px; padding: 1rem; margin: 0.75rem 0; }
+.receipt .receipt-header { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--writer-dashboard-muted-text); margin-bottom: 0.5rem; }
+.receipt .receipt-row { display: flex; justify-content: space-between; padding: 0.3rem 0; font-size: 0.85rem; }
+.receipt .receipt-row .key { color: var(--writer-dashboard-muted-text); }
+
+/* ── Budget bar ─────────────────────── */
+.budget-bar { height: 8px; border-radius: 4px; background: var(--writer-dashboard-chart-track); margin: 0.5rem 0; overflow: hidden; }
+.budget-fill { height: 100%; border-radius: 4px; background: var(--writer-dashboard-chart-2); transition: width 0.5s ease; }
+.budget-fill.warning { background: var(--writer-dashboard-chart-3); }
+.budget-fill.danger { background: var(--writer-dashboard-chart-4); }
+.budget-labels { display: flex; justify-content: space-between; font-size: 0.78rem; color: var(--writer-dashboard-muted-text); }
+
+/* ── Footer ─────────────────────────── */
+footer.writer-agent-credit {
+  text-align: center; padding: 2rem 1.5rem; color: var(--writer-dashboard-muted-text);
+  font-size: 0.85rem; border-top: 1px solid var(--writer-dashboard-border);
+  margin-top: 3rem;
+}
+
+/* ── Util ──────────────────────────── */
+.fade-in { animation: fadeIn 0.4s ease; }
+.hidden { display: none !important; }
+.spacer { height: 1rem; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="logo">T</div>
+    <div>
+      <h1>TENIR-Gov</h1>
+      <div class="tagline">The Execution Control Plane for Agentic AI</div>
+    </div>
+  </div>
+  <div class="controls">
+    <button id="theme-toggle" aria-pressed="false" aria-label="Toggle dark mode">🌙 Dark</button>
+  </div>
+</header>
+
+<nav class="scenes" id="scene-nav">
+  <a href="#scene-1" class="active" data-scene="1">1 · Normal Operation</a>
+  <a href="#scene-2" data-scene="2">2 · Duplicate Blocked</a>
+  <a href="#scene-3" data-scene="3">3 · HOLD Lifecycle</a>
+  <a href="#scene-4" data-scene="4">4 · In-Memory vs Persistent</a>
+  <a href="#scene-5" data-scene="5">5 · Timeout → Reconcile</a>
+  <a href="#scene-6" data-scene="6">6 · Guarantee Boundary</a>
+</nav>
+
+<main>
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- SCENE 1: Normal Admissible Operation                                    -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="scene active" id="scene-1">
+  <h2>Scene 1 · Normal Admissible Operation</h2>
+  <p class="desc">An AI agent proposes a $10 payment. Both kernels evaluate it independently, budget is reserved atomically, and the provider confirms execution.</p>
+
+  <div class="card">
+    <h3>Two-Kernel Architecture</h3>
+    <div class="kernel-flow">
+      <div class="kernel-box kernel-scoring">
+        <div class="kernel-label">Kernel 1</div>
+        <div class="kernel-name">Scoring</div>
+        <div class="kernel-desc">S = K / (P·V + ε)<br>Continuous risk</div>
+      </div>
+      <div class="kernel-arrow">⊕</div>
+      <div class="kernel-box kernel-membrane">
+        <div class="kernel-label">Kernel 2</div>
+        <div class="kernel-name">Membrane</div>
+        <div class="kernel-desc">Invariants I3–I9<br>Discrete checks</div>
+      </div>
+      <div class="kernel-arrow">→</div>
+      <div class="kernel-box kernel-compose">
+        <div class="kernel-label">Composition</div>
+        <div class="kernel-name">Decision Lattice</div>
+        <div class="kernel-desc">PASS / FLAG<br>HOLD / HARD_VETO</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Proposed Action</h3>
+    <div class="code-block mono"><span class="kw">from</span> tenir_governance <span class="kw">import</span> DualKernelCompositionClient, Agent, Passage, Resource
+<span class="kw">from</span> tenir_governance.operations.provider <span class="kw">import</span> MockProvider
+
+provider = MockProvider(behavior=<span class="str">"confirmed"</span>)
+client = DualKernelCompositionClient(store_path=<span class="str">"ledger.json"</span>)
+client.governor.provider = provider
+client.register_agent(Agent(agent_id=<span class="str">"alice"</span>, authority_score=<span class="num">0.9</span>))
+client.register_resource(Resource(resource_id=<span class="str">"budget"</span>, capacity=<span class="num">100.0</span>))
+
+p = Passage(agent_id=<span class="str">"alice"</span>, action_type=<span class="str">"payment"</span>, amount=<span class="num">10.0</span>)
+result = client.adjudicate(p, pressure=<span class="num">0.2</span>, velocity=<span class="num">0.2</span>, capacity=<span class="num">0.9</span>,
+                           resource_id=<span class="str">"budget"</span>, amount=<span class="num">10.0</span>)</div>
+  </div>
+
+  <div class="card">
+    <h3>Adjudication Result</h3>
+    <div id="s1-adjudicate">
+      <div class="result-row"><span class="label">Scoring kernel decision</span><span class="value"><span class="badge badge-flag">FLAG</span></span></div>
+      <div class="result-row"><span class="label">Membrane kernel decision</span><span class="value"><span class="badge badge-pass">PASS</span></span></div>
+      <div class="result-row"><span class="label">Composed decision</span><span class="value"><span class="badge badge-flag">FLAG</span></span></div>
+      <div class="result-row"><span class="label">Operation state</span><span class="value"><span class="badge badge-reserved">RESERVED</span></span></div>
+      <div class="result-row"><span class="label">Ledger valid</span><span class="value">✓ True</span></div>
+    </div>
+    <div class="spacer"></div>
+    <div class="budget-labels"><span>Budget consumed</span><span>$10.00 / $100.00</span></div>
+    <div class="budget-bar"><div class="budget-fill" style="width: 10%;"></div></div>
+  </div>
+
+  <div class="card">
+    <h3>Dispatch & Execute</h3>
+    <div class="code-block mono"><span class="com"># Atomically claim dispatch, then call the provider</span>
+dispatch_result = client.governor.dispatch_and_execute(
+    p.idempotency_key, resource_id=<span class="str">"budget"</span>, amount=<span class="num">10.0</span>
+)</div>
+    <div id="s1-dispatch">
+      <div class="result-row"><span class="label">Operation state</span><span class="value"><span class="badge badge-confirmed">CONFIRMED</span></span></div>
+      <div class="result-row"><span class="label">Executed</span><span class="value">✓ True</span></div>
+      <div class="result-row"><span class="label">Provider reference</span><span class="value mono" style="font-size:0.78rem;">mock_ref_op-bac61e4c…</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>State Machine Path</h3>
+    <div class="state-machine">
+      <div class="state-node highlight">CREATED</div>
+      <span class="state-arrow">→</span>
+      <div class="state-node highlight">RESERVED</div>
+      <span class="state-arrow">→</span>
+      <div class="state-node">DISPATCHING</div>
+      <span class="state-arrow">→</span>
+      <div class="state-node terminal highlight">CONFIRMED</div>
+    </div>
+    <p style="font-size:0.85rem; color:var(--writer-dashboard-muted-text); margin-top:0.5rem;">The idempotency key is durably claimed at CREATED — before any kernel evaluation. Budget is atomically reserved at RESERVED. The provider is called only after DISPATCHING is claimed.</p>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- SCENE 2: Duplicate Adjudication Blocked                               -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="scene" id="scene-2">
+  <h2>Scene 2 · Duplicate Adjudication Blocked</h2>
+  <p class="desc">The same operation is submitted again. TENIR blocks it — the idempotency key was already claimed at CREATED.</p>
+
+  <div class="card">
+    <h3>First Submission (already processed)</h3>
+    <div class="result-row"><span class="label">Idempotency key</span><span class="value mono" style="font-size:0.78rem;">op-bac61e4c-ea54-…</span></div>
+    <div class="result-row"><span class="label">Current state</span><span class="value"><span class="badge badge-confirmed">CONFIRMED</span></span></div>
+  </div>
+
+  <div class="card">
+    <h3>Second Submission (same key)</h3>
+    <div class="code-block mono"><span class="com"># Same passage — same idempotency key</span>
+result2 = client.adjudicate(p, pressure=<span class="num">0.2</span>, velocity=<span class="num">0.2</span>, capacity=<span class="num">0.9</span>,
+                            resource_id=<span class="str">"budget"</span>, amount=<span class="num">10.0</span>)</div>
+    <div class="result-row"><span class="label">Composed decision</span><span class="value"><span class="badge badge-veto">HARD_VETO</span></span></div>
+    <div class="result-row"><span class="label">Reason</span><span class="value" style="font-size:0.82rem;">Idempotency key already claimed</span></div>
+  </div>
+
+  <div class="card">
+    <h3>Why This Works</h3>
+    <div class="timeline">
+      <div class="timeline-item">
+        <div class="time">Step 1</div>
+        <div class="content">Operation registered in <strong>CREATED</strong> state — key durably claimed <em>before</em> any kernel evaluation</div>
+      </div>
+      <div class="timeline-item">
+        <div class="time">Step 2</div>
+        <div class="content">Both kernels evaluate the action and compose a decision</div>
+      </div>
+      <div class="timeline-item">
+        <div class="time">Step 3</div>
+        <div class="content">On second submission, the registry sees the key already exists → <strong>HARD_VETO</strong></div>
+      </div>
+      <div class="timeline-item">
+        <div class="time">Recovery</div>
+        <div class="content">Use <code class="mono">resume_existing()</code> to recover an interrupted operation — never re-adjudicate</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- SCENE 3: HOLD Lifecycle                                                -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="scene" id="scene-3">
+  <h2>Scene 3 · HOLD Lifecycle</h2>
+  <p class="desc">When evidence is insufficient, TENIR doesn't deny or blindly proceed. It HOLDs — a designed suspension of agency under pressure. HOLD is TENIR's signature concept.</p>
+
+  <div class="card">
+    <h3>HOLD vs QUARANTINE_LOCK</h3>
+    <div class="comparison">
+      <div class="compare-card" style="background:rgba(210,153,34,0.06); border:1px solid rgba(210,153,34,0.2);">
+        <h4>HOLD</h4>
+        <p style="font-size:0.85rem;">Per-operation suspension. The action is not denied — it's pending evidence or review. A timer (τ_K) counts down.</p>
+      </div>
+      <div class="compare-card" style="background:rgba(248,81,73,0.06); border:1px solid rgba(248,81,73,0.2);">
+        <h4>QUARANTINE_LOCK</h4>
+        <p style="font-size:0.85rem;">Per-entity lock. Blocks ALL admission and dispatch for an entire LEI until authorized release. Distinct from HOLD.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>HOLD Exit Paths</h3>
+    <div class="state-machine" style="flex-direction:column; align-items:flex-start; gap:0.75rem;">
+      <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+        <div class="state-node warning">CREATED</div>
+        <span class="state-arrow">→</span>
+        <div class="state-node warning highlight">HOLD</div>
+      </div>
+      <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; padding-left:2rem;">
+        <span class="state-arrow">├→</span>
+        <div class="state-node">RESERVED</div>
+        <span style="font-size:0.8rem; color:var(--writer-dashboard-muted-text);">Evidence sufficient → re-adjudicate</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; padding-left:2rem;">
+        <span class="state-arrow">├→</span>
+        <div class="state-node danger">ESCALATED</div>
+        <span style="font-size:0.8rem; color:var(--writer-dashboard-muted-text);">Escalate to risk officer (absorbing state)</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; padding-left:2rem;">
+        <span class="state-arrow">└→</span>
+        <div class="state-node danger">FAILED</div>
+        <span style="font-size:0.8rem; color:var(--writer-dashboard-muted-text);">τ_K expires → fail-closed</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Escalation → Authorized Exit</h3>
+    <div class="timeline">
+      <div class="timeline-item">
+        <div class="time">1 · Register</div>
+        <div class="content">Operation registered in <strong>CREATED</strong> state</div>
+      </div>
+      <div class="timeline-item">
+        <div class="time">2 · Enter HOLD</div>
+        <div class="content"><code class="mono">hold_manager.enter_hold(key, tau_k_seconds=300)</code> → state <strong>HOLD</strong>, τ_K = 300s</div>
+      </div>
+      <div class="timeline-item">
+        <div class="time">3 · Resolve</div>
+        <div class="content">New evidence arrives → <code class="mono">resolve_hold(key, passage, pressure=0.1, ...)</code> → <strong>RESERVED</strong></div>
+      </div>
+      <div class="timeline-item">
+        <div class="time">4 · Escalate</div>
+        <div class="content">New operation → HOLD → <code class="mono">escalate_hold(key, escalated_by="risk-officer")</code> → <strong>ESCALATED</strong></div>
+      </div>
+      <div class="timeline-item">
+        <div class="time">5 · Authorize Exit</div>
+        <div class="content"><code class="mono">authorize_exit(key, authorized_by="ciso@org", scope="post-incident", authorization="ceremony-G-R5-001")</code></div>
+      </div>
+    </div>
+
+    <div class="receipt">
+      <div class="receipt-header">Exit Receipt</div>
+      <div class="receipt-row"><span class="key">Authorized by</span><span>ciso@org</span></div>
+      <div class="receipt-row"><span class="key">Scope</span><span>post-incident-review</span></div>
+      <div class="receipt-row"><span class="key">Authorization mechanism</span><span>ceremony-G-R5-001</span></div>
+      <div class="receipt-row"><span class="key">Result</span><span><span class="badge badge-reserved">RESERVED</span></span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Key Doctrine: ESCALATED is Absorbing</h3>
+    <p style="font-size:0.88rem;">ESCALATED has <strong>no time-based auto-exit</strong>. It remains until an authorized human signs an exit receipt. τ_K expiry in ESCALATED produces <strong>UNKNOWN</strong>, not resolution (v7.1 §19). This is deliberate — escalation requires human judgment, not a timer.</p>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- SCENE 4: In-Memory vs Persistent                                       -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="scene" id="scene-4">
+  <h2>Scene 4 · In-Memory vs Persistent Registry</h2>
+  <p class="desc">The default SDK client uses an in-memory registry. Idempotency claims are lost on restart. With a persistent <code class="mono">store_path</code>, they survive.</p>
+
+  <div class="comparison">
+    <div class="compare-card mem">
+      <h4>In-Memory (default)</h4>
+      <p style="font-size:0.85rem;">DualKernelCompositionClient()</p>
+      <p style="font-size:0.85rem; margin-top:0.5rem;">No <code class="mono">store_path</code> → registry lives in process memory only.</p>
+      <div class="outcome bad">
+        ⚠ After restart: same operation re-adjudicated successfully. Idempotency claim lost!
+      </div>
+    </div>
+    <div class="compare-card persist">
+      <h4>Persistent (store_path)</h4>
+      <p style="font-size:0.85rem;">DualKernelCompositionClient(store_path="ledger.json")</p>
+      <p style="font-size:0.85rem; margin-top:0.5rem;">Store file on disk → claims survive process restart.</p>
+      <div class="outcome good">
+        ✓ After restart: re-adjudication blocked (HARD_VETO). Idempotency preserved!
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>require_persistence Guard</h3>
+    <div class="code-block mono"><span class="com"># Fail-fast in production — refuse to start without persistence</span>
+client = DualKernelCompositionClient(require_persistence=<span class="kw">True</span>)
+<span class="com"># Raises ValueError if store_path is None</span></div>
+    <div class="result-row"><span class="label">Behavior</span><span class="value"><span class="badge badge-veto">ValueError</span></span></div>
+    <div class="result-row"><span class="label">Message</span><span class="value" style="font-size:0.82rem;">require_persistence=True requires a store_path…</span></div>
+  </div>
+
+  <div class="card">
+    <h3>Runtime Warning (v5.3.0+)</h3>
+    <p style="font-size:0.88rem;">Since the audit fix, initializing without <code class="mono">store_path</code> emits a visible warning:</p>
+    <div class="code-block mono" style="color: var(--writer-dashboard-chart-3);">UserWarning: DualKernelCompositionClient initialized without store_path.
+  The operation registry is in-memory only — idempotency claims
+  will be lost on restart, allowing duplicate adjudication.
+  Pass store_path or require_persistence=True for production use.</div>
+  </div>
+
+  <div class="card">
+    <h3>Side-by-Side Test</h3>
+    <div class="timeline">
+      <div class="timeline-item">
+        <div class="time">In-memory</div>
+        <div class="content">Adjudicate → RESERVED. Simulate restart (new client). Re-adjudicate → <strong style="color:var(--writer-dashboard-chart-4);">FLAG (idempotency lost)</strong></div>
+      </div>
+      <div class="timeline-item">
+        <div class="time">Persistent</div>
+        <div class="content">Adjudicate → RESERVED. Simulate restart (same store). Re-adjudicate → <strong style="color:var(--writer-dashboard-chart-2);">HARD_VETO (blocked)</strong></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- SCENE 5: Provider Timeout → Reconcile                                 -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="scene" id="scene-5">
+  <h2>Scene 5 · Provider Timeout → UNKNOWN → Reconciliation</h2>
+  <p class="desc">When the provider times out, TENIR doesn't assume the payment failed. It marks the operation UNKNOWN and triggers reconciliation. A timeout does NOT prove no effect occurred.</p>
+
+  <div class="card">
+    <h3>Dispatch with Timeout</h3>
+    <div class="code-block mono">provider = MockProvider(behavior=<span class="str">"timeout"</span>, reconcile_outcome=ProviderOutcome.CONFIRMED)
+client.governor.provider = provider
+
+dispatch_result = client.governor.dispatch_and_execute(
+    p.idempotency_key, resource_id=<span class="str">"budget"</span>, amount=<span class="num">30.0</span>
+)</div>
+    <div class="result-row"><span class="label">Operation state</span><span class="value"><span class="badge badge-unknown">UNKNOWN</span></span></div>
+    <div class="result-row"><span class="label">Executed</span><span class="value">✗ False</span></div>
+    <div class="result-row"><span class="label">Reason</span><span class="value" style="font-size:0.82rem;">Provider returned UNKNOWN — reconciliation required.</span></div>
+  </div>
+
+  <div class="card">
+    <h3>State Machine: Timeout Path</h3>
+    <div class="state-machine">
+      <div class="state-node">CREATED</div>
+      <span class="state-arrow">→</span>
+      <div class="state-node">RESERVED</div>
+      <span class="state-arrow">→</span>
+      <div class="state-node">DISPATCHING</div>
+      <span class="state-arrow">→ timeout</span>
+      <div class="state-node highlight" style="border-color: var(--writer-dashboard-chart-5);">UNKNOWN</div>
+    </div>
+    <p style="font-size:0.85rem; color:var(--writer-dashboard-muted-text); margin-top:0.5rem;">UNKNOWN is <strong>not</strong> FAILED. It means the outcome is uncertain. The operation is not terminal — it can be reconciled.</p>
+  </div>
+
+  <div class="card">
+    <h3>Reconciliation</h3>
+    <div class="code-block mono"><span class="com"># Ask the provider: did the payment actually happen?</span>
+recon = client.governor.reconcile_unknown(p.idempotency_key)</div>
+    <div class="result-row"><span class="label">Reconciled</span><span class="value">✓ True</span></div>
+    <div class="result-row"><span class="label">Operation state</span><span class="value"><span class="badge badge-confirmed">CONFIRMED</span></span></div>
+    <div class="result-row"><span class="label">Outcome</span><span class="value">Payment did happen</span></div>
+  </div>
+
+  <div class="card">
+    <h3>Why Not FAILED?</h3>
+    <p style="font-size:0.88rem;">Per doctrine v7.1: a timeout does <strong>not</strong> prove no effect occurred. The payment may have succeeded — we just didn't get the response. Treating this as FAILED could lead to a double-charge (retry a payment that already went through). UNKNOWN triggers reconciliation, not auto-failure.</p>
+    <div class="spacer"></div>
+    <div class="state-machine">
+      <div class="state-node" style="border-color: var(--writer-dashboard-chart-5);">UNKNOWN</div>
+      <span class="state-arrow">├→</span>
+      <div class="state-node terminal">CONFIRMED</div>
+      <span style="font-size:0.8rem; color:var(--writer-dashboard-muted-text);">Provider confirms effect</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:0.5rem; margin-top:0.5rem;">
+      <span style="padding-left:2.3rem;" class="state-arrow">└→</span>
+      <div class="state-node danger">FAILED</div>
+      <span style="font-size:0.8rem; color:var(--writer-dashboard-muted-text);">Provider confirms no effect</span>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- SCENE 6: Guarantee Boundary                                           -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<section class="scene" id="scene-6">
+  <h2>Scene 6 · Guarantee Boundary</h2>
+  <p class="desc">TENIR-Gov provides three tiers of guarantee. A governance decision does not, by itself, prove that an external effect occurred exactly once.</p>
+
+  <div class="card">
+    <h3>Guarantee Tiers</h3>
+    <table class="guarantee-table">
+      <thead>
+        <tr><th>Guarantee</th><th>Level</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>At-most-once dispatch through the governance gate</td><td class="level-local">Local (in-process / single-host)</td></tr>
+        <tr><td>Fail-closed composition</td><td class="level-local">Local</td></tr>
+        <tr><td>Mandatory invariants not skippable by healthy score</td><td class="level-local">Local</td></tr>
+        <tr><td>Atomic budget reservations</td><td class="level-local">Local (threading.Lock)</td></tr>
+        <tr><td>Cross-process serialization (single host)</td><td class="level-local">Local (fcntl.flock)</td></tr>
+        <tr><td>Cross-host budget / idempotency coordination</td><td class="level-distributed">Requires distributed infrastructure</td></tr>
+        <tr><td>Exactly-once external effects</td><td class="level-provider">Depends on downstream provider</td></tr>
+        <tr><td>PyPI artifact integrity</td><td class="level-packaging">Packaging ecosystem + verification</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card" style="border-color: var(--writer-dashboard-accent); border-width: 2px;">
+    <h3>The Precise Guarantee Boundary</h3>
+    <p style="font-size:0.95rem; line-height:1.7;">
+      A governance decision does not, by itself, prove that an external effect occurred exactly once. TENIR-Gov guarantees that <strong>at most one</strong> dispatch is permitted through the governance gate on a single host.
+    </p>
+    <p style="font-size:0.95rem; line-height:1.7; margin-top:0.5rem;">
+      Exactly-once external effects require <strong>provider-side idempotency</strong> (e.g., Stripe's Idempotency-Key header) and, for multi-host deployments, <strong>distributed coordination infrastructure</strong>.
+    </p>
+    <p style="font-size:0.95rem; line-height:1.7; margin-top:0.5rem;">
+      <strong>Fail-closed is the default:</strong> when either kernel errors, when data is missing, or when the outcome is indeterminate, the composition produces <span class="badge badge-hold">HOLD</span> — never <span class="badge badge-pass">PASS</span>.
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>What This Means in Practice</h3>
+    <div class="timeline">
+      <div class="timeline-item">
+        <div class="time">Single host</div>
+        <div class="content">TENIR provides at-most-once dispatch. The governance gate will not permit the same operation to dispatch twice.</div>
+      </div>
+      <div class="timeline-item">
+        <div class="time">Multi-host</div>
+        <div class="content">Replace the file-backed registry with a transactional database. The in-process budget coordinator needs a distributed lock service.</div>
+      </div>
+      <div class="timeline-item">
+        <div class="time">External effects</div>
+        <div class="content">The provider must support idempotency keys (e.g., Stripe). TENIR passes the governance-assigned key; the provider deduplicates on its side.</div>
+      </div>
+      <div class="timeline-item">
+        <div class="time">Uncertainty</div>
+        <div class="content">Timeouts produce UNKNOWN, not FAILED. Reconciliation asks the provider what happened. If still unknown, a human reviews.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="writer-agent-credit">
+  Created with Writer Agent
+</footer>
+
+<script>
+// ── Theme toggle ───────────────────────────────────
+const toggle = document.getElementById('theme-toggle');
+function setColorScheme(scheme) {
+  document.documentElement.setAttribute('data-writer-dashboard-color-scheme', scheme);
+  localStorage.setItem('writer-dashboard-color-scheme', scheme);
+  toggle.setAttribute('aria-pressed', String(scheme === 'dark'));
+  toggle.textContent = scheme === 'dark' ? '☀️ Light' : '🌙 Dark';
+}
+toggle.addEventListener('click', () => {
+  const current = document.documentElement.getAttribute('data-writer-dashboard-color-scheme');
+  setColorScheme(current === 'dark' ? 'light' : 'dark');
+});
+// Initialize toggle state
+const initScheme = document.documentElement.getAttribute('data-writer-dashboard-color-scheme') || 'dark';
+setColorScheme(initScheme);
+
+// ── Scene navigation ──────────────────────────────
+const navLinks = document.querySelectorAll('#scene-nav a');
+const scenes = document.querySelectorAll('.scene');
+
+function showScene(num) {
+  scenes.forEach(s => s.classList.remove('active'));
+  document.getElementById('scene-' + num).classList.add('active');
+  navLinks.forEach(a => a.classList.remove('active'));
+  const activeLink = document.querySelector(`#scene-nav a[data-scene="${num}"]`);
+  if (activeLink) activeLink.classList.add('active');
+}
+
+navLinks.forEach(a => {
+  a.addEventListener('click', (e) => {
+    e.preventDefault();
+    const num = a.dataset.scene;
+    showScene(num);
+    history.pushState(null, '', '#scene-' + num);
+  });
+});
+
+// Handle browser back/forward
+window.addEventListener('popstate', () => {
+  const hash = location.hash || '#scene-1';
+  const num = hash.replace('#scene-', '');
+  showScene(num);
+});
+
+// Initial scene from URL
+const initialHash = location.hash || '#scene-1';
+const initialNum = initialHash.replace('#scene-', '');
+showScene(initialNum);
+</script>
+</body>
+</html>

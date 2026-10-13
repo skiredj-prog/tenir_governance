@@ -463,6 +463,162 @@ print(textwrap.dedent("""\
 ok("Guarantee boundary stated")
 
 
+# ── Scene 7: τ⁻¹ and EVP Post-Execution Assessment ──────────────────────────
+
+header("Scene 7: τ⁻¹ and EVP — Post-Execution Assessment")
+print(textwrap.dedent("""\
+  τ⁻¹ (partial tau inversion): a PARTIAL, CONDITIONAL, PROPERTY-RELATIVE
+  inverse — NOT a full mathematical inverse. It measures whether the
+  retained properties Q can be restored after execution.
+
+  EVP (intended value preservation): measures how well governance
+  discipline preserved the intended value. It is NOT an input to
+  admissibility — it is an ex-post consequence only.
+
+  Both run AFTER terminal states (CONFIRMED or FAILED), never before.
+  Neither feeds back into the admissibility function D.
+"""))
+
+from tenir_governance.assessment import (
+    TauInversionClassifier, InversionClassification,
+    EVPAssessor, PostExecutionAssessor,
+)
+
+# ── 7a: Pre-commit cancellation (FAILED, no external effect) ─────────────
+step("7a: Pre-commit cancellation — operation FAILED before any external effect...")
+classifier = TauInversionClassifier()
+result_pre = classifier.classify(
+    operation_state="failed",
+    action_type="payment",
+    retained_properties=["balance"],
+    metadata={"no_external_effect": True},
+)
+detail(f"Classification:     {result_pre.classification.value}")
+detail(f"Distance Q:         {result_pre.distance_q}")
+detail(f"Loss:               {result_pre.loss}")
+detail(f"Reversible:         {result_pre.is_reversible}")
+
+if result_pre.classification == InversionClassification.PRE_COMMIT:
+    ok("Pre-commit: trivially exact (no external effect to reverse)")
+else:
+    fail(f"Expected PRE_COMMIT, got {result_pre.classification.value}")
+
+# ── 7b: Exact inverse on Q (confirmed, full refund available) ───────────
+step("\n7b: Exact inverse on Q — confirmed operation with full reversal...")
+def full_refund(metadata):
+    return (0.0, 5.0, "Full refund issued — balance restored exactly")
+
+result_exact = classifier.classify(
+    operation_state="confirmed",
+    action_type="payment",
+    retained_properties=["balance"],
+    return_transition=full_refund,
+)
+detail(f"Classification:     {result_exact.classification.value}")
+detail(f"Distance Q:         {result_exact.distance_q}")
+detail(f"Return cost:        {result_exact.return_cost}")
+detail(f"Loss (L_Q):         {result_exact.loss:.4f}  =  {result_exact.distance_q} + {result_exact.lambda_weight} × {result_exact.return_cost}")
+
+if result_exact.classification == InversionClassification.EXACT_INVERSE:
+    ok("Exact inverse: ρ(τ(s)) ≈_Q s with distance_Q = 0")
+else:
+    fail(f"Expected EXACT_INVERSE, got {result_exact.classification.value}")
+
+# ── 7c: Compensation (confirmed, partial refund with FX loss) ────────────
+step("\n7c: Compensation — confirmed operation with partial reversal...")
+def partial_refund(metadata):
+    return (0.3, 2.0, "Partial refund — FX loss incurred")
+
+result_comp = classifier.classify(
+    operation_state="confirmed",
+    action_type="transfer",
+    retained_properties=["balance"],
+    return_transition=partial_refund,
+)
+detail(f"Classification:     {result_comp.classification.value}")
+detail(f"Distance Q:         {result_comp.distance_q}")
+detail(f"Return cost:        {result_comp.return_cost}")
+detail(f"Loss (L_Q):         {result_comp.loss:.4f}  =  {result_comp.distance_q} + {result_comp.lambda_weight} × {result_comp.return_cost}")
+
+if result_comp.classification == InversionClassification.COMPENSATION:
+    ok("Compensation: reduces effects but doesn't fully restore (distance_Q > 0)")
+else:
+    fail(f"Expected COMPENSATION, got {result_comp.classification.value}")
+
+# ── 7d: Irreversibility (confirmed, no return possible) ──────────────────
+step("\n7d: Irreversibility — confirmed operation with no authorized return...")
+result_irrev = classifier.classify(
+    operation_state="confirmed",
+    action_type="message_sent",
+    retained_properties=["message_read_status"],
+    return_transition=None,
+)
+detail(f"Classification:     {result_irrev.classification.value}")
+detail(f"Distance Q:         {result_irrev.distance_q}")
+detail(f"Loss:                {result_irrv_loss if (result_irrv_loss := result_irrev.loss) is not None else 'N/A'}")
+detail(f"Reversible:          {result_irrev.is_reversible}")
+
+if result_irrev.classification == InversionClassification.IRREVERSIBLE:
+    ok("Irreversibility: no authorized operation satisfies the return criterion")
+else:
+    fail(f"Expected IRREVERSIBLE, got {result_irrev.classification.value}")
+
+# ── 7e: EVP measurement ──────────────────────────────────────────────────
+step("\n7e: EVP — Intended Value Preservation measurement...")
+assessor = PostExecutionAssessor()
+
+report = assessor.assess(
+    idempotency_key="op-evp-demo",
+    passage_id="pass-evp",
+    operation_state="confirmed",
+    retained_properties=["balance"],
+    return_transition=full_refund,
+    intended_value=1000.0,
+    realized_value=950.0,
+    confidence=0.9,
+    hold_duration_seconds=120.0,
+)
+detail(f"EVP Gross (expected):  {report.evp.gross.expected_value:.2f}  =  {report.evp.gross.intended_value:.2f} × {report.evp.gross.confidence}")
+detail(f"EVP Net (realized):    {report.evp.net.net_value:.2f}  =  {report.evp.net.realized_value:.2f} − {report.evp.net.execution_loss:.2f}")
+detail(f"Friction cost:          {report.evp.friction.total:.4f}  (hold delay: {report.evp.friction.hold_delay_cost:.4f}, processing: {report.evp.friction.processing_overhead:.2f})")
+detail(f"EVP ratio:              {report.evp.evp_ratio:.3f}")
+detail(f"τ⁻¹ classification:     {report.tau_inversion.classification.value}")
+detail(f"Is input to D?          {report.is_input_to_admissibility}  (must be False)")
+
+if report.is_input_to_admissibility is False:
+    ok("EVP is NOT an input to admissibility — doctrine constraint enforced")
+else:
+    fail("EVP must NOT be an input to admissibility")
+
+if report.evp.evp_ratio > 0:
+    ok(f"EVP ratio {report.evp.evp_ratio:.3f} — governance preserved most intended value")
+else:
+    fail(f"EVP ratio {report.evp.evp_ratio:.3f} — value not preserved")
+
+# ── 7f: τ⁻¹ and EVP don't imply each other ──────────────────────────────
+step("\n7f: τ⁻¹ and EVP are independent — good EVP ≠ reversible...")
+report_irrev_good_evp = assessor.assess(
+    idempotency_key="op-independent",
+    passage_id="pass-indep",
+    operation_state="confirmed",
+    retained_properties=["message_read_status"],
+    return_transition=None,  # Irreversible
+    intended_value=1000.0,
+    realized_value=1000.0,    # Full value realized
+)
+detail(f"τ⁻¹:  {report_irrev_good_evp.tau_inversion.classification.value}")
+detail(f"EVP:  {report_irrev_good_evp.evp.evp_ratio:.3f}  (perfect value, but irreversible)")
+
+if (report_irrev_good_evp.tau_inversion.classification == InversionClassification.IRREVERSIBLE
+    and report_irrev_good_evp.evp.evp_ratio == 1.0):
+    ok("τ⁻¹ and EVP don't imply each other: perfect EVP with irreversibility")
+else:
+    fail("τ⁻¹ and EVP independence not demonstrated")
+
+info("A transition can have good EVP but be irreversible, and vice versa.")
+info("Both are ex-post measurements — they do NOT feed back into admissibility.\n")
+
+
 # ── Summary ─────────────────────────────────────────────────────────────────
 
 header("Demo Summary")
@@ -475,6 +631,7 @@ print("    3. HOLD lifecycle: enter → resolve → escalate → authorized exit
 print("    4. In-memory vs persistent registry: restart safety comparison")
 print("    5. Provider timeout → UNKNOWN → reconciliation (not auto-fail)")
 print("    6. Guarantee boundary: local vs distributed vs provider-dependent")
+print("    7. τ⁻¹ + EVP: post-execution assessment (4 classifications, EVP ratio)")
 print()
 if failed == 0:
     print(f"  {GREEN}{BOLD}All scenes passed. TENIR-Gov is ready for pilot.{RESET}")
