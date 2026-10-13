@@ -49,6 +49,12 @@ class MembraneState:
     invariants: list[MissionInvariant] = field(default_factory=list)
     # Per-resource locks for atomic budget reservations
     _locks: dict[str, threading.Lock] = field(default_factory=dict)
+    # Serializes quarantine changes against the final dispatch boundary.
+    _dispatch_guard: Any = field(default_factory=threading.RLock, repr=False, compare=False)
+    # Process-local proof that a specific operation owns a budget reservation.
+    operation_reservations: dict[str, tuple[str, float]] = field(default_factory=dict)
+    # Process-local record of budget amounts committed at dispatch.
+    operation_budget_committed: dict[str, tuple[str, float]] = field(default_factory=dict)
 
     def register_agent(self, agent: Agent) -> None:
         self.agents[agent.agent_id] = agent
@@ -70,19 +76,12 @@ class MembraneState:
         return self._locks[resource_id]
 
     def lock_quarantine(self, locked_by: str = "") -> None:
-        """Activate QUARANTINE_LOCK — blocks all new admission and dispatch.
-
-        Per v7.1 §6: QUARANTINE_LOCK blocks new attempt admission and
-        execution dispatch for the LEI until an authorized release or
-        resolution transition succeeds.
-
-        This is distinct from a HOLD decision — QUARANTINE_LOCK is a
-        persistent LEI-level guard, not a per-operation disposition.
-        """
-        self.quarantine = True
-        self.quarantine_locked_at = _utc_now()
-        self.quarantine_locked_by = locked_by
-        self.quarantine_release_receipt = None
+        """Activate QUARANTINE_LOCK, serialized with dispatch initiation."""
+        with self._dispatch_guard:
+            self.quarantine = True
+            self.quarantine_locked_at = _utc_now()
+            self.quarantine_locked_by = locked_by
+            self.quarantine_release_receipt = None
 
     def release_quarantine(
         self,
@@ -91,44 +90,39 @@ class MembraneState:
         authorization: str,
         reason: str = "",
     ) -> dict[str, Any]:
-        """Release QUARANTINE_LOCK — requires authenticated authorization.
+        """Release QUARANTINE_LOCK with an authorization receipt.
 
-        Per v7.1 §6: Release must be authenticated and authorized under
-        the applicable governance contract.
-
-        Per Blueprint v4.4 §5: overrides constitutionnels uniquement via
-        Ceremony G-R5-001 (authentification opérateur).
-
-        Returns:
-            dict with released (bool), receipt, and reason
+        The same guard serializes release with dispatch initiation. This
+        protects the local process only; it is not a cross-host lock.
         """
-        if not self.quarantine:
-            return {
-                "released": False,
-                "reason": "No quarantine lock active.",
-                "receipt": None,
+        with self._dispatch_guard:
+            if not self.quarantine:
+                return {
+                    "released": False,
+                    "reason": "No quarantine lock active.",
+                    "receipt": None,
+                }
+
+            receipt = {
+                "authorized_by": authorized_by,
+                "scope": scope,
+                "timestamp": _utc_now(),
+                "authorization": authorization,
+                "reason": reason,
+                "locked_at": self.quarantine_locked_at,
+                "locked_by": self.quarantine_locked_by,
             }
 
-        receipt = {
-            "authorized_by": authorized_by,
-            "scope": scope,
-            "timestamp": _utc_now(),
-            "authorization": authorization,
-            "reason": reason,
-            "locked_at": self.quarantine_locked_at,
-            "locked_by": self.quarantine_locked_by,
-        }
+            self.quarantine = False
+            self.quarantine_release_receipt = receipt
+            self.quarantine_locked_at = ""
+            self.quarantine_locked_by = ""
 
-        self.quarantine = False
-        self.quarantine_release_receipt = receipt
-        self.quarantine_locked_at = ""
-        self.quarantine_locked_by = ""
-
-        return {
-            "released": True,
-            "receipt": receipt,
-            "reason": f"Quarantine lock released by {authorized_by} via {authorization}.",
-        }
+            return {
+                "released": True,
+                "receipt": receipt,
+                "reason": f"Quarantine lock released by {authorized_by} via {authorization}.",
+            }
 
     @property
     def quarantine_active(self) -> bool:

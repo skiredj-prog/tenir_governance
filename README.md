@@ -10,6 +10,8 @@ It does not replace an LLM, an identity system, an observability stack, a policy
 
 > *AI can reason autonomously. TENIR-Gov controls whether that reasoning is admissible for execution.*
 
+**Version navigation:** the source tag [`v5.4.1`](https://github.com/skiredj-prog/tenir_governance/tree/v5.4.1) is available. A Git tag and a GitHub Release are separate objects: if you are looking under **Releases**, open the [tag directly](https://github.com/skiredj-prog/tenir_governance/tree/v5.4.1) to inspect the versioned source. The default branch may contain later development changes.
+
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
 [![CI](https://github.com/skiredj-prog/tenir-gov/actions/workflows/tenir-ci.yml/badge.svg)](https://github.com/skiredj-prog/tenir-gov/actions/workflows/tenir-ci.yml)
@@ -21,7 +23,7 @@ It does not replace an LLM, an identity system, an observability stack, a policy
 
 1. **Problem:** Models reason and agents propose actions — but a consequential action needs a runtime decision about whether it is admissible before execution.
 2. **Solution:** TENIR-Gov provides a deterministic execution-control layer at the decision → action boundary, with explicit policy thresholds and fail-closed defaults.
-3. **Proof:** The v5.4.1 package includes a two-kernel composition layer (continuous risk monitor + discrete invariant enforcer), a HOLD lifecycle for governed suspension of agency, a dispatch provider abstraction, post-execution assessment (τ⁻¹ and EVP), automated validation (663 tests), and hash-chained decision records.
+3. **Proof:** The v5.4.2 candidate adds dispatch-boundary quarantine enforcement and recovery regression coverage to the two-kernel composition layer, HOLD lifecycle, provider abstraction, opt-in post-execution assessment (τ⁻¹ and EVP), and hash-chained decision records. See the changelog for the exact guarantee boundary.
 
 ---
 
