@@ -207,6 +207,24 @@ jobs:
           "
 
 
+  # ── Full package suite: exercise the published middleware tests on every PR ──
+  package-tests:
+    name: "Full Package Suite (tests/)"
+    runs-on: ubuntu-latest
+    needs: policy-gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install package and test dependencies
+        run: pip install -e ".[test]" --quiet
+
+      - name: Run complete package test suite
+        run: python -m pytest tests/ -q --tb=short
+
+
   # ── Final: all gates must be green ────────────────────────────────────────────
   all-clear:
     name: "TENIR CI — All Gates Clear"
@@ -218,6 +236,7 @@ jobs:
       - r5-suite
       - r4-suite
       - nomenclature-check
+      - package-tests
     steps:
       - name: Summary
         run: |
@@ -234,5 +253,6 @@ jobs:
           echo "  Gate 3: R5 suite              56 cases"
           echo "  Gate 4: R4 monitor suite      61 cases"
           echo "  Gate 5: Nomenclature          aligned"
-          echo "  Total:                       445 tests"
+          echo "  Gate-suite subtotal:          445 tests (overlap with package suite)"
+          echo "  Full package suite:           tests/ (includes dispatch/recovery tests)"
           echo "================================================"
