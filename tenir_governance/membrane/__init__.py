@@ -51,6 +51,8 @@ class MembraneState:
     _locks: dict[str, threading.Lock] = field(default_factory=dict)
     # Serializes quarantine changes against the final dispatch boundary.
     _dispatch_guard: Any = field(default_factory=threading.RLock, repr=False, compare=False)
+    # Process-local proof that a specific operation owns a budget reservation.
+    operation_reservations: dict[str, tuple[str, float]] = field(default_factory=dict)
 
     def register_agent(self, agent: Agent) -> None:
         self.agents[agent.agent_id] = agent
