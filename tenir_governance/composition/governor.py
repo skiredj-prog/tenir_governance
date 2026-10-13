@@ -952,8 +952,9 @@ class DualKernelGovernor:
                 "reconciled": False,
                 "operation_state": record.state.value,
                 "reason": (
-                    f"Operation is in state {record.state.value}; only "
-                    "DISPATCHING or UNKNOWN can be reconciled."
+                    f"Operation is in state {record.state.value}, not UNKNOWN or DISPATCHING."
+                    if record.state not in (OperationState.DISPATCHING, OperationState.UNKNOWN)
+                    else "Operation state changed; retry reconciliation after refreshing the record."
                 ),
             }
         prior_state = record.state
