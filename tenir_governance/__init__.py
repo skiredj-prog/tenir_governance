@@ -126,7 +126,7 @@ from .assessment import (
     AssessmentReport,
 )
 
-__version__ = "5.4.1"
+__version__ = "5.4.2"
 __policy_version__ = "tenir-canonical-v1.0.0"
 __profile_version__ = "agentic-governance-profile-v1.0.0"
 __schema_version__ = "1.2"
