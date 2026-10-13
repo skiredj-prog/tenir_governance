@@ -10,6 +10,8 @@ It does not replace an LLM, an identity system, an observability stack, a policy
 
 > *AI can reason autonomously. TENIR-Gov controls whether that reasoning is admissible for execution.*
 
+**Version navigation:** the source tag [`v5.4.1`](https://github.com/skiredj-prog/tenir_governance/tree/v5.4.1) is available. A Git tag and a GitHub Release are separate objects: if you are looking under **Releases**, open the [tag directly](https://github.com/skiredj-prog/tenir_governance/tree/v5.4.1) to inspect the versioned source. The default branch may contain later development changes.
+
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
 [![CI](https://github.com/skiredj-prog/tenir-gov/actions/workflows/tenir-ci.yml/badge.svg)](https://github.com/skiredj-prog/tenir-gov/actions/workflows/tenir-ci.yml)
