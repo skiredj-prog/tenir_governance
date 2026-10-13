@@ -484,14 +484,14 @@ from tenir_governance.assessment import (
     EVPAssessor, PostExecutionAssessor,
 )
 
-# ── 7a: Pre-commit cancellation (FAILED, no external effect) ─────────────
-step("7a: Pre-commit cancellation — operation FAILED before any external effect...")
+# ── 7a: Pre-commit cancellation (FAILED, explicitly confirmed no effect) ─
+step("7a: Pre-commit cancellation — FAILED, explicitly confirmed no external effect...")
 classifier = TauInversionClassifier()
 result_pre = classifier.classify(
     operation_state="failed",
     action_type="payment",
     retained_properties=["balance"],
-    metadata={"no_external_effect": True},
+    metadata={"no_external_effect": True},  # P1-1: explicit confirmation required
 )
 detail(f"Classification:     {result_pre.classification.value}")
 detail(f"Distance Q:         {result_pre.distance_q}")
@@ -499,9 +499,25 @@ detail(f"Loss:               {result_pre.loss}")
 detail(f"Reversible:         {result_pre.is_reversible}")
 
 if result_pre.classification == InversionClassification.PRE_COMMIT:
-    ok("Pre-commit: trivially exact (no external effect to reverse)")
+    ok("Pre-commit: trivially exact (explicitly confirmed no external effect)")
 else:
     fail(f"Expected PRE_COMMIT, got {result_pre.classification.value}")
+
+# P1-1: Show that FAILED without explicit confirmation → INDETERMINATE
+step("\n7a-2: FAILED without explicit effect status → INDETERMINATE (not PRE_COMMIT)...")
+result_indet = classifier.classify(
+    operation_state="failed",
+    retained_properties=["balance"],
+    # No no_external_effect metadata → indeterminate
+)
+detail(f"Classification:     {result_indet.classification.value}")
+detail(f"Distance Q:         {result_indet.distance_q}")
+detail(f"Loss:                {result_indet.loss}")
+
+if result_indet.classification == InversionClassification.INDETERMINATE:
+    ok("P1-1: Absence of evidence is not evidence of non-execution → INDETERMINATE")
+else:
+    fail(f"Expected INDETERMINATE, got {result_indet.classification.value}")
 
 # ── 7b: Exact inverse on Q (confirmed, full refund available) ───────────
 step("\n7b: Exact inverse on Q — confirmed operation with full reversal...")

@@ -20,14 +20,28 @@ function.
 Key concepts:
     - EVP Gross: The total intended value of the operation if it had
       executed perfectly without governance friction.
-    - EVP Net: The actual value realized after governance friction costs
-      and any losses from delayed/denied/held operations.
+    - EVP Net: The actual value realized, minus execution losses.
+      Friction costs are reported SEPARATELY — they are costs of the
+      governance process, not reductions in the operation's realized
+      value. This avoids double-counting: for a failed operation, the
+      unrealized value is already reflected in the gap between gross
+      and realized; subtracting denied_opportunity_cost again would
+      count it twice.
     - Friction Costs: The overhead imposed by governance discipline —
       HOLD durations, escalation overhead, reconciliation effort,
-      denied-opportunity cost.
+      denied-opportunity cost. Reported as context, not subtracted
+      from EVP Net.
     - Governance Debt: The accumulated cost of unresolved governance
       actions — operations in HOLD, ESCALATED, or UNKNOWN that are
       consuming resources without producing value.
+
+Frozen equations (definition and calculation must agree):
+    EVP Gross    = intended_value × confidence
+    EVP Net      = realized_value − execution_loss
+    EVP Ratio    = EVP Net / EVP Gross
+    Friction     = hold_delay + escalation + reconciliation
+                   + denied_opportunity + processing
+    Friction is reported separately and is NOT subtracted from EVP Net.
 
 CRITICAL: EVP is an EX-POST (post-execution) measurement. It runs AFTER
 the dispatch state machine reaches a terminal state. It is NOT an input
@@ -129,9 +143,16 @@ class FrictionCost:
 
 @dataclass
 class EVPNet:
-    """EVP Net — the actual value realized after friction.
+    """EVP Net — the actual value realized, minus execution losses.
 
-    EVP Net = EVP Gross expected value − friction costs − execution losses.
+    Frozen equation:
+        EVP Net = realized_value − execution_loss
+
+    Friction costs are reported SEPARATELY (in FrictionCost), not
+    subtracted from EVP Net. This avoids double-counting: for a failed
+    operation, the unrealized value is already reflected in the gap
+    between gross and realized; subtracting denied_opportunity_cost
+    again would count it twice.
 
     Attributes:
         realized_value: The actual value produced by the operation.
@@ -143,7 +164,11 @@ class EVPNet:
 
     @property
     def net_value(self) -> float:
-        """Net value = realized_value − execution_loss."""
+        """Net value = realized_value − execution_loss.
+
+        Per the frozen equation: EVP Net = realized_value − execution_loss.
+        Friction is NOT subtracted here — it is reported separately.
+        """
         return self.realized_value - self.execution_loss
 
     def to_dict(self) -> dict[str, Any]:
@@ -213,10 +238,18 @@ class EVPReport:
     This report is produced AFTER execution. It does NOT feed back into
     the admissibility function.
 
+    Frozen equations (definition and calculation must agree):
+        EVP Gross    = intended_value × confidence
+        EVP Net      = realized_value − execution_loss
+        EVP Ratio    = EVP Net / EVP Gross
+        Friction     = hold_delay + escalation + reconciliation
+                       + denied_opportunity + processing
+        Friction is reported separately and is NOT subtracted from EVP Net.
+
     Attributes:
         gross: EVP Gross — intended value.
-        net: EVP Net — realized value after losses.
-        friction: Friction costs imposed by governance.
+        net: EVP Net — realized value minus execution losses.
+        friction: Friction costs imposed by governance (reported separately).
         governance_debt: Current governance debt snapshot.
         is_input_to_admissibility: Always False. This field exists to
             make the doctrine constraint explicit and machine-checkable.
@@ -231,11 +264,16 @@ class EVPReport:
 
     @property
     def evp_ratio(self) -> float:
-        """EVP ratio = net_value / expected_gross_value.
+        """EVP ratio = EVP Net / EVP Gross.
+
+        Per the frozen equation:
+            EVP Ratio = (realized_value − execution_loss) / (intended_value × confidence)
+
+        Friction is NOT included in this ratio — it is reported separately.
 
         A ratio of 1.0 means the operation realized its full intended
-        value. Below 1.0 means friction or execution losses reduced the
-        realized value. Above 1.0 is possible if the governance discipline
+        value. Below 1.0 means execution losses reduced the realized
+        value. Above 1.0 is possible if the governance discipline
         prevented a harmful operation (value preservation exceeds intended).
 
         Returns 0.0 if expected gross value is 0.
@@ -333,11 +371,13 @@ class EVPAssessor:
         Returns:
             EVPReport with gross, net, friction, and governance debt.
 
-        EVP calculation:
+        EVP calculation (frozen equations):
             EVP Gross = intended_value × confidence
-            Friction = hold_delay + escalation + reconciliation + denied + processing
-            EVP Net = realized_value − execution_loss
+            EVP Net   = realized_value − execution_loss
             EVP Ratio = EVP Net / EVP Gross
+            Friction  = hold_delay + escalation + reconciliation
+                        + denied_opportunity + processing
+            Friction is reported separately, NOT subtracted from EVP Net.
         """
         config = {**self.default_friction_config, **(friction_config or {})}
 

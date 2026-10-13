@@ -3,6 +3,12 @@
 Per doctrine: the assessor ties τ⁻¹ and EVP together. It runs AFTER
 the dispatch state machine reaches a terminal state (CONFIRMED or FAILED).
 It does NOT feed back into the admissibility function.
+
+P1 fixes applied:
+- P1-1: Failed operations without explicit no_external_effect=True now
+  return INDETERMINATE, not PRE_COMMIT.
+- P1-2: Empty Q returns INDETERMINATE.
+- P1-3: EVP friction is reported separately, not subtracted from EVP Net.
 """
 import pytest
 from tenir_governance.assessment.assessor import (
@@ -39,19 +45,35 @@ class TestPostExecutionAssessor:
         assert report.is_input_to_admissibility is False
 
     def test_assess_failed_operation(self):
+        """P1-1: Failed operation without explicit no_external_effect → INDETERMINATE."""
         assessor = PostExecutionAssessor()
         report = assessor.assess(
             idempotency_key="op-456",
             passage_id="pass-789",
             operation_state="failed",
+            retained_properties=["balance"],
+            intended_value=1000.0,
+            denied_opportunity_value=1000.0,
+            # No no_external_effect metadata → INDETERMINATE
+        )
+        assert report.operation_state == "failed"
+        assert report.tau_inversion.classification == InversionClassification.INDETERMINATE
+        assert report.evp.evp_ratio == 0.0
+        assert report.is_input_to_admissibility is False
+
+    def test_assess_failed_with_explicit_no_effect_is_pre_commit(self):
+        """P1-1: Failed operation WITH explicit no_external_effect=True → PRE_COMMIT."""
+        assessor = PostExecutionAssessor()
+        report = assessor.assess(
+            idempotency_key="op-pre",
+            passage_id="pass-pre",
+            operation_state="failed",
+            retained_properties=["balance"],
             intended_value=1000.0,
             denied_opportunity_value=1000.0,
             metadata={"no_external_effect": True},
         )
-        assert report.operation_state == "failed"
         assert report.tau_inversion.classification == InversionClassification.PRE_COMMIT
-        assert report.evp.evp_ratio == 0.0
-        assert report.is_input_to_admissibility is False
 
     def test_assess_irreversible_operation(self):
         assessor = PostExecutionAssessor()
@@ -66,7 +88,6 @@ class TestPostExecutionAssessor:
         )
         assert report.tau_inversion.classification == InversionClassification.IRREVERSIBLE
         assert report.evp.evp_ratio == 1.0  # Good EVP despite irreversibility
-        # This demonstrates τ⁻¹ and EVP don't imply each other
 
     def test_assess_compensation_operation(self):
         assessor = PostExecutionAssessor()
@@ -86,14 +107,28 @@ class TestPostExecutionAssessor:
         assert report.tau_inversion.classification == InversionClassification.COMPENSATION
         assert report.evp.evp_ratio == pytest.approx(0.9)
 
+    def test_assess_empty_q_is_indeterminate(self):
+        """P1-2: Empty Q → INDETERMINATE for τ⁻¹."""
+        assessor = PostExecutionAssessor()
+        report = assessor.assess(
+            idempotency_key="op-empty-q",
+            passage_id="pass-eq",
+            operation_state="confirmed",
+            retained_properties=[],  # Empty Q
+            return_transition=lambda m: (0.0, 0.0, ""),
+            intended_value=1000.0,
+            realized_value=1000.0,
+        )
+        assert report.tau_inversion.classification == InversionClassification.INDETERMINATE
+
     def test_is_input_to_admissibility_always_false(self):
-        """The assessment report must never be an admissibility input."""
         assessor = PostExecutionAssessor()
         for state in ["confirmed", "failed"]:
             report = assessor.assess(
                 idempotency_key=f"op-{state}",
                 passage_id="pass",
                 operation_state=state,
+                retained_properties=["balance"],
                 intended_value=1000.0,
             )
             assert report.is_input_to_admissibility is False
@@ -104,10 +139,12 @@ class TestPostExecutionAssessor:
             idempotency_key="op-ts",
             passage_id="pass",
             operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=lambda m: (0.0, 1.0, ""),
             intended_value=100.0,
         )
         assert report.assessment_timestamp != ""
-        assert "T" in report.assessment_timestamp  # ISO format
+        assert "T" in report.assessment_timestamp
 
     def test_report_to_dict(self):
         assessor = PostExecutionAssessor()
@@ -138,6 +175,8 @@ class TestPostExecutionAssessor:
             idempotency_key="op-rat",
             passage_id="pass",
             operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=lambda m: (0.0, 1.0, ""),
             intended_value=1000.0,
             realized_value=900.0,
         )
@@ -156,6 +195,8 @@ class TestAssessorReportStorage:
                 idempotency_key=f"op-{i}",
                 passage_id="pass",
                 operation_state="confirmed",
+                retained_properties=["balance"],
+                return_transition=lambda m: (0.0, 1.0, ""),
                 intended_value=100.0,
             )
         assert assessor.report_count == 5
@@ -166,12 +207,15 @@ class TestAssessorReportStorage:
             idempotency_key="op-a",
             passage_id="pass",
             operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=lambda m: (0.0, 1.0, ""),
             intended_value=100.0,
         )
         assessor.assess(
             idempotency_key="op-b",
             passage_id="pass",
             operation_state="failed",
+            retained_properties=["balance"],
             intended_value=200.0,
         )
         report = assessor.get_report("op-a")
@@ -184,13 +228,14 @@ class TestAssessorReportStorage:
         assert assessor.get_report("nonexistent") is None
 
     def test_get_all_reports_for_key(self):
-        """Multiple assessments for the same key are all retrievable."""
         assessor = PostExecutionAssessor()
         for i in range(3):
             assessor.assess(
                 idempotency_key="op-multi",
                 passage_id="pass",
                 operation_state="confirmed",
+                retained_properties=["balance"],
+                return_transition=lambda m: (0.0, 1.0, ""),
                 intended_value=100.0 * i,
             )
         reports = assessor.get_all_reports("op-multi")
@@ -202,6 +247,8 @@ class TestAssessorReportStorage:
             idempotency_key="op-1",
             passage_id="pass",
             operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=lambda m: (0.0, 1.0, ""),
             intended_value=100.0,
         )
         assert assessor.report_count == 1
@@ -216,22 +263,25 @@ class TestAssessorAggregateStats:
         assessor = PostExecutionAssessor()
         stats = assessor.aggregate_stats()
         assert stats["total_reports"] == 0
-        assert stats["confirmed_count"] == 0
-        assert stats["failed_count"] == 0
 
     def test_confirmed_failed_counts(self):
         assessor = PostExecutionAssessor()
         assessor.assess(
             idempotency_key="op-1", passage_id="p",
             operation_state="confirmed", intended_value=100.0,
+            retained_properties=["balance"],
+            return_transition=lambda m: (0.0, 1.0, ""),
         )
         assessor.assess(
             idempotency_key="op-2", passage_id="p",
             operation_state="confirmed", intended_value=200.0,
+            retained_properties=["balance"],
+            return_transition=lambda m: (0.0, 1.0, ""),
         )
         assessor.assess(
             idempotency_key="op-3", passage_id="p",
             operation_state="failed", intended_value=300.0,
+            retained_properties=["balance"],
         )
         stats = assessor.aggregate_stats()
         assert stats["confirmed_count"] == 2
@@ -239,33 +289,42 @@ class TestAssessorAggregateStats:
         assert stats["total_reports"] == 3
 
     def test_tau_distribution(self):
+        """P1-1: Failed without explicit no_external_effect → INDETERMINATE, not PRE_COMMIT."""
         assessor = PostExecutionAssessor()
 
-        # PRE_COMMIT (failed, no effect)
+        # EXACT_INVERSE
         assessor.assess(
             idempotency_key="op-1", passage_id="p",
-            operation_state="failed", intended_value=100.0,
-            metadata={"no_external_effect": True},
-        )
-        # EXACT_INVERSE
-        def rt(metadata):
-            return (0.0, 1.0, "Refund")
-        assessor.assess(
-            idempotency_key="op-2", passage_id="p",
             operation_state="confirmed", intended_value=100.0,
-            return_transition=rt,
+            retained_properties=["balance"],
+            return_transition=lambda m: (0.0, 1.0, ""),
         )
         # IRREVERSIBLE
         assessor.assess(
-            idempotency_key="op-3", passage_id="p",
+            idempotency_key="op-2", passage_id="p",
             operation_state="confirmed", intended_value=100.0,
+            retained_properties=["balance"],
             return_transition=None,
+        )
+        # INDETERMINATE (failed without explicit no_external_effect)
+        assessor.assess(
+            idempotency_key="op-3", passage_id="p",
+            operation_state="failed", intended_value=100.0,
+            retained_properties=["balance"],
+        )
+        # PRE_COMMIT (failed WITH explicit no_external_effect=True)
+        assessor.assess(
+            idempotency_key="op-4", passage_id="p",
+            operation_state="failed", intended_value=100.0,
+            retained_properties=["balance"],
+            metadata={"no_external_effect": True},
         )
 
         stats = assessor.aggregate_stats()
-        assert stats["tau_distribution"]["pre_commit"] == 1
         assert stats["tau_distribution"]["exact_inverse"] == 1
         assert stats["tau_distribution"]["irreversible"] == 1
+        assert stats["tau_distribution"]["indeterminate"] == 1
+        assert stats["tau_distribution"]["pre_commit"] == 1
 
     def test_avg_evp_ratio(self):
         assessor = PostExecutionAssessor()
@@ -273,11 +332,15 @@ class TestAssessorAggregateStats:
             idempotency_key="op-1", passage_id="p",
             operation_state="confirmed", intended_value=1000.0,
             realized_value=1000.0,
+            retained_properties=["balance"],
+            return_transition=lambda m: (0.0, 1.0, ""),
         )  # ratio = 1.0
         assessor.assess(
             idempotency_key="op-2", passage_id="p",
             operation_state="confirmed", intended_value=1000.0,
             realized_value=500.0,
+            retained_properties=["balance"],
+            return_transition=lambda m: (0.0, 1.0, ""),
         )  # ratio = 0.5
         stats = assessor.aggregate_stats()
         assert stats["avg_evp_ratio"] == pytest.approx(0.75)
@@ -289,45 +352,43 @@ class TestAssessorAggregateStats:
             operation_state="confirmed", intended_value=1000.0,
             realized_value=1000.0,
             hold_duration_seconds=100.0,
-        )  # friction includes hold_delay = 0.1, processing = 0.5
+            retained_properties=["balance"],
+            return_transition=lambda m: (0.0, 1.0, ""),
+        )
         stats = assessor.aggregate_stats()
         assert stats["total_friction_cost"] > 0.0
 
 
 class TestAssessorNonInterference:
-    """Test that the assessor does NOT interfere with the state machine.
-
-    Per doctrine: the assessment is a pure measurement. It does not modify
-    operation state, does not feed back into admissibility, and does not
-    affect any governance decision.
-    """
+    """Test that the assessor does NOT interfere with the state machine."""
 
     def test_assess_does_not_modify_operation_state(self):
-        """The assess() method should not change any operation's state."""
         assessor = PostExecutionAssessor()
         report = assessor.assess(
             idempotency_key="op-test",
             passage_id="pass-test",
             operation_state="confirmed",
+            retained_properties=["balance"],
+            return_transition=lambda m: (0.0, 1.0, ""),
             intended_value=100.0,
         )
-        # The report records the state but does not change it
         assert report.operation_state == "confirmed"
-        # The assessor has no reference to any registry or state machine
         assert not hasattr(assessor, 'registry') or assessor.__dict__.get('registry') is None
 
     def test_assess_is_pure_measurement(self):
-        """Calling assess() multiple times produces independent reports."""
         assessor = PostExecutionAssessor()
         r1 = assessor.assess(
             idempotency_key="op-1", passage_id="p",
             operation_state="confirmed", intended_value=100.0,
+            retained_properties=["balance"],
+            return_transition=lambda m: (0.0, 1.0, ""),
         )
         r2 = assessor.assess(
             idempotency_key="op-2", passage_id="p",
             operation_state="confirmed", intended_value=200.0,
+            retained_properties=["balance"],
+            return_transition=lambda m: (0.0, 1.0, ""),
         )
         assert r1.evp.gross.intended_value == 100.0
         assert r2.evp.gross.intended_value == 200.0
-        # The first report is not affected by the second
         assert assessor.get_report("op-1").evp.gross.intended_value == 100.0

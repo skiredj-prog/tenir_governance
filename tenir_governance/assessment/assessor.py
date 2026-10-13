@@ -93,6 +93,27 @@ class PostExecutionAssessor:
     AssessmentReport containing both the τ⁻¹ classification and the EVP
     measurement.
 
+    LIFECYCLE: The assessor is NOT automatically triggered by
+    ``dispatch_and_execute()``. It is an explicit, opt-in follow-up action.
+    The caller must invoke ``assess_post_execution()`` (or
+    ``assess()``) after the operation reaches a terminal state. This is
+    by design: the assessment is a pure measurement and should not
+    interfere with the dispatch lifecycle.
+
+    STORAGE: Assessment reports are stored in an in-memory list. This
+    does NOT provide restart persistence or tamper evidence. For
+    production audit trails, wrap or replace the report storage with a
+    durable, append-only ledger. The in-memory storage is suitable for
+    testing, demos, and short-lived processes.
+
+    return_transition PARAMETER: The ``return_transition`` callable is
+    an ASSESSMENT callback only — it simulates the return transition ρ
+    to measure distance_Q and cost(ρ). It must NOT initiate a compensating
+    action. The assessment path must not perform an irreversible
+    operation unexpectedly. If compensation is needed, it should be
+    initiated through a separate, governed dispatch — not through the
+    assessment callback.
+
     The assessor is OPTIONAL. The governor operates correctly without it.
     When configured, it enriches the post-execution audit trail without
     interfering with the state machine.

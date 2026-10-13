@@ -65,45 +65,78 @@ from typing import Any, Callable, Optional
 
 
 class InversionClassification(str, Enum):
-    """The four τ⁻¹ classifications per doctrine.
+    """The τ⁻¹ classifications per doctrine.
 
-    Ordered by decreasing reversibility:
+    The four doctrine classifications are ordered by decreasing
+    reversibility:
         PRE_COMMIT > EXACT_INVERSE > COMPENSATION > IRREVERSIBLE
 
     This ordering avoids attributing a high reversibility score to an
     action simply because an "undo" button exists (doctrine p. 12).
+
+    An additional INDETERMINATE classification is used when the
+    assessment cannot be performed due to insufficient information:
+    - The external effect status of a FAILED operation is unknown.
+    - The retained property set Q is empty or missing.
     """
     PRE_COMMIT = "pre_commit"
     # The action has not yet produced an external effect.
     # Cancellation is trivially exact — no external state changed.
+    # REQUIRES explicit confirmation that no external effect occurred.
 
     EXACT_INVERSE = "exact_inverse"
     # The inverse operation restores the targeted properties Q.
     # ρ(τ(s)) ≈_Q s holds with distance_Q = 0 (or near-zero).
+    # REQUIRES a non-empty Q.
 
     COMPENSATION = "compensation"
     # An operation reduces certain effects without restoring the initial
     # state. distance_Q > 0 but the return transition is authorized and
     # partially effective.
+    # REQUIRES a non-empty Q.
 
     IRREVERSIBLE = "irreversible"
     # No authorized operation satisfies the chosen return criterion.
     # τ⁻¹ does not exist for the relevant properties Q.
 
+    INDETERMINATE = "indeterminate"
+    # The assessment cannot be performed due to insufficient information.
+    # This is NOT a classification of reversibility — it means the
+    # classifier cannot determine the correct classification.
+    # Uses: unknown external effect status, empty/missing Q.
+
     @property
     def reversibility_rank(self) -> int:
-        """Higher = more reversible. Used for comparison, not as a score."""
+        """Higher = more reversible. Used for comparison, not as a score.
+
+        INDETERMINATE has no rank — it is not a reversibility classification.
+        """
         return {
             InversionClassification.PRE_COMMIT: 4,
             InversionClassification.EXACT_INVERSE: 3,
             InversionClassification.COMPENSATION: 2,
             InversionClassification.IRREVERSIBLE: 1,
+            InversionClassification.INDETERMINATE: 0,
         }[self]
 
     @property
     def is_reversible(self) -> bool:
-        """True if any form of return is possible (not IRREVERSIBLE)."""
-        return self != InversionClassification.IRREVERSIBLE
+        """True if any form of return is possible (not IRREVERSIBLE).
+
+        INDETERMINATE returns False because the reversibility is unknown,
+        not because it is irreversible.
+        """
+        return self not in (InversionClassification.IRREVERSIBLE,
+                            InversionClassification.INDETERMINATE)
+
+    @property
+    def is_determined(self) -> bool:
+        """True if the classification is a determined assessment.
+
+        INDETERMINATE is not a determined assessment — it means the
+        classifier could not determine the correct classification.
+        """
+        return self != InversionClassification.INDETERMINATE
 
 
 @dataclass
@@ -208,8 +241,9 @@ class TauInversionClassifier:
                 making it PRE_COMMIT.
             action_type: The type of action (e.g., "payment", "transfer").
             retained_properties: The set Q of properties to evaluate for
-                return. If None, defaults to an empty list (no properties
-                retained → irreversibility on empty Q is trivially exact).
+                return. MUST be a non-empty list — an empty Q makes the
+                assessment vacuous (no properties to preserve). If None or
+                empty, returns INDETERMINATE.
             return_transition: A callable that simulates the return
                 transition ρ. It receives (metadata) and returns
                 (distance_q, return_cost, description). If None, no return
@@ -224,32 +258,81 @@ class TauInversionClassifier:
             TauInversionResult with the classification and loss calculation.
 
         Classification logic:
-            1. If operation_state == "failed" and no external effect was
-               produced → PRE_COMMIT (cancellation before any effect).
-            2. If no return_transition is provided → IRREVERSIBLE.
-            3. If return_transition is provided, execute it and measure
+            1. If retained_properties Q is empty or missing → INDETERMINATE
+               (cannot assess property preservation without a defined Q).
+            2. If operation_state == "failed" and external effect status is
+               unknown → INDETERMINATE (absence of evidence is not evidence
+               of non-execution).
+            3. If operation_state == "failed" and external effect is
+               explicitly confirmed absent → PRE_COMMIT.
+            4. If no return_transition is provided → IRREVERSIBLE.
+            5. If return_transition is provided, execute it and measure
                distance_Q:
                - distance_q == 0 → EXACT_INVERSE
                - distance_q > 0 but finite → COMPENSATION
-            4. For non-deterministic transitions, verify all results.
+            6. For non-deterministic transitions, verify all results.
         """
-        retained_properties = retained_properties or []
         lam = lambda_weight if lambda_weight is not None else self.default_lambda
         metadata = metadata or {}
 
-        # ── 1. PRE_COMMIT: no external effect occurred ──────────────────
-        # Per doctrine: "annulation pré-commit : l'action n'a pas encore
-        # produit d'effet externe"
+        # ── 0. Reject empty Q as vacuous assessment ─────────────────────
+        # P1-2: An empty property set Q makes the assessment vacuous.
+        # Q defines the properties whose preservation is being assessed.
+        # With no explicitly retained properties, an exact inverse claim
+        # has no substantive property-preservation content. A callback
+        # returning zero distance should not automatically establish
+        # meaningful reversibility.
+        if not retained_properties:
+            return TauInversionResult(
+                classification=InversionClassification.INDETERMINATE,
+                retained_properties=[],
+                distance_q=None,
+                return_cost=None,
+                loss=None,
+                lambda_weight=lam,
+                rationale=(
+                    "Indeterminate: retained property set Q is empty or "
+                    "missing. Cannot assess property preservation without "
+                    "a defined Q. An empty Q makes any reversibility claim "
+                    "vacuous."
+                ),
+                return_transition_description="",
+                non_determinism_handled=non_deterministic_results is not None,
+            )
+
+        # ── 1. FAILED operations: require explicit effect status ────────
+        # P1-1: Absence of evidence must not become evidence of non-execution.
+        # The implementation's own comments acknowledge that a failed
+        # operation may have produced an external effect. We require
+        # explicit, appropriately sourced confirmation before classifying
+        # as PRE_COMMIT.
         #
-        # If the operation FAILED without producing an external effect,
-        # or if it was cancelled before dispatch, the return is trivially
-        # exact — no external state changed.
+        # no_external_effect can be:
+        #   True  → explicitly confirmed no effect → PRE_COMMIT
+        #   False → explicitly confirmed effect occurred → proceed to return
+        #   None  → unknown → INDETERMINATE
         if operation_state == "failed":
-            # A FAILED operation may or may not have produced an effect.
-            # If metadata indicates no external effect occurred, it's
-            # PRE_COMMIT. Otherwise, we need a return transition.
-            no_external_effect = metadata.get("no_external_effect", True)
-            if no_external_effect:
+            no_external_effect = metadata.get("no_external_effect", None)
+            if no_external_effect is None:
+                # Effect status unknown — cannot determine classification
+                return TauInversionResult(
+                    classification=InversionClassification.INDETERMINATE,
+                    retained_properties=retained_properties,
+                    distance_q=None,
+                    return_cost=None,
+                    loss=None,
+                    lambda_weight=lam,
+                    rationale=(
+                        "Indeterminate: operation FAILED but external "
+                        "effect status is unknown. Absence of evidence is "
+                        "not evidence of non-execution. Require explicit "
+                        "confirmation before classifying as PRE_COMMIT."
+                    ),
+                    return_transition_description="",
+                    non_determinism_handled=non_deterministic_results is not None,
+                )
+            elif no_external_effect is True:
+                # Explicitly confirmed: no external effect occurred
                 return TauInversionResult(
                     classification=InversionClassification.PRE_COMMIT,
                     retained_properties=retained_properties,
@@ -259,12 +342,14 @@ class TauInversionClassifier:
                     lambda_weight=lam,
                     rationale=(
                         "Pre-commit cancellation: the action did not produce "
-                        "an external effect. Return is trivially exact — no "
-                        "external state changed."
+                        "an external effect (explicitly confirmed). Return "
+                        "is trivially exact — no external state changed."
                     ),
                     return_transition_description="None needed — no effect to reverse.",
                     non_determinism_handled=non_deterministic_results is not None,
                 )
+            # no_external_effect is False → effect DID occur → fall through
+            # to return transition evaluation below
 
         # ── 2. No return transition available → IRREVERSIBLE ────────────
         # Per doctrine: "irréversibilité : aucune opération autorisée ne

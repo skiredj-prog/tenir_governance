@@ -7,6 +7,14 @@ Per doctrine (TENIR Property-Preserving Transitions Manuscript, Layer 4):
 - EVP Gross / EVP Net, friction costs, Governance Debt are consequences,
   not inputs to D.
 - EVP and τ⁻¹ don't imply each other.
+
+P1-3 fix: Frozen equations — definition and calculation must agree.
+    EVP Gross    = intended_value × confidence
+    EVP Net      = realized_value − execution_loss
+    EVP Ratio    = EVP Net / EVP Gross
+    Friction     = hold_delay + escalation + reconciliation
+                   + denied_opportunity + processing
+    Friction is reported separately, NOT subtracted from EVP Net.
 """
 import pytest
 from tenir_governance.assessment.evp import (
@@ -44,7 +52,11 @@ class TestEVPGross:
 
 
 class TestEVPNet:
-    """Test EVP Net — actual value realized after friction."""
+    """Test EVP Net — actual value realized minus execution losses.
+
+    Frozen equation: EVP Net = realized_value − execution_loss
+    Friction is NOT subtracted from EVP Net.
+    """
 
     def test_net_value_is_realized_minus_loss(self):
         net = EVPNet(realized_value=950.0, execution_loss=50.0)
@@ -67,7 +79,10 @@ class TestEVPNet:
 
 
 class TestFrictionCost:
-    """Test friction costs — overhead imposed by governance discipline."""
+    """Test friction costs — overhead imposed by governance discipline.
+
+    Friction is reported SEPARATELY, not subtracted from EVP Net.
+    """
 
     def test_total_is_sum_of_all_components(self):
         fc = FrictionCost(
@@ -128,7 +143,14 @@ class TestGovernanceDebt:
 
 
 class TestEVPReport:
-    """Test the complete EVP report."""
+    """Test the complete EVP report.
+
+    Frozen equations:
+        EVP Gross    = intended_value × confidence
+        EVP Net      = realized_value − execution_loss
+        EVP Ratio    = EVP Net / EVP Gross
+        Friction     = reported separately, NOT subtracted from EVP Net
+    """
 
     def test_evp_ratio_when_gross_is_zero(self):
         report = EVPReport(
@@ -151,6 +173,17 @@ class TestEVPReport:
         )
         # net = 700, gross expected = 1000, ratio = 0.7
         assert report.evp_ratio == pytest.approx(0.7)
+
+    def test_evp_ratio_does_not_include_friction(self):
+        """P1-3: Friction is NOT subtracted from EVP Net."""
+        report = EVPReport(
+            gross=EVPGross(intended_value=1000.0, confidence=1.0),
+            net=EVPNet(realized_value=1000.0, execution_loss=0.0),
+            friction=FrictionCost(hold_delay_cost=100.0, processing_overhead=5.0),
+        )
+        # Even with significant friction, ratio is 1.0 because friction
+        # is reported separately, not subtracted from EVP Net
+        assert report.evp_ratio == 1.0
 
     def test_is_input_to_admissibility_is_always_false(self):
         """Doctrine constraint: EVP is NEVER an input to admissibility."""
@@ -319,33 +352,167 @@ class TestEVPAssessor:
         assert "failed" in report.rationale.lower()
 
 
-class TestEVPSeparationFromAdmissibility:
-    """Test the critical doctrine constraint: EVP is NOT an input to admissibility.
+class TestP1HandCalculatedEVP:
+    """P1-3: Hand-calculated EVP tests verifying the frozen equations.
 
-    Per doctrine: "EVP ∉ Admissibility Function. Admissibility precedes value
-    measurement. High expected value never justifies an otherwise inadmissible
-    transition."
+    These tests verify that the definition, formula, ratio, and examples
+    all agree. Every value is hand-calculated, not derived from the code.
     """
 
+    def test_confirmed_full_value_no_friction(self):
+        """Confirmed operation, full value realized, no friction.
+
+        EVP Gross = 1000 × 1.0 = 1000
+        EVP Net   = 1000 − 0 = 1000
+        EVP Ratio = 1000 / 1000 = 1.0
+        Friction  = 0 (no hold, no escalation, no reconciliation)
+                    + 0 (no denied opportunity) + 0.5 (processing overhead)
+                  = 0.5
+        """
+        assessor = EVPAssessor()
+        report = assessor.assess(
+            operation_state="confirmed",
+            intended_value=1000.0,
+            realized_value=1000.0,
+            confidence=1.0,
+        )
+        assert report.gross.expected_value == 1000.0
+        assert report.net.net_value == 1000.0
+        assert report.evp_ratio == 1.0
+        # Friction is only processing_overhead (0.5)
+        assert report.friction.total == pytest.approx(0.5)
+
+    def test_confirmed_partial_value_with_execution_loss(self):
+        """Confirmed operation with execution loss.
+
+        EVP Gross = 2000 × 0.9 = 1800
+        EVP Net   = 1700 − 200 = 1500
+        EVP Ratio = 1500 / 1800 = 0.833...
+        Friction  = 0 (no hold) + 0 + 0 + 0 + 0.5 = 0.5
+        """
+        assessor = EVPAssessor()
+        report = assessor.assess(
+            operation_state="confirmed",
+            intended_value=2000.0,
+            realized_value=1700.0,
+            confidence=0.9,
+            execution_loss=200.0,
+        )
+        assert report.gross.expected_value == 1800.0
+        assert report.net.net_value == 1500.0
+        assert report.evp_ratio == pytest.approx(1500.0 / 1800.0)
+        assert report.friction.total == pytest.approx(0.5)
+
+    def test_failed_operation_with_denied_opportunity(self):
+        """Failed operation, value denied.
+
+        EVP Gross = 500 × 1.0 = 500
+        EVP Net   = 0 − 0 = 0 (failed → realized defaults to 0)
+        EVP Ratio = 0 / 500 = 0.0
+        Friction  = 0 + 0 + 0 + 500 (denied opportunity) + 0.5 = 500.5
+        """
+        assessor = EVPAssessor()
+        report = assessor.assess(
+            operation_state="failed",
+            intended_value=500.0,
+            denied_opportunity_value=500.0,
+        )
+        assert report.gross.expected_value == 500.0
+        assert report.net.net_value == 0.0
+        assert report.evp_ratio == 0.0
+        assert report.friction.denied_opportunity_cost == 500.0
+        assert report.friction.total == pytest.approx(500.5)
+
+    def test_confirmed_with_hold_delay(self):
+        """Confirmed operation delayed by HOLD.
+
+        EVP Gross = 1000 × 1.0 = 1000
+        EVP Net   = 950 − 0 = 950
+        EVP Ratio = 950 / 1000 = 0.95
+        Friction  = 120 × 0.001 (hold delay) + 0 + 0 + 0 + 0.5
+                  = 0.12 + 0.5 = 0.62
+        """
+        assessor = EVPAssessor()
+        report = assessor.assess(
+            operation_state="confirmed",
+            intended_value=1000.0,
+            realized_value=950.0,
+            confidence=1.0,
+            hold_duration_seconds=120.0,
+        )
+        assert report.gross.expected_value == 1000.0
+        assert report.net.net_value == 950.0
+        assert report.evp_ratio == pytest.approx(0.95)
+        assert report.friction.hold_delay_cost == pytest.approx(0.12)
+        assert report.friction.total == pytest.approx(0.62)
+
+    def test_confirmed_with_escalation_and_reconciliation(self):
+        """Confirmed operation that was escalated and reconciled.
+
+        EVP Gross = 5000 × 0.95 = 4750
+        EVP Net   = 4800 − 100 = 4700
+        EVP Ratio = 4700 / 4750 = 0.989...
+        Friction  = 0 + 300 × 0.01 (escalation) + 2 × 5.0 (reconciliation)
+                   + 0 + 0.5
+                  = 3.0 + 10.0 + 0.5 = 13.5
+        """
+        assessor = EVPAssessor()
+        report = assessor.assess(
+            operation_state="confirmed",
+            intended_value=5000.0,
+            realized_value=4800.0,
+            confidence=0.95,
+            escalated_duration_seconds=300.0,
+            reconciliation_count=2,
+            execution_loss=100.0,
+        )
+        assert report.gross.expected_value == 4750.0
+        assert report.net.net_value == 4700.0
+        assert report.evp_ratio == pytest.approx(4700.0 / 4750.0)
+        assert report.friction.escalation_overhead == pytest.approx(3.0)
+        assert report.friction.reconciliation_effort == pytest.approx(10.0)
+        assert report.friction.total == pytest.approx(13.5)
+
+    def test_friction_does_not_affect_evp_ratio(self):
+        """P1-3: Friction is reported separately, NOT subtracted from EVP Net.
+
+        Two operations with identical gross/net but different friction
+        must have the same EVP ratio.
+        """
+        assessor = EVPAssessor()
+        low_friction = assessor.assess(
+            operation_state="confirmed",
+            intended_value=1000.0,
+            realized_value=900.0,
+            hold_duration_seconds=0.0,
+        )
+        high_friction = assessor.assess(
+            operation_state="confirmed",
+            intended_value=1000.0,
+            realized_value=900.0,
+            hold_duration_seconds=500.0,
+            escalated_duration_seconds=200.0,
+            reconciliation_count=5,
+        )
+        # Same EVP ratio despite different friction
+        assert low_friction.evp_ratio == high_friction.evp_ratio
+        # But different friction costs
+        assert low_friction.friction.total < high_friction.friction.total
+
+
+class TestEVPSeparationFromAdmissibility:
+    """Test the critical doctrine constraint: EVP is NOT an input to admissibility."""
+
     def test_evp_report_always_marks_is_input_to_admissibility_false(self):
-        """Every EVP report must explicitly state it is not an admissibility input."""
         assessor = EVPAssessor()
         for state in ["confirmed", "failed"]:
             report = assessor.assess(
                 operation_state=state,
                 intended_value=1000.0,
             )
-            assert report.is_input_to_admissibility is False, (
-                f"EVP report for {state} must not be input to admissibility"
-            )
+            assert report.is_input_to_admissibility is False
 
     def test_high_evp_does_not_justify_inadmissible(self):
-        """Even with very high EVP, the report does not become an admissibility input.
-
-        This is a doctrinal assertion: the EVP measurement, no matter how
-        favorable, cannot be used to justify bypassing the admissibility
-        function. The is_input_to_admissibility field enforces this.
-        """
         assessor = EVPAssessor()
         report = assessor.assess(
             operation_state="confirmed",
@@ -353,18 +520,12 @@ class TestEVPSeparationFromAdmissibility:
             realized_value=1_000_000.0,
             confidence=1.0,
         )
-        assert report.evp_ratio == 1.0  # Perfect EVP
-        assert report.is_input_to_admissibility is False  # Still not an input
+        assert report.evp_ratio == 1.0
+        assert report.is_input_to_admissibility is False
 
     def test_evp_and_tau_inversion_dont_imply_each_other(self):
-        """A transition can have good EVP but be irreversible, and vice versa.
-
-        This test verifies that the EVP module does not make assumptions
-        about τ⁻¹. They are independent measurements.
-        """
+        """A transition can have good EVP but be irreversible, and vice versa."""
         assessor = EVPAssessor()
-        # Good EVP but the operation is irreversible (would be determined
-        # by τ⁻¹ separately)
         report = assessor.assess(
             operation_state="confirmed",
             intended_value=1000.0,
@@ -372,4 +533,3 @@ class TestEVPSeparationFromAdmissibility:
         )
         assert report.evp_ratio == 1.0
         # The EVP report says nothing about reversibility — that's τ⁻¹'s job.
-        # There is no reversibility field in EVPReport.
