@@ -53,6 +53,8 @@ class MembraneState:
     _dispatch_guard: Any = field(default_factory=threading.RLock, repr=False, compare=False)
     # Process-local proof that a specific operation owns a budget reservation.
     operation_reservations: dict[str, tuple[str, float]] = field(default_factory=dict)
+    # Process-local record of budget amounts committed at dispatch.
+    operation_budget_committed: dict[str, tuple[str, float]] = field(default_factory=dict)
 
     def register_agent(self, agent: Agent) -> None:
         self.agents[agent.agent_id] = agent
