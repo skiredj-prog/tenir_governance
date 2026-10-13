@@ -479,6 +479,7 @@ class TestDispatchRecoveryAudit:
 
         assert result["reconciled"] is True
         assert result["operation_state"] == OperationState.CONFIRMED.value
+        assert result["budget_reconciliation_required"] is True
         assert len(provider.calls) == 0
         assert len(provider.reconcile_calls) == 1
 
