@@ -991,12 +991,22 @@ class DualKernelGovernor:
                     "operation_state": current.state.value if current else None,
                     "reason": "Provider outcome was confirmed but the registry transition failed.",
                 }
+            committed = self.membrane.state.operation_budget_committed.get(idempotency_key)
+            budget_state_known = not (record.resource_id and record.amount > 0) or (
+                committed == (record.resource_id, record.amount)
+            )
             self.membrane.state.operation_budget_committed.pop(idempotency_key, None)
             return {
                 "reconciled": True,
                 "idempotency_key": idempotency_key,
                 "operation_state": OperationState.CONFIRMED.value,
                 "provider_reference": recon.provider_reference,
+                "budget_reconciliation_required": not budget_state_known,
+                "reason": (
+                    "Provider confirmed the effect."
+                    if budget_state_known else
+                    "Provider confirmed the effect; budget state is not provable in this process and requires reconciliation."
+                ),
             }
         elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
             transitioned, _prev = self.registry.transition_to(idempotency_key, OperationState.FAILED)
