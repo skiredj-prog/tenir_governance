@@ -118,7 +118,11 @@ Maintainers should enable **Trusted Publishing** (OIDC) from GitHub Actions to P
 - **Limitations**:
   - Single-host only. `fcntl.flock` does not coordinate across hosts.
   - No write-ahead log. A crash during persistence can lose the most recent in-memory transition (recovery path via `resume_existing()` exists).
-  - Budget coordinator remains in-process (`threading.Lock`). Cross-process budget safety is not provided by the registry alone.
+  - Budget reservations and operation-to-reservation ownership are process-local; they do not survive a restart.
+  - A durable `RESERVED` registry record alone is not proof that the budget reservation still exists.
+  - Recovery blocks dispatch when the current process cannot prove the matching reservation and returns `budget_revalidation_required`.
+  - On a reconciled `FAILED` result after restart, the provider outcome may be known while budget state remains unknown; the caller must reconcile the authoritative budget separately.
+  - Cross-process and cross-host aggregate budget safety require a transactional budget coordinator. The current in-process coordinator is not such a mechanism.
   - **In-memory default**: If `store_path` is not provided, the registry is in-memory only. Idempotency claims are lost on restart. Use `require_persistence=True` or pass `store_path` in production.
 
 ### Local Ledger (Hash Chain / Merkle)
