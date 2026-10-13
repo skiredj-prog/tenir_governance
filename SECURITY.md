@@ -4,7 +4,8 @@
 
 | Version / Line                         | Supported | Notes |
 |----------------------------------------|-----------|-------|
-| 5.3.x (Agentic Governance Profile)     | ✅        | Current production line on PyPI. Includes two-kernel composition, DurableOperationRegistry, and schema 1.2 conformance. |
+| 5.4.x (Agentic Governance Profile)     | ✅        | Current release line on PyPI. Includes two-kernel composition, provider integration, HOLD lifecycle, and opt-in τ⁻¹ / EVP post-execution assessment. |
+| 5.3.x (Agentic Governance Profile)     | ✅        | Supported prior line. Includes two-kernel composition, DurableOperationRegistry, and schema 1.2 conformance; it does not include the v5.4.x assessment layer. |
 | 5.2.x (TENIR 2.0 kernel + R5 hardening)| ✅        | Still supported. |
 | 5.1.x / 5.0.x (IRON OMEGA R5)          | ⚠️ Limited | Security fixes only; migrate to 5.2+ recommended. |
 | Pre-R5 / 4.x and earlier               | ❌        | No longer supported. |
@@ -14,10 +15,10 @@ Only the latest patch release within a supported minor line receives security up
 Install from PyPI with an explicit version pin in production:
 
 ```bash
-pip install "tenir-governance==5.3.0"
+pip install "tenir-governance==5.4.1"
 # or with extras
-pip install "tenir-governance[api]==5.3.0"
-pip install "tenir-governance[r5]==5.3.0"
+pip install "tenir-governance[api]==5.4.1"
+pip install "tenir-governance[r5]==5.4.1"
 ```
 
 ## Reporting a Vulnerability
@@ -149,7 +150,7 @@ No claim is made of resistance to a privileged attacker who can modify process m
 
 ## Deployment Recommendations
 
-1. **Pin versions** — Always install a specific release from PyPI (`tenir-governance==5.3.x`).
+1. **Pin versions** — Always install a specific release from PyPI (`tenir-governance==5.4.1`).
 2. **Network isolation** — Bind to localhost or a private interface; terminate TLS at a reverse proxy.
 3. **Secrets management** — Inject tokens and secrets via a secrets manager; never hard-code.
 4. **Least privilege** — Run under a dedicated low-privilege user; restrict filesystem permissions on ledger and registry store.
@@ -158,7 +159,7 @@ No claim is made of resistance to a privileged attacker who can modify process m
 7. **Multi-host** — Replace the file-backed registry and in-process budget coordinator with a transactional store that provides cross-host atomicity.
 8. **Supply-chain hygiene** — Use lock files / hash pinning, monitor advisories for core and optional dependencies, prefer Trusted Publishing for releases.
 
-## Guarantee Boundary Summary (v5.3.0)
+## Guarantee Boundary Summary (v5.4.1)
 
 | Guarantee                                      | Level                                      |
 |------------------------------------------------|--------------------------------------------|
