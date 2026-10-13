@@ -67,7 +67,7 @@ TENIR-Gov is already a functional and instrumented product.
 
 **Current measured indicators:**
 
-- **557 automated tests**
+- **663 automated tests**
 - **96% code coverage**
 - **12.4 ms mean decision time**
 

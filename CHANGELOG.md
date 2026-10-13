@@ -17,7 +17,7 @@ This patch corrects two semantic issues in the τ⁻¹ classifier identified dur
 ### Tests
 - 10 new tests for numeric validation (NaN, infinite, negative distance/cost/λ)
 - 2 existing tests updated to expect INDETERMINATE instead of IRREVERSIBLE for callback exceptions
-- Total: 653 tests passing, 0 failures, 0 regressions
+- Total: 663 tests passing, 0 failures, 0 regressions (pytest tests/ now runs without --ignore)
 
 ---
 
