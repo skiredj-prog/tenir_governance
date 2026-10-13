@@ -113,7 +113,7 @@ from .composition import (
     CompositionHoldManager,
 )
 
-__version__ = "5.3.0"
+__version__ = "5.3.1"
 __policy_version__ = "tenir-canonical-v1.0.0"
 __profile_version__ = "agentic-governance-profile-v1.0.0"
 __schema_version__ = "1.2"

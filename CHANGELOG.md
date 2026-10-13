@@ -6,7 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased] — HOLD Lifecycle
+## [5.3.1] — 2026-10-13 — Patch: Provider Integration, Security, Demo
+
+This patch release includes the HOLD lifecycle (previously unreleased), dispatch provider abstraction, updated security policy, PyPI artifact audit, and a 10-minute buyer-facing demo. It does **not** include the τ⁻¹/EVP assessment layer (scheduled for v5.4.0).
 
 ### Added
 - **`tenir_governance/operations/hold.py`** — `HoldManager` class implementing the full HOLD lifecycle: `enter_hold()`, `resolve_hold()`, `escalate_hold()`, `authorize_exit()`, `expire_hold()`, `expire_escalated()`, `check_tau_k_expiry()`, `find_holds()`, `find_escalated()`, `find_unresolved_holds()`.
@@ -16,7 +18,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **`tenir_governance/composition/hold_strategy.py`** — `CompositionHoldManager` with 5 strategies (Priority-Enforce, Serialize, Pareto-Restore, Escalate, Fail-Closed-Collectif) and progressive unblock (Déblocage progressif post Fail-Closed).
 - **QUARANTINE_LOCK** in membrane — `lock_quarantine()` / `release_quarantine()` with authenticated authorization and receipt. Distinct from HOLD: blocks ALL admission/dispatch for an LEI until authorized release.
 - **Governor HOLD integration** — `adjudicate()` transitions to HOLD state; `resolve_hold()` re-adjudicates with new evidence; `resume_existing()` returns `resolve_or_escalate` for HOLD and `await_authorized_exit` for ESCALATED; `recover()` includes HOLD and ESCALATED operations.
-- **Tests** — 59 new tests in `test_hold_lifecycle.py` covering HOLD lifecycle, authorized exit, τ_K expiry, governor integration, QUARANTINE_LOCK, composition-level HOLD, state transitions, and persistence. Total: 501 tests passing.
+- **`tenir_governance/operations/provider.py`** — `DispatchProvider` protocol, `MockProvider`, `StripeProvider` adapter. Governor gains `dispatch_and_execute()` and `reconcile_unknown()`. Timeout → UNKNOWN, not FAILED. Provider receives governance-assigned idempotency key for provider-side deduplication.
+- **`SECURITY.md`** — comprehensive 280-line security policy covering supported versions, vulnerability reporting, cryptographic practices, and threat model.
+- **`docs/pypi-artifact-audit.md`** — full PyPI artifact audit report documenting the v5.3.0 wheel provenance issue and remediation plan.
+- **`demo.py`** — 10-minute buyer-facing terminal demo with 7 scenes (normal operation, duplicate blocked, HOLD lifecycle, in-memory vs persistent, provider timeout→reconcile, guarantee boundary, assessment preview). 24/24 checks pass.
+- **Tests** — 59 tests in `test_hold_lifecycle.py`, 32 tests in `test_provider.py`. Total: 533 tests passing, 0 failures, 0 regressions.
+
+### Changed
+- **`UNKNOWN` is no longer terminal** — can be reconciled to CONFIRMED or FAILED via `reconcile_unknown()`. `is_terminal` returns True only for CONFIRMED and FAILED.
+- **SDK persistence warning** — `DualKernelCompositionClient` emits a runtime warning when `store_path` is None, alerting users that in-memory registries do not provide restart-safe idempotency.
+
+### Fixed
+- **PyPI artifact provenance** — v5.3.0 published wheel was built from `8d44dc8` and did not include provider integration (`ddd50d6`). v5.3.1 includes all work through `235b911`.
 
 ### Doctrine Compliance
 - HOLD is a designed suspension of agency, not a system failure (v7.1 §6).
@@ -24,6 +37,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - QUARANTINE_LOCK is distinct from HOLD — blocks everything until authorized release (v7.1 §6).
 - τ_K is derived from existing org SLAs, never invented (Blueprint v4.4 §0.5).
 - Progressive unblock verifies invariants before each TAU release (Blueprint v4.4 §8).
+- Idempotency key durably claimed BEFORE dispatch (Helland: exactly-once effects require provider-side deduplication).
 
 ---
 
