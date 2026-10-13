@@ -1,0 +1,126 @@
+name: Release to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and build distributions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Verify tag matches project version and is on main
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          expected = os.environ["RELEASE_TAG"].removeprefix("v")
+          actual = project["version"]
+          if expected != actual:
+              raise SystemExit(f"Tag version {expected} does not match pyproject version {actual}")
+          print(f"Release version verified: {actual}")
+          PY
+          git fetch origin main
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main || {
+            echo "Release tag must point to a commit contained in origin/main." >&2
+            exit 1
+          }
+
+      - name: Install test and build tools
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Install project with test dependencies
+        run: python -m pip install -e ".[test]"
+
+      - name: Run the full test suite
+        run: python -m pytest tests/ -q
+
+      - name: Build wheel and source distribution
+        run: python -m build
+
+      - name: Validate distribution metadata
+        run: python -m twine check --strict dist/*
+
+      - name: Verify required modules are in both distributions
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import tarfile
+          import zipfile
+
+          required = {
+              "tenir_governance/operations/provider.py",
+              "tenir_governance/operations/hold.py",
+              "tenir_governance/assessment/__init__.py",
+              "tenir_governance/assessment/tau_inversion.py",
+              "tenir_governance/assessment/evp.py",
+              "tenir_governance/assessment/assessor.py",
+          }
+          wheels = list(Path("dist").glob("*.whl"))
+          sdists = list(Path("dist").glob("*.tar.gz"))
+          if len(wheels) != 1 or len(sdists) != 1:
+              raise SystemExit(f"Expected exactly one wheel and sdist; got {len(wheels)} wheel(s), {len(sdists)} sdist(s)")
+
+          with zipfile.ZipFile(wheels[0]) as archive:
+              wheel_names = set(archive.namelist())
+          missing_wheel = sorted(required - wheel_names)
+          if missing_wheel:
+              raise SystemExit(f"Wheel is missing required modules: {missing_wheel}")
+
+          with tarfile.open(sdists[0], "r:gz") as archive:
+              sdist_names = {name.split("/", 1)[1] for name in archive.getnames() if "/" in name}
+          missing_sdist = sorted(required - sdist_names)
+          if missing_sdist:
+              raise SystemExit(f"Source distribution is missing required modules: {missing_sdist}")
+
+          print("Wheel and source distribution contain provider, HOLD, and assessment modules.")
+          PY
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tenir-governance
+    permissions:
+      id-token: write
+    steps:
+      - name: Download verified distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish distributions with PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
