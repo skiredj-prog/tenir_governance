@@ -870,7 +870,9 @@ class DualKernelGovernor:
 
         # 5. Transition based on provider outcome
         if prov_result.outcome == ProviderOutcome.CONFIRMED:
-            self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+            success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+            if success:
+                self.membrane.state.operation_budget_committed.pop(idempotency_key, None)
             return {
                 "dispatched": True,
                 "executed": True,
@@ -972,7 +974,16 @@ class DualKernelGovernor:
             }
 
         if recon.resolved and recon.outcome == ProviderOutcome.CONFIRMED:
-            self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+            success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+            if not success:
+                current = self.registry.get(idempotency_key)
+                return {
+                    "reconciled": False,
+                    "idempotency_key": idempotency_key,
+                    "operation_state": current.state.value if current else None,
+                    "reason": "Provider outcome was confirmed but the registry transition failed.",
+                }
+            self.membrane.state.operation_budget_committed.pop(idempotency_key, None)
             return {
                 "reconciled": True,
                 "idempotency_key": idempotency_key,
@@ -1019,6 +1030,8 @@ class DualKernelGovernor:
     def confirm(self, idempotency_key: str) -> bool:
         """Transition DISPATCHING → CONFIRMED. The external effect occurred."""
         success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+        if success:
+            self.membrane.state.operation_budget_committed.pop(idempotency_key, None)
         return success
 
     def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0) -> bool:
