@@ -6,7 +6,32 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased] — HOLD Lifecycle
+## [5.4.0] — 2026-10-13 — Minor: τ⁻¹ (Partial Tau Inversion) and EVP (Intended Value Preservation) Assessment Layer
+
+This minor release adds the post-execution assessment layer: τ⁻¹ (partial tau inversion) and EVP (intended value preservation). Both are **ex-post** assessment concepts — they run AFTER execution, not before. Neither is an input to the admissibility function. Both are **opt-in** — `dispatch_and_execute()` does not auto-trigger assessment.
+
+### Added
+- **`tenir_governance/assessment/tau_inversion.py`** — `TauInversionClassifier` with 5 classifications: `PRE_COMMIT` (cancelled before effect), `EXACT_INVERSE` (property-preserving return on Q), `COMPENSATION` (partial recovery with loss), `IRREVERSIBLE` (no valid return transition), `INDETERMINATE` (insufficient information). Loss function: L_Q(s, τ, ρ) = distance_Q(ρ(τ(s)), s) + λ · cost(ρ).
+- **`tenir_governance/assessment/evp.py`** — `EVPAssessor` with frozen equations: EVP Gross = intended × confidence; EVP Net = realized_value − execution_loss; EVP Ratio = EVP Net / EVP Gross. Friction costs reported **separately** (not subtracted from EVP Net). `FrictionCost` and `GovernanceDebt` dataclasses.
+- **`tenir_governance/assessment/assessor.py`** — `PostExecutionAssessor` composing τ⁻¹ and EVP into a single `AssessmentReport`. Documents: opt-in lifecycle (not auto-triggered), in-memory storage limitation (no restart persistence, no tamper evidence), `return_transition` is assessment-only (not a compensating action).
+- **Governor integration** — `assess_post_execution()` method on `DualKernelGovernor`. Assessor is opt-in via constructor parameter.
+- **SDK integration** — `enable_assessor=True` parameter on `DualKernelCompositionClient`. `assess_post_execution()` convenience method.
+- **Tests** — 110 assessment tests: 48 in `test_tau_inversion.py`, 37 in `test_evp.py`, 25 in `test_assessor.py`. Total: 643 tests passing, 0 failures, 0 regressions.
+
+### P1 Semantic Fixes (from peer review)
+- **P1-1: Absence of evidence is not evidence of non-execution** — `no_external_effect` defaults to `None` (indeterminate), not `True`. FAILED operations without explicit confirmation return `INDETERMINATE`, not `PRE_COMMIT`.
+- **P1-2: Empty Q is vacuous** — Empty/missing `retained_properties` returns `INDETERMINATE`. A zero-distance callback with empty Q does not establish meaningful reversibility.
+- **P1-3: EVP equations frozen** — `EVP Net = realized_value − execution_loss`. Friction reported **separately**, not subtracted from EVP Net. Definition, formula, ratio, and examples all agree. 6 hand-calculated EVP tests added.
+
+### Doctrine Compliance
+- τ⁻¹ is a partial, conditional, property-relative inverse — NOT a full mathematical inverse (Property-Preserving Crossing manuscript, pp. 11–12).
+- EVP measures intended value protection as an **outcome** of governance discipline — EVP ∉ Admissibility Function. High expected value never justifies an otherwise inadmissible transition (TENIR Property-Preserving Transitions Manuscript, Layer 4).
+- τ⁻¹ and EVP do not imply each other — a transition can have τ⁻¹ but poor EVP, or vice versa.
+- Both are ex-post (post-execution) — v7.1 explicitly defers EVP: "Downstream value measurement is not treated."
+
+---
+
+## [5.3.1] — 2026-10-13 — Patch: Provider Integration, Security, Demo
 
 ### Added
 - **`tenir_governance/operations/hold.py`** — `HoldManager` class implementing the full HOLD lifecycle: `enter_hold()`, `resolve_hold()`, `escalate_hold()`, `authorize_exit()`, `expire_hold()`, `expire_escalated()`, `check_tau_k_expiry()`, `find_holds()`, `find_escalated()`, `find_unresolved_holds()`.
