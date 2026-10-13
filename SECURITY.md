@@ -111,6 +111,13 @@ Maintainers should enable **Trusted Publishing** (OIDC) from GitHub Actions to P
 
 ### DurableOperationRegistry
 
+### Dispatch and Recovery Boundary
+
+- Dispatch rechecks quarantine under a process-local re-entrant guard. The guard is held across the provider call so a local quarantine activation cannot race past the final check; this may delay quarantine activation until that call returns.
+- This serialization is **not cross-process or cross-host**. Multiple processes/hosts require a shared transactional enforcement mechanism.
+- `DISPATCHING` and `UNKNOWN` are reconciled using the original provider idempotency key. `PENDING` remains `DISPATCHING` and is reconciled; recovery never automatically resends an operation that may have produced an external effect.
+- A `CREATED` claim does not persist the full adjudication context. Recovery requires the original `Passage` and adjudication inputs; mismatched inputs are rejected.
+
 - Idempotency key is claimed **before** any kernel evaluation.
 - State machine: `CREATED → HOLD → RESERVED → DISPATCHING → CONFIRMED | FAILED | UNKNOWN | ESCALATED`.
 - Atomic claim of the `DISPATCHING` transition (at-most-once on a single host).
