@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [5.4.2] — Unreleased — Patch: Dispatch Boundary and Recovery Hardening
+
+### Fixed
+- **Quarantine at dispatch:** serialize local quarantine activation/release against dispatch and the provider call; a quarantined operation cannot begin a new dispatch in that process.
+- **Reconciliation:** allow provider reconciliation from `DISPATCHING`, covering crash recovery and `PENDING` outcomes without resending the external action.
+- **Created-claim recovery:** `resume_existing()` accepts the original `Passage` and adjudication context, validates them against the durable claim, and reuses that claim instead of registering a duplicate. Without the original context it explicitly asks for it.
+- **Budget fail-closed behavior:** track operation-scoped reservations in process memory, block dispatch when that proof is absent, and avoid mutating budget state after restart unless this process can prove the committed amount.
+
+### Boundaries
+- Quarantine serialization and budget ownership tracking are process-local.
+- The file-backed operation registry does not make budget reservations durable. Cross-process or cross-host aggregate budget safety still requires a transactional budget coordinator.
+- Provider reconciliation is only as trustworthy as the provider's evidence; external exactly-once effects still depend on provider-side idempotency.
+
+### Tests
+- Added regression coverage for quarantine blocking, `DISPATCHING` recovery, `PENDING` reconciliation, original-request recovery, mismatched-claim rejection, operation-scoped reservation tracking, and fail-closed budget recovery.
+
+---
+
 ## [5.4.1] — 2026-10-13 — Patch: Assessment Semantics Hardening
 
 This patch corrects two semantic issues in the τ⁻¹ classifier identified during the v5.4.0 hardening review.
