@@ -736,15 +736,17 @@ class DualKernelGovernor:
             if amount <= 0:
                 amount = record.amount
 
+            resource = None
             if resource_id and amount > 0:
                 expected_reservation = (resource_id, amount)
                 actual_reservation = self.membrane.state.operation_reservations.get(idempotency_key)
-                if actual_reservation != expected_reservation:
+                resource = self.membrane.state.resources.get(resource_id)
+                if actual_reservation != expected_reservation or resource is None:
                     return {
                         "dispatched": False,
                         "reason": (
-                            "Budget reservation is not present for this operation in the "
-                            "current process. Revalidate/re-establish budget state before dispatch."
+                            "Budget reservation or resource is not present for this operation "
+                            "in the current process. Revalidate/re-establish budget state before dispatch."
                         ),
                         "operation_state": record.state.value,
                         "budget_revalidation_required": True,
@@ -766,12 +768,18 @@ class DualKernelGovernor:
                 }
 
             if resource_id and amount > 0:
-                resource = self.membrane.state.resources.get(resource_id)
-                if resource:
-                    with self.membrane.state.get_lock(resource_id):
-                        resource.commit(amount)
+                with self.membrane.state.get_lock(resource_id):
+                    committed = resource.commit(amount)
+                if not committed:
+                    self.registry.transition_to(idempotency_key, OperationState.FAILED)
                     self.membrane.state.operation_reservations.pop(idempotency_key, None)
-                    self.membrane.state.operation_budget_committed[idempotency_key] = (resource_id, amount)
+                    return {
+                        "dispatched": False,
+                        "reason": "Budget reservation could not be committed; provider was not called.",
+                        "operation_state": OperationState.FAILED.value,
+                    }
+                self.membrane.state.operation_reservations.pop(idempotency_key, None)
+                self.membrane.state.operation_budget_committed[idempotency_key] = (resource_id, amount)
 
             return {
                 "dispatched": True,
@@ -991,7 +999,15 @@ class DualKernelGovernor:
                 "provider_reference": recon.provider_reference,
             }
         elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
-            self.registry.transition_to(idempotency_key, OperationState.FAILED)
+            transitioned, _prev = self.registry.transition_to(idempotency_key, OperationState.FAILED)
+            if not transitioned:
+                current = self.registry.get(idempotency_key)
+                return {
+                    "reconciled": False,
+                    "idempotency_key": idempotency_key,
+                    "operation_state": current.state.value if current else None,
+                    "reason": "Provider outcome was failed but the registry transition failed; budget was not mutated.",
+                }
             budget_state_known = False
             if record.resource_id and record.amount > 0:
                 resource = self.membrane.state.resources.get(record.resource_id)
