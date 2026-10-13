@@ -577,7 +577,7 @@ class TestDispatchRecoveryAudit:
 
         assert result["operation_state"] == OperationState.CONFIRMED.value
         assert p.idempotency_key not in state.operation_reservations
-        assert state.operation_budget_committed[p.idempotency_key] == ("budget", 10.0)
+        assert p.idempotency_key not in state.operation_budget_committed
 
     def test_reserved_record_without_live_budget_reservation_fails_closed(self):
         gov, _state = _setup_governor()
