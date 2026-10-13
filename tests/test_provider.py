@@ -561,3 +561,70 @@ class TestDispatchRecoveryAudit:
         )
         assert result["composed_decision"] == "HARD_VETO"
         assert gov.registry.get(original.idempotency_key).state == OperationState.CREATED
+
+
+    def test_budget_reservation_is_bound_to_operation_until_dispatch(self):
+        provider = MockProvider(behavior="confirmed")
+        gov, state = _setup_governor(provider=provider)
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        gov.adjudicate(
+            p, pressure=0.2, velocity=0.2, capacity=0.9,
+            resource_id="budget", amount=10.0,
+        )
+        assert state.operation_reservations[p.idempotency_key] == ("budget", 10.0)
+
+        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+
+        assert result["operation_state"] == OperationState.CONFIRMED.value
+        assert p.idempotency_key not in state.operation_reservations
+        assert state.operation_budget_committed[p.idempotency_key] == ("budget", 10.0)
+
+    def test_reserved_record_without_live_budget_reservation_fails_closed(self):
+        gov, _state = _setup_governor()
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        record = OperationRecord(
+            idempotency_key=p.idempotency_key,
+            passage_id=p.passage_id,
+            agent_id=p.agent_id,
+            action_type=p.action_type,
+            amount=10.0,
+            resource_id="budget",
+            state=OperationState.RESERVED,
+        )
+        assert gov.registry.register(record)
+
+        resumed = gov.resume_existing(p.idempotency_key)
+        dispatched = gov.dispatch(p.idempotency_key, "budget", 10.0)
+
+        assert resumed["action"] == "revalidate_budget"
+        assert resumed["budget_revalidation_required"] is True
+        assert dispatched["dispatched"] is False
+        assert dispatched["budget_revalidation_required"] is True
+        assert gov.registry.get(p.idempotency_key).state == OperationState.RESERVED
+
+    def test_failed_reconciliation_does_not_mutate_unproven_budget_after_restart(self):
+        provider = MockProvider(
+            behavior="timeout",
+            reconcile_outcome=ProviderOutcome.FAILED,
+        )
+        gov, state = _setup_governor(provider=provider)
+        resource = state.resources["budget"]
+        resource.reserve(20.0)
+        resource.commit(20.0)
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        record = OperationRecord(
+            idempotency_key=p.idempotency_key,
+            passage_id=p.passage_id,
+            agent_id=p.agent_id,
+            action_type=p.action_type,
+            amount=10.0,
+            resource_id="budget",
+            state=OperationState.DISPATCHING,
+        )
+        assert gov.registry.register(record)
+
+        result = gov.reconcile_unknown(p.idempotency_key)
+
+        assert result["operation_state"] == OperationState.FAILED.value
+        assert result["budget_reconciliation_required"] is True
+        assert resource.consumed == 20.0
