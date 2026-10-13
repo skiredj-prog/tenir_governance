@@ -940,7 +940,8 @@ class DualKernelGovernor:
         HARD_VETO, transition to FAILED.
 
         The caller MUST provide the same passage (or a new one with the
-        same idempotency key) and the updated evidence parameters.
+        same idempotency key) and the updated evidence parameters. Omitting
+        passage is rejected: it must never bypass fresh adjudication.
 
         Returns the adjudication result dict with an additional
         'hold_resolved' field indicating whether the hold was resolved.
@@ -957,12 +958,23 @@ class DualKernelGovernor:
             }
 
         if passage is None:
-            # Without a passage, just transition to RESERVED
-            result = self.hold_manager.resolve_hold(idempotency_key)
+            # A HOLD may only be resolved after fresh adjudication. Never let
+            # omission of the passage bypass both kernels and the decision lattice.
+            reason = (
+                "Re-adjudication required: provide the passage and updated evidence; "
+                "HOLD remains unchanged."
+            )
+            self.ledger.append(
+                kernel="hold_resolution",
+                decision=Decision.HOLD.value,
+                rationale=f"Rejected resolve_hold for '{idempotency_key}': {reason}",
+                passage_id=record.passage_id,
+                idempotency_key=idempotency_key,
+            )
             return {
-                "hold_resolved": result["resolved"],
-                "operation_state": result["operation_state"],
-                "reason": result["reason"],
+                "hold_resolved": False,
+                "operation_state": record.state.value,
+                "reason": reason,
             }
 
         # Re-run adjudication with new evidence
