@@ -463,6 +463,17 @@ class DualKernelCompositionClient:
                 "restart, allowing duplicate adjudication."
             )
 
+        if not store_path and not require_persistence:
+            import warnings
+            warnings.warn(
+                "DualKernelCompositionClient initialized without store_path. "
+                "The operation registry is in-memory only — idempotency "
+                "claims will be lost on restart, allowing duplicate "
+                "adjudication. Pass store_path or require_persistence=True "
+                "for production use.",
+                stacklevel=2,
+            )
+
         self._kernel = tenir_kernel or _TK()
         self._scoring = ScoringKernelAdapter(self._kernel)
         self._membrane_state = MembraneState()
