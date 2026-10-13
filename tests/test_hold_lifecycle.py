@@ -417,6 +417,29 @@ class TestGovernorHoldLifecycle:
         assert r2["hold_resolved"] is True
         assert r2["operation_state"] == OperationState.RESERVED.value
 
+    def test_governor_resolve_hold_without_passage_is_rejected(self):
+        """Omitting passage must not bypass fresh adjudication."""
+        gov, _state = _setup_governor()
+        from tenir_governance.operations import OperationRecord
+        rec = OperationRecord(
+            idempotency_key="op-hold-no-passage", passage_id="p-no-passage",
+            agent_id="alice", action_type="payment",
+        )
+        gov.registry.register(rec)
+        gov.hold_manager.enter_hold("op-hold-no-passage", tau_k_seconds=300)
+
+        result = gov.resolve_hold("op-hold-no-passage")
+
+        assert result["hold_resolved"] is False
+        assert result["operation_state"] == OperationState.HOLD.value
+        assert "Re-adjudication required" in result["reason"]
+        assert gov.registry.get("op-hold-no-passage").state == OperationState.HOLD
+        assert any(
+            entry.idempotency_key == "op-hold-no-passage"
+            and entry.kernel == "hold_resolution"
+            for entry in gov.ledger.entries
+        )
+
     def test_governor_escalate_hold(self):
         """Governor.escalate_hold() transitions HOLD → ESCALATED."""
         gov, state = _setup_governor()
