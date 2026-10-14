@@ -44,6 +44,7 @@ from .registry import (
     OperationState,
     HoldRecord,
     ExitReceipt,
+    _TransitionEvidence,
 )
 
 
@@ -70,6 +71,7 @@ class HoldManager:
 
     def __init__(self, registry: DurableOperationRegistry):
         self._registry = registry
+        self._registry._register_lifecycle_issuer(self)
 
     def enter_hold(
         self,
@@ -193,18 +195,42 @@ class HoldManager:
         if record.state != OperationState.HOLD:
             return {"escalated": False, "operation_state": record.state.value,
                     "reason": f"Operation is in state {record.state.value}, not HOLD."}
+        if record.hold_record is None:
+            return {"escalated": False, "operation_state": record.state.value,
+                    "reason": "Cannot escalate without an initialized HoldRecord."}
+        if not isinstance(escalated_by, str):
+            return {
+                "escalated": False,
+                "operation_state": record.state.value,
+                "reason": "Escalation metadata escalated_by must be a string.",
+            }
 
-        if record.hold_record:
-            record.hold_record.escalated_at = _utc_now()
-            record.hold_record.escalated_by = escalated_by
-            record.hold_record.exit_reason = "escalated"
-
+        auth_class = "HOLD_ESCALATION"
+        evidence = _TransitionEvidence(
+            idempotency_key, OperationState.HOLD, OperationState.ESCALATED,
+            auth_class, "hold_escalation", (str(escalated_by),),
+        )
+        try:
+            capability = self._registry._issue_transition_authorization(
+                idempotency_key, OperationState.HOLD, OperationState.ESCALATED,
+                auth_class, evidence, issuer=self,
+            )
+        except (RuntimeError, PermissionError, ValueError) as exc:
+            current = self._registry.get(idempotency_key)
+            return {"escalated": False,
+                    "operation_state": current.state.value if current else None,
+                    "reason": f"Transition authorization rejected: {exc}"}
         success, _prev = self._registry.transition_to(
-            idempotency_key, OperationState.ESCALATED,
+            idempotency_key, OperationState.ESCALATED, authorization=capability,
+            hold_record_updates={
+                "escalated_at": _utc_now(),
+                "escalated_by": escalated_by,
+                "exit_reason": "escalated",
+            },
         )
         return {
             "escalated": success,
-            "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
+            "operation_state": self._registry.get(idempotency_key).state.value if self._registry.get(idempotency_key) else None,
             "reason": "Hold escalated to Risk Officer — ESCALATED is absorbing." if success
                       else "Transition HOLD → ESCALATED failed.",
         }
@@ -251,6 +277,23 @@ class HoldManager:
                     "exit_receipt": None,
                     "reason": f"Operation is in state {record.state.value}, not ESCALATED."}
 
+        if record.hold_record is None:
+            return {"exited": False, "operation_state": record.state.value,
+                    "exit_receipt": None,
+                    "reason": "Cannot authorize exit without an initialized HoldRecord."}
+        if not all(isinstance(value, str) for value in (authorized_by, scope, authorization, reason)):
+            return {
+                "exited": False, "operation_state": record.state.value,
+                "exit_receipt": None,
+                "reason": "Authorized exit metadata must be strings.",
+            }
+        if not (authorized_by.strip() and scope.strip() and authorization.strip()):
+            return {
+                "exited": False, "operation_state": record.state.value,
+                "exit_receipt": None,
+                "reason": "Authorized exit requires non-empty operator, scope, and authorization metadata.",
+            }
+
         receipt = ExitReceipt(
             authorized_by=authorized_by,
             scope=scope,
@@ -259,18 +302,39 @@ class HoldManager:
             reason=reason,
         )
 
-        if record.hold_record:
-            record.hold_record.exit_receipt = receipt
-            record.hold_record.exit_reason = "authorized_exit"
-
         target_state = OperationState.RESERVED if approve else OperationState.FAILED
+        auth_class = (
+            "ESCALATED_AUTHORIZED_APPROVAL" if approve
+            else "ESCALATED_AUTHORIZED_DENIAL"
+        )
+        evidence = _TransitionEvidence(
+            idempotency_key, OperationState.ESCALATED, target_state,
+            auth_class, "authorized_exit_receipt",
+            (receipt.authorized_by, receipt.scope, receipt.authorization,
+             receipt.timestamp, receipt.reason),
+        )
+        try:
+            capability = self._registry._issue_transition_authorization(
+                idempotency_key, OperationState.ESCALATED, target_state,
+                auth_class, evidence, issuer=self,
+            )
+        except (RuntimeError, PermissionError, ValueError) as exc:
+            current = self._registry.get(idempotency_key)
+            return {"exited": False,
+                    "operation_state": current.state.value if current else None,
+                    "exit_receipt": None,
+                    "reason": f"Transition authorization rejected: {exc}"}
         success, _prev = self._registry.transition_to(
-            idempotency_key, target_state,
+            idempotency_key, target_state, authorization=capability,
+            hold_record_updates={
+                "exit_receipt": receipt,
+                "exit_reason": "authorized_exit",
+            },
         )
 
         return {
             "exited": success,
-            "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
+            "operation_state": self._registry.get(idempotency_key).state.value if self._registry.get(idempotency_key) else None,
             "exit_receipt": receipt.to_dict() if success else None,
             "reason": f"Authorized exit ({'approved' if approve else 'denied'}) by {authorized_by}." if success
                       else f"Transition ESCALATED → {target_state.value} failed.",
@@ -299,15 +363,39 @@ class HoldManager:
             return {"expired": False, "operation_state": record.state.value,
                     "reason": f"Operation is in state {record.state.value}, not HOLD."}
 
-        if record.hold_record:
-            record.hold_record.exit_reason = "expired"
+        expiry = self.check_tau_k_expiry(idempotency_key)
+        if not expiry.get("expired"):
+            return {
+                "expired": False, "operation_state": record.state.value,
+                "reason": "τ_K has not been verified as expired; HOLD remains unchanged.",
+            }
 
+        if record.hold_record is None:
+            return {"expired": False, "operation_state": record.state.value,
+                    "reason": "Cannot expire HOLD without an initialized HoldRecord."}
+        auth_class = "HOLD_EXPIRY"
+        evidence = _TransitionEvidence(
+            idempotency_key, OperationState.HOLD, OperationState.FAILED,
+            auth_class, "tau_k_expiry",
+            (expiry.get("reason", ""), str(record.hold_record.tau_k_seconds)),
+        )
+        try:
+            capability = self._registry._issue_transition_authorization(
+                idempotency_key, OperationState.HOLD, OperationState.FAILED,
+                auth_class, evidence, issuer=self,
+            )
+        except (RuntimeError, PermissionError, ValueError) as exc:
+            current = self._registry.get(idempotency_key)
+            return {"expired": False,
+                    "operation_state": current.state.value if current else None,
+                    "reason": f"Expiry authorization rejected: {exc}"}
         success, _prev = self._registry.transition_to(
-            idempotency_key, OperationState.FAILED,
+            idempotency_key, OperationState.FAILED, authorization=capability,
+            hold_record_updates={"exit_reason": "expired"},
         )
         return {
             "expired": success,
-            "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
+            "operation_state": self._registry.get(idempotency_key).state.value if self._registry.get(idempotency_key) else None,
             "reason": "τ_K exhausted — FAIL-CLOSED rejection (not a resolution)." if success
                       else "Transition HOLD → FAILED failed.",
         }
@@ -333,15 +421,39 @@ class HoldManager:
             return {"expired": False, "operation_state": record.state.value,
                     "reason": f"Operation is in state {record.state.value}, not ESCALATED."}
 
-        if record.hold_record:
-            record.hold_record.exit_reason = "expired_escalated"
+        expiry = self.check_tau_k_expiry(idempotency_key)
+        if not expiry.get("expired"):
+            return {
+                "expired": False, "operation_state": record.state.value,
+                "reason": "τ_K has not been verified as expired; ESCALATED remains unchanged.",
+            }
 
+        if record.hold_record is None:
+            return {"expired": False, "operation_state": record.state.value,
+                    "reason": "Cannot expire ESCALATED without an initialized HoldRecord."}
+        auth_class = "ESCALATED_EXPIRY"
+        evidence = _TransitionEvidence(
+            idempotency_key, OperationState.ESCALATED, OperationState.UNKNOWN,
+            auth_class, "tau_k_expiry",
+            (expiry.get("reason", ""), str(record.hold_record.tau_k_seconds)),
+        )
+        try:
+            capability = self._registry._issue_transition_authorization(
+                idempotency_key, OperationState.ESCALATED, OperationState.UNKNOWN,
+                auth_class, evidence, issuer=self,
+            )
+        except (RuntimeError, PermissionError, ValueError) as exc:
+            current = self._registry.get(idempotency_key)
+            return {"expired": False,
+                    "operation_state": current.state.value if current else None,
+                    "reason": f"Expiry authorization rejected: {exc}"}
         success, _prev = self._registry.transition_to(
-            idempotency_key, OperationState.UNKNOWN,
+            idempotency_key, OperationState.UNKNOWN, authorization=capability,
+            hold_record_updates={"exit_reason": "expired_escalated"},
         )
         return {
             "expired": success,
-            "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
+            "operation_state": self._registry.get(idempotency_key).state.value if self._registry.get(idempotency_key) else None,
             "reason": "τ_K expired on ESCALATED — UNKNOWN (time-based exit rejected, needs human)." if success
                       else "Transition ESCALATED → UNKNOWN failed.",
         }

@@ -52,6 +52,7 @@ from ..operations.registry import (
     OperationState,
     HoldRecord,
     ExitReceipt,
+    _TransitionEvidence,
 )
 from ..operations.hold import HoldManager
 from ..assessment.assessor import PostExecutionAssessor, AssessmentReport
@@ -467,12 +468,49 @@ class DualKernelGovernor:
                     "ledger_valid": self.ledger.verify_chain(),
                 }
         elif composed_decision == Decision.HARD_VETO.value:
-            self.registry.transition_to(idem_key, OperationState.FAILED)
-            if resource_id and amount > 0:
-                resource = self.membrane.state.resources.get(resource_id)
-                if resource:
-                    with self.membrane.state.get_lock(resource_id):
-                        resource.release(amount)
+            # The membrane releases its own reservation whenever its verdict is
+            # HARD_VETO. Only release here when this adjudication's I8 check
+            # explicitly succeeded and the membrane left its reservation outstanding
+            # (for example, a HARD_VETO from the scoring kernel).
+            i8_reserved_here = bool(
+                resource_id and amount > 0 and membrane_result
+                and membrane_result.get("decision") != Decision.HARD_VETO.value
+                and any(
+                    check.get("check_id") == "I8"
+                    and check.get("decision") == Decision.PASS.value
+                    for check in membrane_result.get("checks", [])
+                )
+            )
+            success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
+            if success:
+                if i8_reserved_here:
+                    resource = self.membrane.state.resources.get(resource_id)
+                    if resource:
+                        with self.membrane.state.get_lock(resource_id):
+                            resource.release(amount)
+            else:
+                # Compensate only for the reservation made by this adjudication.
+                # Never subtract from the aggregate counter when I8 did not leave
+                # this passage's reservation outstanding.
+                if i8_reserved_here:
+                    resource = self.membrane.state.resources.get(resource_id)
+                    if resource:
+                        with self.membrane.state.get_lock(resource_id):
+                            resource.release(amount)
+                # Do not report a completed veto when the durable state transition failed.
+                composed_decision = Decision.HOLD.value
+                composed_rationale = (
+                    "HARD_VETO produced, but FAILED transition was rejected; "
+                    "protected lifecycle adjudication is required."
+                )
+                self.ledger.append(
+                    kernel="composed",
+                    decision=Decision.HOLD.value,
+                    rationale=composed_rationale,
+                    passage_id=passage.passage_id,
+                    idempotency_key=idem_key,
+                    composed_decision=Decision.HOLD.value,
+                )
         elif composed_decision == Decision.HOLD.value:
             # Enter through HoldManager so the lifecycle record is initialized.
             # Do not invent a τ_K here: this generic Governor has no
@@ -989,14 +1027,40 @@ class DualKernelGovernor:
                 "reason": reason,
             }
 
-        # Re-run adjudication with new evidence
-        # The passage must have the same idempotency key
+        # Never rewrite a caller's idempotency key: the evidence must be
+        # for the same operation that entered HOLD.
         if passage.idempotency_key != idempotency_key:
-            passage.idempotency_key = idempotency_key
+            reason = (
+                "Passage idempotency key does not match the held operation; "
+                "HOLD remains unchanged."
+            )
+            self.ledger.append(
+                kernel="hold_resolution",
+                decision=Decision.HOLD.value,
+                rationale=f"Rejected resolve_hold for '{idempotency_key}': {reason}",
+                passage_id=getattr(passage, "passage_id", record.passage_id),
+                idempotency_key=idempotency_key,
+            )
+            return {
+                "hold_resolved": False,
+                "operation_state": record.state.value,
+                "reason": reason,
+            }
+        if record.hold_record is None:
+            reason = "HOLD lifecycle record is missing; re-adjudication is rejected."
+            self.ledger.append(
+                kernel="hold_resolution",
+                decision=Decision.HOLD.value,
+                rationale=reason,
+                passage_id=passage.passage_id,
+                idempotency_key=idempotency_key,
+            )
+            return {
+                "hold_resolved": False,
+                "operation_state": record.state.value,
+                "reason": reason,
+            }
 
-        # Temporarily remove the record so re-registration succeeds
-        # (the key is already claimed in HOLD state)
-        # We bypass the register() check by directly transitioning
         result = self._re_adjudicate_hold(
             passage, pressure, velocity, capacity, option_space,
             authority, context_fit, evidence_quality, irreversibility_materiality,
@@ -1093,30 +1157,79 @@ class DualKernelGovernor:
             composed_decision=composed_decision,
         )
 
-        # 6. State transitions from HOLD
+        # 6. Protected transitions: typed evidence is tied to this operation,
+        # edge, authorization class, and the actual fresh adjudication result.
         hold_resolved = False
+        transition_failed = False
         if composed_decision in (Decision.PASS.value, Decision.FLAG.value):
-            success, _prev = self.registry.transition_to(idem_key, OperationState.RESERVED)
-            if success:
-                hold_resolved = True
-                if record := self.registry.get(idem_key):
-                    if record.hold_record:
-                        record.hold_record.exit_reason = "resolved"
-            else:
-                # Transition failed — stay in HOLD
+            auth_class = "READJUDICATION_ALLOW"
+            evidence = _TransitionEvidence(
+                idem_key, OperationState.HOLD, OperationState.RESERVED,
+                auth_class, "fresh_re_adjudication", (composed_decision,),
+            )
+            try:
+                capability = self.registry._issue_transition_authorization(
+                    idem_key, OperationState.HOLD, OperationState.RESERVED,
+                    auth_class, evidence, issuer=self.hold_manager,
+                )
+                success, _prev = self.registry.transition_to(
+                    idem_key, OperationState.RESERVED, authorization=capability,
+                    hold_record_updates={"exit_reason": "resolved"},
+                )
+            except (RuntimeError, PermissionError, ValueError, OSError):
+                current = self.registry.get(idem_key)
+                success = bool(current and current.state == OperationState.RESERVED)
+            hold_resolved = success
+            if not success:
+                transition_failed = True
+                current = self.registry.get(idem_key)
                 composed_decision = Decision.HOLD.value
-                composed_rationale = "Re-adjudication produced PASS/FLAG but RESERVED transition failed — staying in HOLD."
+                composed_rationale = (
+                    "Re-adjudication produced PASS/FLAG but the protected transition "
+                    f"was rejected; current state is {current.state.value if current else 'missing'}."
+                )
         elif composed_decision == Decision.HARD_VETO.value:
-            self.registry.transition_to(idem_key, OperationState.FAILED)
-            hold_resolved = True  # Resolved (as denied)
-            if resource_id and amount > 0:
+            auth_class = "READJUDICATION_DENY"
+            evidence = _TransitionEvidence(
+                idem_key, OperationState.HOLD, OperationState.FAILED,
+                auth_class, "fresh_re_adjudication", (Decision.HARD_VETO.value,),
+            )
+            try:
+                capability = self.registry._issue_transition_authorization(
+                    idem_key, OperationState.HOLD, OperationState.FAILED,
+                    auth_class, evidence, issuer=self.hold_manager,
+                )
+                success, _prev = self.registry.transition_to(
+                    idem_key, OperationState.FAILED, authorization=capability,
+                    hold_record_updates={"exit_reason": "resolved_veto"},
+                )
+            except (RuntimeError, PermissionError, ValueError, OSError):
+                current = self.registry.get(idem_key)
+                success = bool(current and current.state == OperationState.FAILED)
+            hold_resolved = success
+            if success and resource_id and amount > 0:
                 resource = self.membrane.state.resources.get(resource_id)
                 if resource:
                     with self.membrane.state.get_lock(resource_id):
                         resource.release(amount)
-            if record := self.registry.get(idem_key):
-                if record.hold_record:
-                    record.hold_record.exit_reason = "resolved_veto"
+            if not success:
+                transition_failed = True
+                current = self.registry.get(idem_key)
+                composed_decision = Decision.HOLD.value
+                composed_rationale = (
+                    "Re-adjudication produced HARD_VETO but the protected transition "
+                    f"was rejected; current state is {current.state.value if current else 'missing'}."
+                )
+        if transition_failed:
+            # Keep the audit chain consistent with the fail-closed response.
+            self.ledger.append(
+                kernel="hold_resolution",
+                decision=Decision.HOLD.value,
+                rationale=composed_rationale,
+                passage_id=passage.passage_id,
+                idempotency_key=idem_key,
+                composed_decision=Decision.HOLD.value,
+            )
         elif composed_decision == Decision.HOLD.value:
             # Still HOLD — update the hold record's timestamp
             if record := self.registry.get(idem_key):

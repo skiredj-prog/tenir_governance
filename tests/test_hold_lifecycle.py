@@ -72,6 +72,31 @@ class TestHoldLifecycle:
         assert record.hold_record is not None
         assert record.hold_record.hold_start
 
+    def test_failed_hard_veto_transition_does_not_release_another_passage_reservation(self):
+        """A membrane-released reservation must not be subtracted twice."""
+        gov, state = _setup_governor()
+        resource = state.resources["budget"]
+        assert resource.reserve(30.0) is True  # another passage owns this reservation
+        gov.membrane.lock_quarantine(locked_by="test")
+
+        original_transition_to = gov.registry.transition_to
+        def reject_failed_transition(key, target, *args, **kwargs):
+            if target == OperationState.FAILED:
+                return False, None
+            return original_transition_to(key, target, *args, **kwargs)
+        gov.registry.transition_to = reject_failed_transition
+
+        passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        result = gov.adjudicate(
+            passage, pressure=0.2, velocity=0.3, capacity=1.0,
+            resource_id="budget", amount=10.0,
+        )
+
+        assert result["composed_decision"] == Decision.HOLD.value
+        # Membrane reserves 10 for this attempt and releases those 10 on its
+        # HARD_VETO. The failed registry transition must not release them again.
+        assert resource.reserved == 30.0
+
     def test_hold_state_in_registry(self):
         """An operation in HOLD state is visible in the registry."""
         gov, state = _setup_governor()
@@ -219,7 +244,7 @@ class TestHoldLifecycle:
         )
         reg.register(rec)
         hm = HoldManager(reg)
-        hm.enter_hold("op-hold-6", tau_k_seconds=300)
+        hm.enter_hold("op-hold-6", tau_k_seconds=0.000001)
         result = hm.expire_hold("op-hold-6")
         assert result["expired"] is True
         assert result["operation_state"] == OperationState.FAILED.value
@@ -239,7 +264,7 @@ class TestHoldLifecycle:
         )
         reg.register(rec)
         hm = HoldManager(reg)
-        hm.enter_hold("op-hold-7", tau_k_seconds=300)
+        hm.enter_hold("op-hold-7", tau_k_seconds=0.000001)
         hm.escalate_hold("op-hold-7")
         result = hm.expire_escalated("op-hold-7")
         assert result["expired"] is True
@@ -482,6 +507,69 @@ class TestGovernorHoldLifecycle:
             for entry in gov.ledger.entries
         )
 
+    def test_governor_rejects_mismatched_passage_key_without_rewriting_it(self):
+        gov, _state = _setup_governor()
+        from tenir_governance.operations import OperationRecord
+        rec = OperationRecord(
+            idempotency_key="op-hold-key-bound", passage_id="p-bound",
+            agent_id="alice", action_type="payment",
+        )
+        gov.registry.register(rec)
+        gov.hold_manager.enter_hold("op-hold-key-bound", tau_k_seconds=300)
+        mismatched = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        original_key = mismatched.idempotency_key
+
+        result = gov.resolve_hold("op-hold-key-bound", passage=mismatched)
+
+        assert result["hold_resolved"] is False
+        assert mismatched.idempotency_key == original_key
+        assert gov.registry.get("op-hold-key-bound").state == OperationState.HOLD
+        assert "does not match" in result["reason"]
+        assert any(
+            entry.idempotency_key == "op-hold-key-bound"
+            and entry.kernel == "hold_resolution"
+            for entry in gov.ledger.entries
+        )
+
+    def test_governor_rejects_non_string_escalated_by(self):
+        gov, _state = _setup_governor()
+        from tenir_governance.operations import OperationRecord
+        rec = OperationRecord(
+            idempotency_key="op-hold-invalid-escalator", passage_id="p-test",
+            agent_id="alice", action_type="payment",
+        )
+        gov.registry.register(rec)
+        gov.hold_manager.enter_hold("op-hold-invalid-escalator", tau_k_seconds=300)
+
+        result = gov.escalate_hold("op-hold-invalid-escalator", escalated_by=object())
+
+        assert result["escalated"] is False
+        assert "must be a string" in result["reason"]
+        assert gov.registry.get("op-hold-invalid-escalator").state == OperationState.HOLD
+
+    def test_governor_rejects_missing_hold_record_with_audit_entry(self):
+        gov, _state = _setup_governor()
+        from tenir_governance.operations import OperationRecord
+        rec = OperationRecord(
+            idempotency_key="op-hold-missing-record", passage_id="p-missing",
+            agent_id="alice", action_type="payment",
+        )
+        gov.registry.register(rec)
+        gov.hold_manager.enter_hold("op-hold-missing-record", tau_k_seconds=300)
+        gov.registry.get("op-hold-missing-record").hold_record = None
+        passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        passage.idempotency_key = "op-hold-missing-record"
+
+        result = gov.resolve_hold("op-hold-missing-record", passage=passage)
+
+        assert result["hold_resolved"] is False
+        assert "lifecycle record is missing" in result["reason"]
+        assert any(
+            entry.idempotency_key == "op-hold-missing-record"
+            and entry.kernel == "hold_resolution"
+            for entry in gov.ledger.entries
+        )
+
     def test_governor_escalate_hold(self):
         """Governor.escalate_hold() transitions HOLD → ESCALATED."""
         gov, state = _setup_governor()
@@ -518,7 +606,7 @@ class TestGovernorHoldLifecycle:
         assert result["operation_state"] == OperationState.RESERVED.value
 
     def test_governor_expire_hold(self):
-        """Governor.expire_hold() transitions HOLD → FAILED (fail-closed)."""
+        """Governor.expire_hold() transitions HOLD → FAILED after configured τ_K."""
         gov, state = _setup_governor()
         from tenir_governance.operations import OperationRecord
         rec = OperationRecord(
@@ -526,7 +614,8 @@ class TestGovernorHoldLifecycle:
             agent_id="alice", action_type="payment",
         )
         gov.registry.register(rec)
-        gov.hold_manager.enter_hold("op-hold-test-4", tau_k_seconds=300)
+        # Tiny explicit test bound: expiry must be real, not bypassed by the caller.
+        gov.hold_manager.enter_hold("op-hold-test-4", tau_k_seconds=0.000001)
         result = gov.expire_hold("op-hold-test-4")
         assert result["expired"] is True
         assert result["operation_state"] == OperationState.FAILED.value
@@ -844,65 +933,87 @@ class TestCompositionHold:
 # ── State Machine Transition Tests ──────────────────────────────────
 
 class TestHoldStateTransitions:
-    """Test legal and illegal transitions involving HOLD and ESCALATED."""
+    """Protected edges require a registry-issued lifecycle capability."""
 
-    def test_created_to_hold(self):
-        reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
+    def _register(self, reg, key="op-1"):
+        rec = OperationRecord(idempotency_key=key, passage_id="p1",
                               agent_id="alice", action_type="payment")
         reg.register(rec)
+        return rec
+
+    def test_created_to_hold_remains_legal(self):
+        reg = DurableOperationRegistry()
+        self._register(reg)
         assert reg.transition_to("op-1", OperationState.HOLD)[0]
 
-    def test_hold_to_reserved(self):
-        reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
-                              agent_id="alice", action_type="payment")
-        reg.register(rec)
-        reg.transition_to("op-1", OperationState.HOLD)
-        assert reg.transition_to("op-1", OperationState.RESERVED)[0]
+    def test_all_protected_edges_reject_direct_calls(self):
+        protected = [
+            (OperationState.HOLD, OperationState.RESERVED),
+            (OperationState.HOLD, OperationState.FAILED),
+            (OperationState.HOLD, OperationState.ESCALATED),
+            (OperationState.ESCALATED, OperationState.RESERVED),
+            (OperationState.ESCALATED, OperationState.FAILED),
+            (OperationState.ESCALATED, OperationState.UNKNOWN),
+        ]
+        for source, target in protected:
+            reg = DurableOperationRegistry()
+            self._register(reg)
+            hm = HoldManager(reg)
+            assert hm.enter_hold("op-1", tau_k_seconds=300)["entered"]
+            if source == OperationState.ESCALATED:
+                assert hm.escalate_hold("op-1")["escalated"]
+            assert not reg.transition_to("op-1", target)[0]
+            assert reg.get("op-1").state == source
 
-    def test_hold_to_failed(self):
+    def test_hold_manager_rejects_missing_hold_record(self):
         reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
-                              agent_id="alice", action_type="payment")
-        reg.register(rec)
-        reg.transition_to("op-1", OperationState.HOLD)
-        assert reg.transition_to("op-1", OperationState.FAILED)[0]
+        self._register(reg)
+        assert reg.transition_to("op-1", OperationState.HOLD)[0]
+        hm = HoldManager(reg)
+        assert hm.escalate_hold("op-1")["escalated"] is False
 
-    def test_hold_to_escalated(self):
-        reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
-                              agent_id="alice", action_type="payment")
-        reg.register(rec)
-        reg.transition_to("op-1", OperationState.HOLD)
-        assert reg.transition_to("op-1", OperationState.ESCALATED)[0]
+        # A direct transition into ESCALATED is blocked; simulate a legacy
+        # persisted state to test the missing-record guard on authorized exit.
+        rec = reg.get("op-1")
+        rec.state = OperationState.ESCALATED
+        result = hm.authorize_exit(
+            "op-1", authorized_by="operator", scope="approval",
+            authorization="test-ceremony", approve=True,
+        )
+        assert result["exited"] is False
+        assert "HoldRecord" in result["reason"]
 
-    def test_escalated_to_reserved(self):
+    def test_registry_issued_capability_is_immutable_bound_and_one_use(self):
+        from tenir_governance.operations.registry import _TransitionEvidence
         reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
-                              agent_id="alice", action_type="payment")
-        reg.register(rec)
-        reg.transition_to("op-1", OperationState.HOLD)
-        reg.transition_to("op-1", OperationState.ESCALATED)
-        assert reg.transition_to("op-1", OperationState.RESERVED)[0]
-
-    def test_escalated_to_failed(self):
-        reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
-                              agent_id="alice", action_type="payment")
-        reg.register(rec)
-        reg.transition_to("op-1", OperationState.HOLD)
-        reg.transition_to("op-1", OperationState.ESCALATED)
-        assert reg.transition_to("op-1", OperationState.FAILED)[0]
-
-    def test_escalated_to_unknown(self):
-        reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
-                              agent_id="alice", action_type="payment")
-        reg.register(rec)
-        reg.transition_to("op-1", OperationState.HOLD)
-        reg.transition_to("op-1", OperationState.ESCALATED)
-        assert reg.transition_to("op-1", OperationState.UNKNOWN)[0]
+        self._register(reg)
+        self._register(reg, "op-2")
+        hm = HoldManager(reg)
+        assert hm.enter_hold("op-1", tau_k_seconds=300)["entered"]
+        assert hm.enter_hold("op-2", tau_k_seconds=300)["entered"]
+        evidence = _TransitionEvidence(
+            "op-1", OperationState.HOLD, OperationState.ESCALATED,
+            "HOLD_ESCALATION", "test", ("validated test lifecycle",),
+        )
+        with pytest.raises(PermissionError):
+            reg._issue_transition_authorization(
+                "op-1", OperationState.HOLD, OperationState.ESCALATED,
+                "HOLD_ESCALATION", evidence, issuer=object(),
+            )
+        token = reg._issue_transition_authorization(
+            "op-1", OperationState.HOLD, OperationState.ESCALATED,
+            "HOLD_ESCALATION", evidence, issuer=hm,
+        )
+        with pytest.raises((AttributeError, TypeError)):
+            token.target = OperationState.FAILED
+        # op-2 is also at HOLD, so this reaches and fails capability binding.
+        assert not reg.transition_to("op-2", OperationState.ESCALATED, authorization=token)[0]
+        # The target edge is legal from HOLD, but this token is bound to ESCALATED.
+        assert not reg.transition_to("op-1", OperationState.FAILED, authorization=token)[0]
+        assert reg.transition_to("op-1", OperationState.ESCALATED, authorization=token)[0]
+        assert token not in reg._issued_authorizations
+        # RESERVED is legal from ESCALATED, so rejection proves token consumption.
+        assert not reg.transition_to("op-1", OperationState.RESERVED, authorization=token)[0]
 
     def test_illegal_hold_to_dispatching(self):
         """Cannot skip RESERVED — HOLD → DISPATCHING is illegal."""
@@ -974,6 +1085,29 @@ class TestHoldPersistence:
         assert loaded.hold_record.tau_k_seconds == 300
         assert loaded.hold_record.tau_k_source == "on-call SLA"
         assert loaded.hold_record.exit_reason == ""
+
+    def test_failed_protected_persist_restores_state_and_hold_metadata(self):
+        reg = DurableOperationRegistry()
+        rec = OperationRecord(
+            idempotency_key="op-persist-fail", passage_id="p1",
+            agent_id="alice", action_type="payment",
+        )
+        reg.register(rec)
+        hm = HoldManager(reg)
+        assert hm.enter_hold("op-persist-fail", tau_k_seconds=300)["entered"]
+        before = reg.get("op-persist-fail").hold_record.to_dict()
+
+        def fail_before_commit():
+            raise OSError("simulated persistence failure")
+
+        reg._persist = fail_before_commit
+        with pytest.raises(OSError, match="simulated persistence failure"):
+            hm.escalate_hold("op-persist-fail")
+
+        current = reg.get("op-persist-fail")
+        assert current.state == OperationState.HOLD
+        assert current.hold_record.to_dict() == before
+        assert not reg._issued_authorizations
 
     def test_exit_receipt_survives_restart(self, tmp_path):
         store = str(tmp_path / "operations.json")
