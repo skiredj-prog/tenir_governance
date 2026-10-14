@@ -36,7 +36,6 @@ ESCALATED is absorbing:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from copy import deepcopy
 from typing import Any
 
 from .registry import (
@@ -45,6 +44,7 @@ from .registry import (
     OperationState,
     HoldRecord,
     ExitReceipt,
+    _TransitionEvidence,
 )
 
 
@@ -71,6 +71,7 @@ class HoldManager:
 
     def __init__(self, registry: DurableOperationRegistry):
         self._registry = registry
+        self._registry._register_lifecycle_issuer(self)
 
     def enter_hold(
         self,
@@ -194,24 +195,33 @@ class HoldManager:
         if record.state != OperationState.HOLD:
             return {"escalated": False, "operation_state": record.state.value,
                     "reason": f"Operation is in state {record.state.value}, not HOLD."}
+        if record.hold_record is None:
+            return {"escalated": False, "operation_state": record.state.value,
+                    "reason": "Cannot escalate without an initialized HoldRecord."}
 
-        old_hold_record = deepcopy(record.hold_record)
-        capability = self._registry._issue_transition_authorization(
+        auth_class = "HOLD_ESCALATION"
+        evidence = _TransitionEvidence(
             idempotency_key, OperationState.HOLD, OperationState.ESCALATED,
-            "HOLD_ESCALATION", "HoldManager.escalate_hold lifecycle path",
+            auth_class, "hold_escalation", (str(escalated_by),),
         )
-        record = self._registry.get(idempotency_key)
-        if record and record.state == OperationState.HOLD and record.hold_record:
-            record.hold_record.escalated_at = _utc_now()
-            record.hold_record.escalated_by = escalated_by
-            record.hold_record.exit_reason = "escalated"
+        try:
+            capability = self._registry._issue_transition_authorization(
+                idempotency_key, OperationState.HOLD, OperationState.ESCALATED,
+                auth_class, evidence, issuer=self,
+            )
+        except (RuntimeError, PermissionError, ValueError) as exc:
+            current = self._registry.get(idempotency_key)
+            return {"escalated": False,
+                    "operation_state": current.state.value if current else None,
+                    "reason": f"Transition authorization rejected: {exc}"}
         success, _prev = self._registry.transition_to(
             idempotency_key, OperationState.ESCALATED, authorization=capability,
+            hold_record_updates={
+                "escalated_at": _utc_now(),
+                "escalated_by": escalated_by,
+                "exit_reason": "escalated",
+            },
         )
-        if not success:
-            current = self._registry.get(idempotency_key)
-            if current is not None and current.state == OperationState.HOLD:
-                current.hold_record = old_hold_record
         return {
             "escalated": success,
             "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
@@ -261,6 +271,16 @@ class HoldManager:
                     "exit_receipt": None,
                     "reason": f"Operation is in state {record.state.value}, not ESCALATED."}
 
+        if record.hold_record is None:
+            return {"exited": False, "operation_state": record.state.value,
+                    "exit_receipt": None,
+                    "reason": "Cannot authorize exit without an initialized HoldRecord."}
+        if not all(isinstance(value, str) for value in (authorized_by, scope, authorization, reason)):
+            return {
+                "exited": False, "operation_state": record.state.value,
+                "exit_receipt": None,
+                "reason": "Authorized exit metadata must be strings.",
+            }
         if not (authorized_by.strip() and scope.strip() and authorization.strip()):
             return {
                 "exited": False, "operation_state": record.state.value,
@@ -276,27 +296,35 @@ class HoldManager:
             reason=reason,
         )
 
-        old_hold_record = deepcopy(record.hold_record)
         target_state = OperationState.RESERVED if approve else OperationState.FAILED
         auth_class = (
             "ESCALATED_AUTHORIZED_APPROVAL" if approve
             else "ESCALATED_AUTHORIZED_DENIAL"
         )
-        capability = self._registry._issue_transition_authorization(
+        evidence = _TransitionEvidence(
             idempotency_key, OperationState.ESCALATED, target_state,
-            auth_class, "HoldManager.authorize_exit lifecycle path",
+            auth_class, "authorized_exit_receipt",
+            (receipt.authorized_by, receipt.scope, receipt.authorization,
+             receipt.timestamp, receipt.reason),
         )
-        record = self._registry.get(idempotency_key)
-        if record and record.state == OperationState.ESCALATED and record.hold_record:
-            record.hold_record.exit_receipt = receipt
-            record.hold_record.exit_reason = "authorized_exit"
+        try:
+            capability = self._registry._issue_transition_authorization(
+                idempotency_key, OperationState.ESCALATED, target_state,
+                auth_class, evidence, issuer=self,
+            )
+        except (RuntimeError, PermissionError, ValueError) as exc:
+            current = self._registry.get(idempotency_key)
+            return {"exited": False,
+                    "operation_state": current.state.value if current else None,
+                    "exit_receipt": None,
+                    "reason": f"Transition authorization rejected: {exc}"}
         success, _prev = self._registry.transition_to(
             idempotency_key, target_state, authorization=capability,
+            hold_record_updates={
+                "exit_receipt": receipt,
+                "exit_reason": "authorized_exit",
+            },
         )
-        if not success:
-            current = self._registry.get(idempotency_key)
-            if current is not None and current.state == OperationState.ESCALATED:
-                current.hold_record = old_hold_record
 
         return {
             "exited": success,
@@ -336,21 +364,29 @@ class HoldManager:
                 "reason": "τ_K has not been verified as expired; HOLD remains unchanged.",
             }
 
-        old_hold_record = deepcopy(record.hold_record)
-        capability = self._registry._issue_transition_authorization(
+        if record.hold_record is None:
+            return {"expired": False, "operation_state": record.state.value,
+                    "reason": "Cannot expire HOLD without an initialized HoldRecord."}
+        auth_class = "HOLD_EXPIRY"
+        evidence = _TransitionEvidence(
             idempotency_key, OperationState.HOLD, OperationState.FAILED,
-            "HOLD_EXPIRY", "HoldManager verified τ_K expiry",
+            auth_class, "tau_k_expiry",
+            (expiry.get("reason", ""), str(record.hold_record.tau_k_seconds)),
         )
-        record = self._registry.get(idempotency_key)
-        if record and record.state == OperationState.HOLD and record.hold_record:
-            record.hold_record.exit_reason = "expired"
+        try:
+            capability = self._registry._issue_transition_authorization(
+                idempotency_key, OperationState.HOLD, OperationState.FAILED,
+                auth_class, evidence, issuer=self,
+            )
+        except (RuntimeError, PermissionError, ValueError) as exc:
+            current = self._registry.get(idempotency_key)
+            return {"expired": False,
+                    "operation_state": current.state.value if current else None,
+                    "reason": f"Expiry authorization rejected: {exc}"}
         success, _prev = self._registry.transition_to(
             idempotency_key, OperationState.FAILED, authorization=capability,
+            hold_record_updates={"exit_reason": "expired"},
         )
-        if not success:
-            current = self._registry.get(idempotency_key)
-            if current is not None and current.state == OperationState.HOLD:
-                current.hold_record = old_hold_record
         return {
             "expired": success,
             "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
@@ -386,21 +422,29 @@ class HoldManager:
                 "reason": "τ_K has not been verified as expired; ESCALATED remains unchanged.",
             }
 
-        old_hold_record = deepcopy(record.hold_record)
-        capability = self._registry._issue_transition_authorization(
+        if record.hold_record is None:
+            return {"expired": False, "operation_state": record.state.value,
+                    "reason": "Cannot expire ESCALATED without an initialized HoldRecord."}
+        auth_class = "ESCALATED_EXPIRY"
+        evidence = _TransitionEvidence(
             idempotency_key, OperationState.ESCALATED, OperationState.UNKNOWN,
-            "ESCALATED_EXPIRY", "HoldManager verified τ_K expiry",
+            auth_class, "tau_k_expiry",
+            (expiry.get("reason", ""), str(record.hold_record.tau_k_seconds)),
         )
-        record = self._registry.get(idempotency_key)
-        if record and record.state == OperationState.ESCALATED and record.hold_record:
-            record.hold_record.exit_reason = "expired_escalated"
+        try:
+            capability = self._registry._issue_transition_authorization(
+                idempotency_key, OperationState.ESCALATED, OperationState.UNKNOWN,
+                auth_class, evidence, issuer=self,
+            )
+        except (RuntimeError, PermissionError, ValueError) as exc:
+            current = self._registry.get(idempotency_key)
+            return {"expired": False,
+                    "operation_state": current.state.value if current else None,
+                    "reason": f"Expiry authorization rejected: {exc}"}
         success, _prev = self._registry.transition_to(
             idempotency_key, OperationState.UNKNOWN, authorization=capability,
+            hold_record_updates={"exit_reason": "expired_escalated"},
         )
-        if not success:
-            current = self._registry.get(idempotency_key)
-            if current is not None and current.state == OperationState.ESCALATED:
-                current.hold_record = old_hold_record
         return {
             "expired": success,
             "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
