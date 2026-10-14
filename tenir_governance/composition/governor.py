@@ -475,7 +475,8 @@ class DualKernelGovernor:
                         resource.release(amount)
         elif composed_decision == Decision.HOLD.value:
             # Enter through HoldManager so the lifecycle record is initialized.
-            # τ_K remains unset unless supplied from an organization-owned SLA.
+            # The one-hour τ_K is a scenario default; production callers should
+            # supply the organization-owned SLA explicitly.
             hold_entry = self.hold_manager.enter_hold(idem_key)
             if not hold_entry["entered"]:
                 composed_rationale = (
