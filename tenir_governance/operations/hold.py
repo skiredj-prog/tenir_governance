@@ -196,15 +196,15 @@ class HoldManager:
                     "reason": f"Operation is in state {record.state.value}, not HOLD."}
 
         old_hold_record = deepcopy(record.hold_record)
-        if record.hold_record:
-            record.hold_record.escalated_at = _utc_now()
-            record.hold_record.escalated_by = escalated_by
-            record.hold_record.exit_reason = "escalated"
-
         capability = self._registry._issue_transition_authorization(
             idempotency_key, OperationState.HOLD, OperationState.ESCALATED,
             "HOLD_ESCALATION", "HoldManager.escalate_hold lifecycle path",
         )
+        record = self._registry.get(idempotency_key)
+        if record and record.state == OperationState.HOLD and record.hold_record:
+            record.hold_record.escalated_at = _utc_now()
+            record.hold_record.escalated_by = escalated_by
+            record.hold_record.exit_reason = "escalated"
         success, _prev = self._registry.transition_to(
             idempotency_key, OperationState.ESCALATED, authorization=capability,
         )
@@ -277,10 +277,6 @@ class HoldManager:
         )
 
         old_hold_record = deepcopy(record.hold_record)
-        if record.hold_record:
-            record.hold_record.exit_receipt = receipt
-            record.hold_record.exit_reason = "authorized_exit"
-
         target_state = OperationState.RESERVED if approve else OperationState.FAILED
         auth_class = (
             "ESCALATED_AUTHORIZED_APPROVAL" if approve
@@ -290,6 +286,10 @@ class HoldManager:
             idempotency_key, OperationState.ESCALATED, target_state,
             auth_class, "HoldManager.authorize_exit lifecycle path",
         )
+        record = self._registry.get(idempotency_key)
+        if record and record.state == OperationState.ESCALATED and record.hold_record:
+            record.hold_record.exit_receipt = receipt
+            record.hold_record.exit_reason = "authorized_exit"
         success, _prev = self._registry.transition_to(
             idempotency_key, target_state, authorization=capability,
         )
@@ -337,13 +337,13 @@ class HoldManager:
             }
 
         old_hold_record = deepcopy(record.hold_record)
-        if record.hold_record:
-            record.hold_record.exit_reason = "expired"
-
         capability = self._registry._issue_transition_authorization(
             idempotency_key, OperationState.HOLD, OperationState.FAILED,
             "HOLD_EXPIRY", "HoldManager verified τ_K expiry",
         )
+        record = self._registry.get(idempotency_key)
+        if record and record.state == OperationState.HOLD and record.hold_record:
+            record.hold_record.exit_reason = "expired"
         success, _prev = self._registry.transition_to(
             idempotency_key, OperationState.FAILED, authorization=capability,
         )
@@ -387,13 +387,13 @@ class HoldManager:
             }
 
         old_hold_record = deepcopy(record.hold_record)
-        if record.hold_record:
-            record.hold_record.exit_reason = "expired_escalated"
-
         capability = self._registry._issue_transition_authorization(
             idempotency_key, OperationState.ESCALATED, OperationState.UNKNOWN,
             "ESCALATED_EXPIRY", "HoldManager verified τ_K expiry",
         )
+        record = self._registry.get(idempotency_key)
+        if record and record.state == OperationState.ESCALATED and record.hold_record:
+            record.hold_record.exit_reason = "expired_escalated"
         success, _prev = self._registry.transition_to(
             idempotency_key, OperationState.UNKNOWN, authorization=capability,
         )
