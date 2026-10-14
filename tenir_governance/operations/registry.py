@@ -475,7 +475,11 @@ class DurableOperationRegistry:
             return self._records.get(idempotency_key)
 
     def _register_lifecycle_issuer(self, issuer: object) -> None:
-        """Register a lifecycle manager allowed to request transition tokens."""
+        """Register an actual HoldManager instance as a lifecycle issuer."""
+        # Local import avoids the registry <-> HoldManager import cycle.
+        from .hold import HoldManager
+        if not isinstance(issuer, HoldManager) or issuer._registry is not self:
+            raise PermissionError("Only a HoldManager bound to this registry may be registered")
         with self._lock:
             self._lifecycle_issuers.add(issuer)
 
