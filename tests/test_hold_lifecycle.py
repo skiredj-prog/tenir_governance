@@ -500,6 +500,11 @@ class TestGovernorHoldLifecycle:
         assert mismatched.idempotency_key == original_key
         assert gov.registry.get("op-hold-key-bound").state == OperationState.HOLD
         assert "does not match" in result["reason"]
+        assert any(
+            entry.idempotency_key == "op-hold-key-bound"
+            and entry.kernel == "hold_resolution"
+            for entry in gov.ledger.entries
+        )
 
     def test_governor_escalate_hold(self):
         """Governor.escalate_hold() transitions HOLD → ESCALATED."""
