@@ -122,6 +122,37 @@ _LEGAL_TRANSITIONS = {
 }
 
 
+# Authorization capabilities are registry-issued and validated by object identity.
+# They are process-local control-flow tokens, not identity/signature credentials.
+_AUTHORIZATION_SEAL = object()
+
+
+class _TransitionAuthorization:
+    """Opaque, one-use capability for one protected lifecycle transition."""
+    __slots__ = ("key", "source", "target", "authorization_class", "evidence", "nonce", "_seal")
+
+    def __init__(self, seal, key, source, target, authorization_class, evidence, nonce):
+        if seal is not _AUTHORIZATION_SEAL:
+            raise TypeError("Transition authorizations are issued by DurableOperationRegistry")
+        self.key = key
+        self.source = source
+        self.target = target
+        self.authorization_class = authorization_class
+        self.evidence = evidence
+        self.nonce = nonce
+        self._seal = seal
+
+
+_PROTECTED_TRANSITIONS = {
+    (OperationState.HOLD, OperationState.RESERVED): {"READJUDICATION_ALLOW"},
+    (OperationState.HOLD, OperationState.FAILED): {"READJUDICATION_DENY", "HOLD_EXPIRY"},
+    (OperationState.HOLD, OperationState.ESCALATED): {"HOLD_ESCALATION"},
+    (OperationState.ESCALATED, OperationState.RESERVED): {"ESCALATED_AUTHORIZED_APPROVAL"},
+    (OperationState.ESCALATED, OperationState.FAILED): {"ESCALATED_AUTHORIZED_DENIAL"},
+    (OperationState.ESCALATED, OperationState.UNKNOWN): {"ESCALATED_EXPIRY"},
+}
+
+
 @dataclass
 class ExitReceipt:
     """Receipt for an authorized exit from HOLD or QUARANTINE_LOCK.
@@ -279,6 +310,7 @@ class DurableOperationRegistry:
         self._records: dict[str, OperationRecord] = {}
         self._store_path = store_path
         self._corrupted = False
+        self._issued_authorizations: dict[_TransitionAuthorization, None] = {}
         if store_path and os.path.exists(store_path):
             self._load()
 
@@ -422,18 +454,49 @@ class DurableOperationRegistry:
                 self._load()
             return self._records.get(idempotency_key)
 
+    def _issue_transition_authorization(
+        self,
+        idempotency_key: str,
+        source: OperationState,
+        target: OperationState,
+        authorization_class: str,
+        evidence: str,
+    ) -> _TransitionAuthorization:
+        """Issue an opaque one-use token for an explicitly validated lifecycle path.
+
+        Internal API for Governor/HoldManager only. This enforces path provenance;
+        it does not authenticate a human or verify a cryptographic signature.
+        """
+        allowed = _PROTECTED_TRANSITIONS.get((source, target), set())
+        if authorization_class not in allowed:
+            raise ValueError("Authorization class is not valid for this protected transition")
+        if not evidence:
+            raise ValueError("Transition authorization requires lifecycle evidence")
+        record = self.get(idempotency_key)
+        if record is None or record.state != source:
+            raise RuntimeError("Cannot authorize transition: operation is missing or source state is stale")
+        token = _TransitionAuthorization(
+            _AUTHORIZATION_SEAL, idempotency_key, source, target,
+            authorization_class, evidence, uuid4().hex,
+        )
+        with self._lock:
+            self._issued_authorizations[token] = None
+        return token
+
     def transition_to(
         self,
         idempotency_key: str,
         new_state: OperationState,
         claimed_by: str = "",
+        authorization: _TransitionAuthorization | None = None,
     ) -> tuple[bool, OperationState | None]:
         """Atomically transition an operation to a new state.
 
         This is the critical atomic operation. It checks:
         1. The operation exists.
         2. The transition is legal.
-        3. For DISPATCHING: the operation is not already dispatched.
+        3. Protected HOLD/ESCALATED exits carry a registry-issued, one-use capability.
+        4. For DISPATCHING: the operation is not already dispatched.
 
         Returns (True, previous_state) if the transition succeeded,
         (False, current_state_or_None) otherwise.
@@ -478,6 +541,20 @@ class DurableOperationRegistry:
                 if new_state not in _LEGAL_TRANSITIONS.get(record.state, set()):
                     return False, prev_state
 
+                # Protected edges require a matching registry-issued capability.
+                protected_classes = _PROTECTED_TRANSITIONS.get((record.state, new_state))
+                if protected_classes is not None:
+                    if (
+                        authorization is None
+                        or authorization not in self._issued_authorizations
+                        or authorization.key != idempotency_key
+                        or authorization.source != record.state
+                        or authorization.target != new_state
+                        or authorization.authorization_class not in protected_classes
+                        or authorization._seal is not _AUTHORIZATION_SEAL
+                    ):
+                        return False, prev_state
+
                 # For DISPATCHING: check not already dispatched
                 if new_state == OperationState.DISPATCHING:
                     if record.state == OperationState.DISPATCHING:
@@ -485,10 +562,20 @@ class DurableOperationRegistry:
                     if record.state.is_dispatched:
                         return False, prev_state  # already dispatched
 
+                old_claimed_by = record.dispatch_claimed_by
                 record.state = new_state
                 if claimed_by:
                     record.dispatch_claimed_by = claimed_by
-                self._persist()
+                try:
+                    self._persist()
+                except Exception:
+                    record.state = prev_state
+                    record.dispatch_claimed_by = old_claimed_by
+                    raise
+                if protected_classes is not None:
+                    # Consume only after durable persistence succeeds. The registry
+                    # lock and file lock cover validation, state change, and consume.
+                    del self._issued_authorizations[authorization]
                 return True, prev_state
             finally:
                 if flock:
