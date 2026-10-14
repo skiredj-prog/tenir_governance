@@ -604,6 +604,9 @@ class DurableOperationRegistry:
                     ):
                         return False, prev_state
 
+                if hold_record_updates and protected_classes is None:
+                    raise ValueError("HoldRecord updates are only valid on protected lifecycle transitions")
+
                 # For DISPATCHING: check not already dispatched
                 if new_state == OperationState.DISPATCHING:
                     if record.state == OperationState.DISPATCHING:
