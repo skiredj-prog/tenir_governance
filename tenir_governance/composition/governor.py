@@ -468,23 +468,36 @@ class DualKernelGovernor:
                     "ledger_valid": self.ledger.verify_chain(),
                 }
         elif composed_decision == Decision.HARD_VETO.value:
+            # The membrane releases its own reservation whenever its verdict is
+            # HARD_VETO. Only release here when this adjudication's I8 check
+            # explicitly succeeded and the membrane left its reservation outstanding
+            # (for example, a HARD_VETO from the scoring kernel).
+            i8_reserved_here = bool(
+                resource_id and amount > 0 and membrane_result
+                and membrane_result.get("decision") != Decision.HARD_VETO.value
+                and any(
+                    check.get("check_id") == "I8"
+                    and check.get("decision") == Decision.PASS.value
+                    for check in membrane_result.get("checks", [])
+                )
+            )
             success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
             if success:
-                if resource_id and amount > 0:
+                if i8_reserved_here:
                     resource = self.membrane.state.resources.get(resource_id)
                     if resource:
                         with self.membrane.state.get_lock(resource_id):
                             resource.release(amount)
             else:
-                # The membrane may have reserved capacity during this attempt;
-                # release that reservation even when the durable state transition
-                # is rejected. A rejected transition must not leak capacity.
-                if resource_id and amount > 0:
+                # Compensate only for the reservation made by this adjudication.
+                # Never subtract from the aggregate counter when I8 did not leave
+                # this passage's reservation outstanding.
+                if i8_reserved_here:
                     resource = self.membrane.state.resources.get(resource_id)
                     if resource:
                         with self.membrane.state.get_lock(resource_id):
                             resource.release(amount)
-                # Do not report a completed veto when the durable transition failed.
+                # Do not report a completed veto when the durable state transition failed.
                 composed_decision = Decision.HOLD.value
                 composed_rationale = (
                     "HARD_VETO produced, but FAILED transition was rejected; "
