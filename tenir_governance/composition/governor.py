@@ -468,12 +468,22 @@ class DualKernelGovernor:
                     "ledger_valid": self.ledger.verify_chain(),
                 }
         elif composed_decision == Decision.HARD_VETO.value:
-            self.registry.transition_to(idem_key, OperationState.FAILED)
-            if resource_id and amount > 0:
-                resource = self.membrane.state.resources.get(resource_id)
-                if resource:
-                    with self.membrane.state.get_lock(resource_id):
-                        resource.release(amount)
+            success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
+            if success:
+                if resource_id and amount > 0:
+                    resource = self.membrane.state.resources.get(resource_id)
+                    if resource:
+                        with self.membrane.state.get_lock(resource_id):
+                            resource.release(amount)
+            else:
+                # A protected HOLD/ESCALATED exit cannot be taken through the
+                # ordinary admission path. Do not release resources or report a
+                # completed veto when the durable transition did not occur.
+                composed_decision = Decision.HOLD.value
+                composed_rationale = (
+                    "HARD_VETO produced, but FAILED transition was rejected; "
+                    "protected lifecycle adjudication is required."
+                )
         elif composed_decision == Decision.HOLD.value:
             # Enter through HoldManager so the lifecycle record is initialized.
             # Do not invent a τ_K here: this generic Governor has no
