@@ -482,6 +482,25 @@ class TestGovernorHoldLifecycle:
             for entry in gov.ledger.entries
         )
 
+    def test_governor_rejects_mismatched_passage_key_without_rewriting_it(self):
+        gov, _state = _setup_governor()
+        from tenir_governance.operations import OperationRecord
+        rec = OperationRecord(
+            idempotency_key="op-hold-key-bound", passage_id="p-bound",
+            agent_id="alice", action_type="payment",
+        )
+        gov.registry.register(rec)
+        gov.hold_manager.enter_hold("op-hold-key-bound", tau_k_seconds=300)
+        mismatched = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        original_key = mismatched.idempotency_key
+
+        result = gov.resolve_hold("op-hold-key-bound", passage=mismatched)
+
+        assert result["hold_resolved"] is False
+        assert mismatched.idempotency_key == original_key
+        assert gov.registry.get("op-hold-key-bound").state == OperationState.HOLD
+        assert "does not match" in result["reason"]
+
     def test_governor_escalate_hold(self):
         """Governor.escalate_hold() transitions HOLD → ESCALATED."""
         gov, state = _setup_governor()
@@ -876,6 +895,24 @@ class TestHoldStateTransitions:
                 assert hm.escalate_hold("op-1")["escalated"]
             assert not reg.transition_to("op-1", target)[0]
             assert reg.get("op-1").state == source
+
+    def test_hold_manager_rejects_missing_hold_record(self):
+        reg = DurableOperationRegistry()
+        self._register(reg)
+        assert reg.transition_to("op-1", OperationState.HOLD)[0]
+        hm = HoldManager(reg)
+        assert hm.escalate_hold("op-1")["escalated"] is False
+
+        # A direct transition into ESCALATED is blocked; simulate a legacy
+        # persisted state to test the missing-record guard on authorized exit.
+        rec = reg.get("op-1")
+        rec.state = OperationState.ESCALATED
+        result = hm.authorize_exit(
+            "op-1", authorized_by="operator", scope="approval",
+            authorization="test-ceremony", approve=True,
+        )
+        assert result["exited"] is False
+        assert "HoldRecord" in result["reason"]
 
     def test_registry_issued_capability_is_immutable_bound_and_one_use(self):
         from tenir_governance.operations.registry import _TransitionEvidence
