@@ -210,7 +210,7 @@ class HoldManager:
         )
         if not success:
             current = self._registry.get(idempotency_key)
-            if current is not None:
+            if current is not None and current.state == OperationState.HOLD:
                 current.hold_record = old_hold_record
         return {
             "escalated": success,
@@ -295,7 +295,7 @@ class HoldManager:
         )
         if not success:
             current = self._registry.get(idempotency_key)
-            if current is not None:
+            if current is not None and current.state == OperationState.ESCALATED:
                 current.hold_record = old_hold_record
 
         return {
@@ -349,7 +349,7 @@ class HoldManager:
         )
         if not success:
             current = self._registry.get(idempotency_key)
-            if current is not None:
+            if current is not None and current.state == OperationState.HOLD:
                 current.hold_record = old_hold_record
         return {
             "expired": success,
@@ -399,7 +399,7 @@ class HoldManager:
         )
         if not success:
             current = self._registry.get(idempotency_key)
-            if current is not None:
+            if current is not None and current.state == OperationState.ESCALATED:
                 current.hold_record = old_hold_record
         return {
             "expired": success,
