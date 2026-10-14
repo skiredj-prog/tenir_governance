@@ -39,6 +39,7 @@ over TENIR doctrine.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -1093,30 +1094,48 @@ class DualKernelGovernor:
             composed_decision=composed_decision,
         )
 
-        # 6. State transitions from HOLD
+        # 6. Protected state transitions from HOLD. The capability is issued
+        # only after both kernels and the composition lattice have run above.
         hold_resolved = False
         if composed_decision in (Decision.PASS.value, Decision.FLAG.value):
-            success, _prev = self.registry.transition_to(idem_key, OperationState.RESERVED)
+            capability = self.registry._issue_transition_authorization(
+                idem_key, OperationState.HOLD, OperationState.RESERVED,
+                "READJUDICATION_ALLOW",
+                f"fresh Governor re-adjudication composed to {composed_decision}",
+            )
+            success, _prev = self.registry.transition_to(
+                idem_key, OperationState.RESERVED, authorization=capability,
+            )
             if success:
                 hold_resolved = True
                 if record := self.registry.get(idem_key):
                     if record.hold_record:
                         record.hold_record.exit_reason = "resolved"
             else:
-                # Transition failed — stay in HOLD
                 composed_decision = Decision.HOLD.value
                 composed_rationale = "Re-adjudication produced PASS/FLAG but RESERVED transition failed — staying in HOLD."
         elif composed_decision == Decision.HARD_VETO.value:
-            self.registry.transition_to(idem_key, OperationState.FAILED)
-            hold_resolved = True  # Resolved (as denied)
-            if resource_id and amount > 0:
+            capability = self.registry._issue_transition_authorization(
+                idem_key, OperationState.HOLD, OperationState.FAILED,
+                "READJUDICATION_DENY",
+                "fresh Governor re-adjudication composed to HARD_VETO",
+            )
+            success, _prev = self.registry.transition_to(
+                idem_key, OperationState.FAILED, authorization=capability,
+            )
+            hold_resolved = success
+            if success and resource_id and amount > 0:
                 resource = self.membrane.state.resources.get(resource_id)
                 if resource:
                     with self.membrane.state.get_lock(resource_id):
                         resource.release(amount)
-            if record := self.registry.get(idem_key):
-                if record.hold_record:
-                    record.hold_record.exit_reason = "resolved_veto"
+            if success:
+                if record := self.registry.get(idem_key):
+                    if record.hold_record:
+                        record.hold_record.exit_reason = "resolved_veto"
+            else:
+                composed_decision = Decision.HOLD.value
+                composed_rationale = "Re-adjudication produced HARD_VETO but FAILED transition failed — staying in HOLD."
         elif composed_decision == Decision.HOLD.value:
             # Still HOLD — update the hold record's timestamp
             if record := self.registry.get(idem_key):
