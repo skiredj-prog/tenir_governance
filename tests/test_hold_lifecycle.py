@@ -870,24 +870,44 @@ class TestHoldStateTransitions:
         for source, target in protected:
             reg = DurableOperationRegistry()
             self._register(reg)
-            assert reg.transition_to("op-1", OperationState.HOLD)[0]
+            hm = HoldManager(reg)
+            assert hm.enter_hold("op-1", tau_k_seconds=300)["entered"]
             if source == OperationState.ESCALATED:
-                assert HoldManager(reg).escalate_hold("op-1")["escalated"]
+                assert hm.escalate_hold("op-1")["escalated"]
             assert not reg.transition_to("op-1", target)[0]
             assert reg.get("op-1").state == source
 
-    def test_registry_issued_capability_is_one_use_and_operation_bound(self):
+    def test_registry_issued_capability_is_immutable_bound_and_one_use(self):
+        from tenir_governance.operations.registry import _TransitionEvidence
         reg = DurableOperationRegistry()
         self._register(reg)
         self._register(reg, "op-2")
-        reg.transition_to("op-1", OperationState.HOLD)
+        hm = HoldManager(reg)
+        assert hm.enter_hold("op-1", tau_k_seconds=300)["entered"]
+        assert hm.enter_hold("op-2", tau_k_seconds=300)["entered"]
+        evidence = _TransitionEvidence(
+            "op-1", OperationState.HOLD, OperationState.ESCALATED,
+            "HOLD_ESCALATION", "test", ("validated test lifecycle",),
+        )
+        with pytest.raises(PermissionError):
+            reg._issue_transition_authorization(
+                "op-1", OperationState.HOLD, OperationState.ESCALATED,
+                "HOLD_ESCALATION", evidence, issuer=object(),
+            )
         token = reg._issue_transition_authorization(
             "op-1", OperationState.HOLD, OperationState.ESCALATED,
-            "HOLD_ESCALATION", "test lifecycle evidence",
+            "HOLD_ESCALATION", evidence, issuer=hm,
         )
+        with pytest.raises((AttributeError, TypeError)):
+            token.target = OperationState.FAILED
+        # op-2 is also at HOLD, so this reaches and fails capability binding.
         assert not reg.transition_to("op-2", OperationState.ESCALATED, authorization=token)[0]
+        # The target edge is legal from HOLD, but this token is bound to ESCALATED.
+        assert not reg.transition_to("op-1", OperationState.FAILED, authorization=token)[0]
         assert reg.transition_to("op-1", OperationState.ESCALATED, authorization=token)[0]
-        assert not reg.transition_to("op-1", OperationState.ESCALATED, authorization=token)[0]
+        assert token not in reg._issued_authorizations
+        # RESERVED is legal from ESCALATED, so rejection proves token consumption.
+        assert not reg.transition_to("op-1", OperationState.RESERVED, authorization=token)[0]
 
     def test_illegal_hold_to_dispatching(self):
         """Cannot skip RESERVED — HOLD → DISPATCHING is illegal."""
