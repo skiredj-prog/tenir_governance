@@ -1100,13 +1100,14 @@ class DualKernelGovernor:
         if composed_decision in (Decision.PASS.value, Decision.FLAG.value):
             current = self.registry.get(idem_key)
             old_hold_record = deepcopy(current.hold_record) if current else None
-            if current and current.hold_record:
-                current.hold_record.exit_reason = "resolved"
             capability = self.registry._issue_transition_authorization(
                 idem_key, OperationState.HOLD, OperationState.RESERVED,
                 "READJUDICATION_ALLOW",
                 f"fresh Governor re-adjudication composed to {composed_decision}",
             )
+            current = self.registry.get(idem_key)
+            if current and current.state == OperationState.HOLD and current.hold_record:
+                current.hold_record.exit_reason = "resolved"
             success, _prev = self.registry.transition_to(
                 idem_key, OperationState.RESERVED, authorization=capability,
             )
@@ -1121,13 +1122,14 @@ class DualKernelGovernor:
         elif composed_decision == Decision.HARD_VETO.value:
             current = self.registry.get(idem_key)
             old_hold_record = deepcopy(current.hold_record) if current else None
-            if current and current.hold_record:
-                current.hold_record.exit_reason = "resolved_veto"
             capability = self.registry._issue_transition_authorization(
                 idem_key, OperationState.HOLD, OperationState.FAILED,
                 "READJUDICATION_DENY",
                 "fresh Governor re-adjudication composed to HARD_VETO",
             )
+            current = self.registry.get(idem_key)
+            if current and current.state == OperationState.HOLD and current.hold_record:
+                current.hold_record.exit_reason = "resolved_veto"
             success, _prev = self.registry.transition_to(
                 idem_key, OperationState.FAILED, authorization=capability,
             )
