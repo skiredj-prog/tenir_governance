@@ -103,6 +103,22 @@ class TestHoldLifecycle:
         assert result["hold_record"]["tau_k_source"] == "on-call SLA P1"
         assert result["hold_record"]["hold_start"] != ""
 
+    def test_hold_manager_default_tau_k_is_one_hour_for_scenario(self):
+        """The demo default gives HOLD a meaningful one-hour expiry horizon."""
+        reg = DurableOperationRegistry()
+        rec = OperationRecord(
+            idempotency_key="op-hold-default-tau", passage_id="p1",
+            agent_id="alice", action_type="payment",
+        )
+        reg.register(rec)
+        hm = HoldManager(reg)
+
+        result = hm.enter_hold("op-hold-default-tau")
+
+        assert result["entered"] is True
+        assert result["hold_record"]["tau_k_seconds"] == 3600.0
+        assert result["hold_record"]["tau_k_source"] == "scenario default (1 hour)"
+
     def test_hold_manager_enter_hold_wrong_state(self):
         """enter_hold() fails if operation is not in CREATED state."""
         reg = DurableOperationRegistry()
