@@ -74,17 +74,16 @@ class HoldManager:
     def enter_hold(
         self,
         idempotency_key: str,
-        tau_k_seconds: float = 3600.0,
-        tau_k_source: str = "scenario default (1 hour)",
+        tau_k_seconds: float = 0.0,
+        tau_k_source: str = "",
     ) -> dict[str, Any]:
         """Transition an operation from CREATED to HOLD.
 
         Creates a HoldRecord with the temporal validity bound τ_K.
 
-        Scenario default: τ_K = 3600 seconds (1 hour), so the demonstration
-        has a meaningful expiry horizon. Production deployments should pass
-        an organization-owned SLA explicitly; this demo default is not a
-        normative or universal timeout.
+        No generic τ_K default is imposed. Scenario callers may explicitly
+        pass 3600 seconds (1 hour) for a meaningful demonstration horizon.
+        Production callers should pass an organization-owned SLA explicitly.
 
         Returns a dict with:
             - entered: bool (whether the transition succeeded)
