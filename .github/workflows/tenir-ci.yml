@@ -207,6 +207,26 @@ jobs:
           "
 
 
+
+  # ── S1.3: Protected lifecycle transitions ────────────────────────────────────
+  protected-transition-tests:
+    name: "S1.3 — Protected Transition Lifecycle Tests"
+    runs-on: ubuntu-latest
+    needs: policy-gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dependencies
+        run: |
+          pip install -e . --quiet
+          pip install pytest --quiet
+      - name: Test protected HOLD/ESCALATED transitions and recovery
+        run: |
+          pytest tests/test_hold_lifecycle.py tests/test_fault_injection.py \
+            tests/test_cross_process.py -v --tb=short
+
   # ── Final: all gates must be green ────────────────────────────────────────────
   all-clear:
     name: "TENIR CI — All Gates Clear"
@@ -218,6 +238,7 @@ jobs:
       - r5-suite
       - r4-suite
       - nomenclature-check
+      - protected-transition-tests
     steps:
       - name: Summary
         run: |
