@@ -518,7 +518,7 @@ class TestGovernorHoldLifecycle:
         assert result["operation_state"] == OperationState.RESERVED.value
 
     def test_governor_expire_hold(self):
-        """Governor.expire_hold() transitions HOLD → FAILED (fail-closed)."""
+        """Governor.expire_hold() transitions HOLD → FAILED after configured τ_K."""
         gov, state = _setup_governor()
         from tenir_governance.operations import OperationRecord
         rec = OperationRecord(
@@ -526,7 +526,8 @@ class TestGovernorHoldLifecycle:
             agent_id="alice", action_type="payment",
         )
         gov.registry.register(rec)
-        gov.hold_manager.enter_hold("op-hold-test-4", tau_k_seconds=300)
+        # Tiny explicit test bound: expiry must be real, not bypassed by the caller.
+        gov.hold_manager.enter_hold("op-hold-test-4", tau_k_seconds=0.000001)
         result = gov.expire_hold("op-hold-test-4")
         assert result["expired"] is True
         assert result["operation_state"] == OperationState.FAILED.value
