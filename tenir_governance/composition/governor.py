@@ -474,10 +474,21 @@ class DualKernelGovernor:
                     with self.membrane.state.get_lock(resource_id):
                         resource.release(amount)
         elif composed_decision == Decision.HOLD.value:
-            # Transition to HOLD state — a governed lifecycle state, not
-            # just a decision verdict. Per doctrine v7.1: HOLD is a first-class
-            # protocol state — a designed suspension of agency under pressure.
-            self.registry.transition_to(idem_key, OperationState.HOLD)
+            # Enter through HoldManager so the lifecycle record is initialized.
+            # τ_K remains unset unless supplied from an organization-owned SLA.
+            hold_entry = self.hold_manager.enter_hold(idem_key)
+            if not hold_entry["entered"]:
+                composed_rationale = (
+                    "HOLD decision could not initialize the lifecycle record: "
+                    + hold_entry["reason"]
+                )
+                self.ledger.append(
+                    kernel="hold_lifecycle",
+                    decision=Decision.HOLD.value,
+                    rationale=composed_rationale,
+                    passage_id=passage.passage_id,
+                    idempotency_key=idem_key,
+                )
 
         return {
             "passage_id": passage.passage_id,
