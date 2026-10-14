@@ -81,9 +81,9 @@ class HoldManager:
 
         Creates a HoldRecord with the temporal validity bound τ_K.
 
-        Per Blueprint v4.4 §0.5: τ_K is the time the organization needs to
-        understand a situation and exercise its right of veto. It is derived
-        from existing organizational SLAs, not invented.
+        No generic τ_K default is imposed. Scenario callers may explicitly
+        pass 3600 seconds (1 hour) for a meaningful demonstration horizon.
+        Production callers should pass an organization-owned SLA explicitly.
 
         Returns a dict with:
             - entered: bool (whether the transition succeeded)
@@ -134,38 +134,36 @@ class HoldManager:
         }
 
     def resolve_hold(self, idempotency_key: str) -> dict[str, Any]:
-        """Transition HOLD → RESERVED.
+        """Reject direct HOLD resolution outside the governor's re-adjudication path.
 
-        Per doctrine: evidence became sufficient → re-adjudicate → PASS/FLAG.
-        The caller is responsible for re-running the governor's adjudicate()
-        with the new evidence BEFORE calling this method. This method only
-        transitions the state.
-
-        Returns a dict with:
-            - resolved: bool
-            - operation_state: str
-            - reason: str
+        A HoldManager-only call cannot prove that fresh scoring and membrane
+        adjudication produced PASS or FLAG. Call Governor.resolve_hold() with
+        the passage and updated evidence instead.
         """
         record = self._registry.get(idempotency_key)
         if record is None:
-            return {"resolved": False, "operation_state": None,
-                    "reason": f"Operation '{idempotency_key}' not found."}
+            return {
+                "resolved": False,
+                "operation_state": None,
+                "reason": f"Operation '{idempotency_key}' not found.",
+            }
 
+        state = record.state.value
         if record.state != OperationState.HOLD:
-            return {"resolved": False, "operation_state": record.state.value,
-                    "reason": f"Operation is in state {record.state.value}, not HOLD."}
+            return {
+                "resolved": False,
+                "operation_state": state,
+                "reason": f"Operation is in state {state}, not HOLD.",
+            }
 
-        if record.hold_record:
-            record.hold_record.exit_reason = "resolved"
-
-        success, _prev = self._registry.transition_to(
-            idempotency_key, OperationState.RESERVED,
-        )
         return {
-            "resolved": success,
-            "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
-            "reason": "Evidence sufficient — HOLD resolved to RESERVED." if success
-                      else "Transition HOLD → RESERVED failed.",
+            "resolved": False,
+            "operation_state": state,
+            "reason": (
+                "Direct HoldManager resolution is disabled. Use "
+                "Governor.resolve_hold() with a passage and updated evidence "
+                "so fresh adjudication is enforced."
+            ),
         }
 
     def escalate_hold(

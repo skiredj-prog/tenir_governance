@@ -50,22 +50,27 @@ def _setup_governor(budget_capacity=100.0, policy=None, registry=None):
 class TestHoldLifecycle:
     """Test the HOLD lifecycle: enter → resolve/escalate/expire."""
 
-    def test_adjudicate_hold_transitions_to_hold_state(self):
-        """When adjudicate() returns HOLD, the operation enters HOLD state."""
-        gov, state = _setup_governor()
-        # Create a passage that will produce HOLD (high pressure, low capacity)
+    def test_adjudicate_hold_initializes_lifecycle_record(self):
+        """A fail-closed HOLD decision must enter through HoldManager."""
+        gov, _state = _setup_governor()
+
+        class BrokenScoring:
+            def adjudicate(self, **kwargs):
+                raise RuntimeError("simulated scoring failure")
+
+        gov.scoring = BrokenScoring()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = gov.adjudicate(
-            p, pressure=0.95, velocity=0.95, capacity=0.1,
+            p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
-        # With extreme pressure, the scoring kernel should produce HARD_VETO
-        # Let's use parameters that produce HOLD instead
-        # HOLD comes from compose() when one kernel is HOLD or None
-        # We need to engineer a HOLD scenario
-        assert result["composed_decision"] in (
-            Decision.HOLD.value, Decision.HARD_VETO.value, Decision.FLAG.value
-        )
+
+        assert result["composed_decision"] == Decision.HOLD.value
+        assert result["operation_state"] == OperationState.HOLD.value
+        record = gov.registry.get(p.idempotency_key)
+        assert record is not None
+        assert record.hold_record is not None
+        assert record.hold_record.hold_start
 
     def test_hold_state_in_registry(self):
         """An operation in HOLD state is visible in the registry."""
@@ -98,6 +103,40 @@ class TestHoldLifecycle:
         assert result["hold_record"]["tau_k_source"] == "on-call SLA P1"
         assert result["hold_record"]["hold_start"] != ""
 
+    def test_hold_manager_scenario_tau_k_is_one_hour_when_explicit(self):
+        """Scenario callers can explicitly set a meaningful one-hour horizon."""
+        reg = DurableOperationRegistry()
+        rec = OperationRecord(
+            idempotency_key="op-hold-default-tau", passage_id="p1",
+            agent_id="alice", action_type="payment",
+        )
+        reg.register(rec)
+        hm = HoldManager(reg)
+
+        result = hm.enter_hold(
+            "op-hold-default-tau",
+            tau_k_seconds=3600.0,
+            tau_k_source="scenario default (1 hour)",
+        )
+
+        assert result["entered"] is True
+        assert result["hold_record"]["tau_k_seconds"] == 3600.0
+        assert result["hold_record"]["tau_k_source"] == "scenario default (1 hour)"
+
+    def test_hold_manager_generic_tau_k_is_unset_by_default(self):
+        """Generic lifecycle entry must not invent an organization SLA."""
+        reg = DurableOperationRegistry()
+        rec = OperationRecord(
+            idempotency_key="op-hold-no-default-tau", passage_id="p1",
+            agent_id="alice", action_type="payment",
+        )
+        reg.register(rec)
+        result = HoldManager(reg).enter_hold("op-hold-no-default-tau")
+
+        assert result["entered"] is True
+        assert result["hold_record"]["tau_k_seconds"] == 0.0
+        assert result["hold_record"]["tau_k_source"] == ""
+
     def test_hold_manager_enter_hold_wrong_state(self):
         """enter_hold() fails if operation is not in CREATED state."""
         reg = DurableOperationRegistry()
@@ -120,8 +159,8 @@ class TestHoldLifecycle:
         assert result["entered"] is False
         assert "not found" in result["reason"]
 
-    def test_hold_manager_resolve_hold(self):
-        """HoldManager.resolve_hold() transitions HOLD → RESERVED."""
+    def test_hold_manager_direct_resolution_is_rejected(self):
+        """HoldManager alone must not bypass fresh governor re-adjudication."""
         reg = DurableOperationRegistry()
         rec = OperationRecord(
             idempotency_key="op-hold-3", passage_id="p1",
@@ -130,12 +169,15 @@ class TestHoldLifecycle:
         reg.register(rec)
         hm = HoldManager(reg)
         hm.enter_hold("op-hold-3", tau_k_seconds=300)
+
         result = hm.resolve_hold("op-hold-3")
-        assert result["resolved"] is True
-        assert result["operation_state"] == OperationState.RESERVED.value
-        # Check hold record exit reason
+
+        assert result["resolved"] is False
+        assert result["operation_state"] == OperationState.HOLD.value
+        assert "Governor.resolve_hold()" in result["reason"]
         record = reg.get("op-hold-3")
-        assert record.hold_record.exit_reason == "resolved"
+        assert record.state == OperationState.HOLD
+        assert record.hold_record.exit_reason == ""
 
     def test_hold_manager_resolve_hold_wrong_state(self):
         """resolve_hold() fails if operation is not in HOLD state."""
@@ -348,7 +390,7 @@ class TestTauKExpiry:
         )
         reg.register(rec)
         hm = HoldManager(reg)
-        hm.enter_hold("op-tau-3")  # No tau_k_seconds
+        hm.enter_hold("op-tau-3", tau_k_seconds=0.0, tau_k_source="explicitly unbounded test")
         result = hm.check_tau_k_expiry("op-tau-3")
         assert result["expired"] is False
         assert "No τ_K bound set" in result["reason"]
@@ -922,18 +964,16 @@ class TestHoldPersistence:
         hm = HoldManager(reg1)
         hm.enter_hold("op-persist-1", tau_k_seconds=300, tau_k_source="on-call SLA")
 
-        # Resolve the hold (transitions HOLD → RESERVED, persists hold_record)
-        hm.resolve_hold("op-persist-1")
-
-        # Restart with new registry
+        # Restart while still held: persistence must not depend on bypassing
+        # the governor's fresh re-adjudication path.
         reg2 = DurableOperationRegistry(store_path=store)
         loaded = reg2.get("op-persist-1")
         assert loaded is not None
-        assert loaded.state == OperationState.RESERVED
+        assert loaded.state == OperationState.HOLD
         assert loaded.hold_record is not None
         assert loaded.hold_record.tau_k_seconds == 300
         assert loaded.hold_record.tau_k_source == "on-call SLA"
-        assert loaded.hold_record.exit_reason == "resolved"
+        assert loaded.hold_record.exit_reason == ""
 
     def test_exit_receipt_survives_restart(self, tmp_path):
         store = str(tmp_path / "operations.json")
