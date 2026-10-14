@@ -219,7 +219,7 @@ class TestHoldLifecycle:
         )
         reg.register(rec)
         hm = HoldManager(reg)
-        hm.enter_hold("op-hold-6", tau_k_seconds=300)
+        hm.enter_hold("op-hold-6", tau_k_seconds=0.000001)
         result = hm.expire_hold("op-hold-6")
         assert result["expired"] is True
         assert result["operation_state"] == OperationState.FAILED.value
@@ -239,7 +239,7 @@ class TestHoldLifecycle:
         )
         reg.register(rec)
         hm = HoldManager(reg)
-        hm.enter_hold("op-hold-7", tau_k_seconds=300)
+        hm.enter_hold("op-hold-7", tau_k_seconds=0.000001)
         hm.escalate_hold("op-hold-7")
         result = hm.expire_escalated("op-hold-7")
         assert result["expired"] is True
@@ -844,65 +844,49 @@ class TestCompositionHold:
 # ── State Machine Transition Tests ──────────────────────────────────
 
 class TestHoldStateTransitions:
-    """Test legal and illegal transitions involving HOLD and ESCALATED."""
+    """Protected edges require a registry-issued lifecycle capability."""
 
-    def test_created_to_hold(self):
-        reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
+    def _register(self, reg, key="op-1"):
+        rec = OperationRecord(idempotency_key=key, passage_id="p1",
                               agent_id="alice", action_type="payment")
         reg.register(rec)
+        return rec
+
+    def test_created_to_hold_remains_legal(self):
+        reg = DurableOperationRegistry()
+        self._register(reg)
         assert reg.transition_to("op-1", OperationState.HOLD)[0]
 
-    def test_hold_to_reserved(self):
-        reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
-                              agent_id="alice", action_type="payment")
-        reg.register(rec)
-        reg.transition_to("op-1", OperationState.HOLD)
-        assert reg.transition_to("op-1", OperationState.RESERVED)[0]
+    def test_all_protected_edges_reject_direct_calls(self):
+        protected = [
+            (OperationState.HOLD, OperationState.RESERVED),
+            (OperationState.HOLD, OperationState.FAILED),
+            (OperationState.HOLD, OperationState.ESCALATED),
+            (OperationState.ESCALATED, OperationState.RESERVED),
+            (OperationState.ESCALATED, OperationState.FAILED),
+            (OperationState.ESCALATED, OperationState.UNKNOWN),
+        ]
+        for source, target in protected:
+            reg = DurableOperationRegistry()
+            self._register(reg)
+            assert reg.transition_to("op-1", OperationState.HOLD)[0]
+            if source == OperationState.ESCALATED:
+                assert HoldManager(reg).escalate_hold("op-1")["escalated"]
+            assert not reg.transition_to("op-1", target)[0]
+            assert reg.get("op-1").state == source
 
-    def test_hold_to_failed(self):
+    def test_registry_issued_capability_is_one_use_and_operation_bound(self):
         reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
-                              agent_id="alice", action_type="payment")
-        reg.register(rec)
+        self._register(reg)
+        self._register(reg, "op-2")
         reg.transition_to("op-1", OperationState.HOLD)
-        assert reg.transition_to("op-1", OperationState.FAILED)[0]
-
-    def test_hold_to_escalated(self):
-        reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
-                              agent_id="alice", action_type="payment")
-        reg.register(rec)
-        reg.transition_to("op-1", OperationState.HOLD)
-        assert reg.transition_to("op-1", OperationState.ESCALATED)[0]
-
-    def test_escalated_to_reserved(self):
-        reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
-                              agent_id="alice", action_type="payment")
-        reg.register(rec)
-        reg.transition_to("op-1", OperationState.HOLD)
-        reg.transition_to("op-1", OperationState.ESCALATED)
-        assert reg.transition_to("op-1", OperationState.RESERVED)[0]
-
-    def test_escalated_to_failed(self):
-        reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
-                              agent_id="alice", action_type="payment")
-        reg.register(rec)
-        reg.transition_to("op-1", OperationState.HOLD)
-        reg.transition_to("op-1", OperationState.ESCALATED)
-        assert reg.transition_to("op-1", OperationState.FAILED)[0]
-
-    def test_escalated_to_unknown(self):
-        reg = DurableOperationRegistry()
-        rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
-                              agent_id="alice", action_type="payment")
-        reg.register(rec)
-        reg.transition_to("op-1", OperationState.HOLD)
-        reg.transition_to("op-1", OperationState.ESCALATED)
-        assert reg.transition_to("op-1", OperationState.UNKNOWN)[0]
+        token = reg._issue_transition_authorization(
+            "op-1", OperationState.HOLD, OperationState.ESCALATED,
+            "HOLD_ESCALATION", "test lifecycle evidence",
+        )
+        assert not reg.transition_to("op-2", OperationState.ESCALATED, authorization=token)[0]
+        assert reg.transition_to("op-1", OperationState.ESCALATED, authorization=token)[0]
+        assert not reg.transition_to("op-1", OperationState.ESCALATED, authorization=token)[0]
 
     def test_illegal_hold_to_dispatching(self):
         """Cannot skip RESERVED — HOLD → DISPATCHING is illegal."""
