@@ -658,6 +658,10 @@ class DurableOperationRegistry:
                     record.state = prev_state
                     record.dispatch_claimed_by = old_claimed_by
                     record.hold_record = old_hold_record
+                    if protected_classes is not None:
+                        # The issuing caller cannot reuse a token hidden inside a
+                        # failed lifecycle operation; revoke it to avoid leaks.
+                        self._issued_authorizations.pop(authorization, None)
                     if persisted_state not in (None, prev_state):
                         self._corrupted = True
                         raise RuntimeError("Registry persistence outcome is indeterminate; registry marked corrupted")
