@@ -198,6 +198,12 @@ class HoldManager:
         if record.hold_record is None:
             return {"escalated": False, "operation_state": record.state.value,
                     "reason": "Cannot escalate without an initialized HoldRecord."}
+        if not isinstance(escalated_by, str):
+            return {
+                "escalated": False,
+                "operation_state": record.state.value,
+                "reason": "Escalation metadata escalated_by must be a string.",
+            }
 
         auth_class = "HOLD_ESCALATION"
         evidence = _TransitionEvidence(
