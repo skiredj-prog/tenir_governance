@@ -175,9 +175,9 @@ class HoldManager:
     ) -> dict[str, Any]:
         """Transition HOLD → ESCALATED.
 
-        Per v7.1 §19: ESCALATED is absorbing. It remains until an authorization
-        model defines who signs, under what scope, and with which receipt.
-        No automatic time-based exit.
+        Per v7.1 §19: ESCALATED has no time-based resolution. It remains
+        pending authorization; if τ_K expires, expire_escalated() transitions
+        it to UNKNOWN, not to a resolved or executable state.
 
         Per Blueprint v4.4: Escalate strategy = HOLD global + escalation
         to Risk Officer.
