@@ -74,16 +74,17 @@ class HoldManager:
     def enter_hold(
         self,
         idempotency_key: str,
-        tau_k_seconds: float = 0.0,
-        tau_k_source: str = "",
+        tau_k_seconds: float = 3600.0,
+        tau_k_source: str = "scenario default (1 hour)",
     ) -> dict[str, Any]:
         """Transition an operation from CREATED to HOLD.
 
         Creates a HoldRecord with the temporal validity bound τ_K.
 
-        Per Blueprint v4.4 §0.5: τ_K is the time the organization needs to
-        understand a situation and exercise its right of veto. It is derived
-        from existing organizational SLAs, not invented.
+        Scenario default: τ_K = 3600 seconds (1 hour), so the demonstration
+        has a meaningful expiry horizon. Production deployments should pass
+        an organization-owned SLA explicitly; this demo default is not a
+        normative or universal timeout.
 
         Returns a dict with:
             - entered: bool (whether the transition succeeded)
