@@ -476,13 +476,27 @@ class DualKernelGovernor:
                         with self.membrane.state.get_lock(resource_id):
                             resource.release(amount)
             else:
-                # A protected HOLD/ESCALATED exit cannot be taken through the
-                # ordinary admission path. Do not release resources or report a
-                # completed veto when the durable transition did not occur.
+                # The membrane may have reserved capacity during this attempt;
+                # release that reservation even when the durable state transition
+                # is rejected. A rejected transition must not leak capacity.
+                if resource_id and amount > 0:
+                    resource = self.membrane.state.resources.get(resource_id)
+                    if resource:
+                        with self.membrane.state.get_lock(resource_id):
+                            resource.release(amount)
+                # Do not report a completed veto when the durable transition failed.
                 composed_decision = Decision.HOLD.value
                 composed_rationale = (
                     "HARD_VETO produced, but FAILED transition was rejected; "
                     "protected lifecycle adjudication is required."
+                )
+                self.ledger.append(
+                    kernel="composed",
+                    decision=Decision.HOLD.value,
+                    rationale=composed_rationale,
+                    passage_id=passage.passage_id,
+                    idempotency_key=idem_key,
+                    composed_decision=Decision.HOLD.value,
                 )
         elif composed_decision == Decision.HOLD.value:
             # Enter through HoldManager so the lifecycle record is initialized.
@@ -1020,10 +1034,18 @@ class DualKernelGovernor:
                 "reason": reason,
             }
         if record.hold_record is None:
+            reason = "HOLD lifecycle record is missing; re-adjudication is rejected."
+            self.ledger.append(
+                kernel="hold_resolution",
+                decision=Decision.HOLD.value,
+                rationale=reason,
+                passage_id=passage.passage_id,
+                idempotency_key=idempotency_key,
+            )
             return {
                 "hold_resolved": False,
                 "operation_state": record.state.value,
-                "reason": "HOLD lifecycle record is missing; re-adjudication is rejected.",
+                "reason": reason,
             }
 
         result = self._re_adjudicate_hold(
@@ -1141,8 +1163,9 @@ class DualKernelGovernor:
                     idem_key, OperationState.RESERVED, authorization=capability,
                     hold_record_updates={"exit_reason": "resolved"},
                 )
-            except (RuntimeError, PermissionError, ValueError):
-                success = False
+            except (RuntimeError, PermissionError, ValueError, OSError):
+                current = self.registry.get(idem_key)
+                success = bool(current and current.state == OperationState.RESERVED)
             hold_resolved = success
             if not success:
                 transition_failed = True
@@ -1167,8 +1190,9 @@ class DualKernelGovernor:
                     idem_key, OperationState.FAILED, authorization=capability,
                     hold_record_updates={"exit_reason": "resolved_veto"},
                 )
-            except (RuntimeError, PermissionError, ValueError):
-                success = False
+            except (RuntimeError, PermissionError, ValueError, OSError):
+                current = self.registry.get(idem_key)
+                success = bool(current and current.state == OperationState.FAILED)
             hold_resolved = success
             if success and resource_id and amount > 0:
                 resource = self.membrane.state.resources.get(resource_id)
