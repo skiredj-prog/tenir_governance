@@ -1017,6 +1017,29 @@ class TestHoldPersistence:
         assert loaded.hold_record.tau_k_source == "on-call SLA"
         assert loaded.hold_record.exit_reason == ""
 
+    def test_failed_protected_persist_restores_state_and_hold_metadata(self):
+        reg = DurableOperationRegistry()
+        rec = OperationRecord(
+            idempotency_key="op-persist-fail", passage_id="p1",
+            agent_id="alice", action_type="payment",
+        )
+        reg.register(rec)
+        hm = HoldManager(reg)
+        assert hm.enter_hold("op-persist-fail", tau_k_seconds=300)["entered"]
+        before = reg.get("op-persist-fail").hold_record.to_dict()
+
+        def fail_before_commit():
+            raise OSError("simulated persistence failure")
+
+        reg._persist = fail_before_commit
+        with pytest.raises(OSError, match="simulated persistence failure"):
+            hm.escalate_hold("op-persist-fail")
+
+        current = reg.get("op-persist-fail")
+        assert current.state == OperationState.HOLD
+        assert current.hold_record.to_dict() == before
+        assert not reg._issued_authorizations
+
     def test_exit_receipt_survives_restart(self, tmp_path):
         store = str(tmp_path / "operations.json")
         reg1 = DurableOperationRegistry(store_path=store)
