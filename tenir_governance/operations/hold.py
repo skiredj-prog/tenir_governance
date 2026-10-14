@@ -224,7 +224,7 @@ class HoldManager:
         )
         return {
             "escalated": success,
-            "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
+            "operation_state": self._registry.get(idempotency_key).state.value if self._registry.get(idempotency_key) else None,
             "reason": "Hold escalated to Risk Officer — ESCALATED is absorbing." if success
                       else "Transition HOLD → ESCALATED failed.",
         }
@@ -328,7 +328,7 @@ class HoldManager:
 
         return {
             "exited": success,
-            "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
+            "operation_state": self._registry.get(idempotency_key).state.value if self._registry.get(idempotency_key) else None,
             "exit_receipt": receipt.to_dict() if success else None,
             "reason": f"Authorized exit ({'approved' if approve else 'denied'}) by {authorized_by}." if success
                       else f"Transition ESCALATED → {target_state.value} failed.",
@@ -389,7 +389,7 @@ class HoldManager:
         )
         return {
             "expired": success,
-            "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
+            "operation_state": self._registry.get(idempotency_key).state.value if self._registry.get(idempotency_key) else None,
             "reason": "τ_K exhausted — FAIL-CLOSED rejection (not a resolution)." if success
                       else "Transition HOLD → FAILED failed.",
         }
@@ -447,7 +447,7 @@ class HoldManager:
         )
         return {
             "expired": success,
-            "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
+            "operation_state": self._registry.get(idempotency_key).state.value if self._registry.get(idempotency_key) else None,
             "reason": "τ_K expired on ESCALATED — UNKNOWN (time-based exit rejected, needs human)." if success
                       else "Transition ESCALATED → UNKNOWN failed.",
         }
