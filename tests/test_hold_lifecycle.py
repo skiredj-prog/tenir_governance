@@ -930,18 +930,16 @@ class TestHoldPersistence:
         hm = HoldManager(reg1)
         hm.enter_hold("op-persist-1", tau_k_seconds=300, tau_k_source="on-call SLA")
 
-        # Resolve the hold (transitions HOLD → RESERVED, persists hold_record)
-        hm.resolve_hold("op-persist-1")
-
-        # Restart with new registry
+        # Restart while still held: persistence must not depend on bypassing
+        # the governor's fresh re-adjudication path.
         reg2 = DurableOperationRegistry(store_path=store)
         loaded = reg2.get("op-persist-1")
         assert loaded is not None
-        assert loaded.state == OperationState.RESERVED
+        assert loaded.state == OperationState.HOLD
         assert loaded.hold_record is not None
         assert loaded.hold_record.tau_k_seconds == 300
         assert loaded.hold_record.tau_k_source == "on-call SLA"
-        assert loaded.hold_record.exit_reason == "resolved"
+        assert loaded.hold_record.exit_reason == ""
 
     def test_exit_receipt_survives_restart(self, tmp_path):
         store = str(tmp_path / "operations.json")
