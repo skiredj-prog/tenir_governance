@@ -538,7 +538,7 @@ class TestGovernorHoldLifecycle:
         result = gov.resolve_hold("op-hold-missing-record", passage=passage)
 
         assert result["hold_resolved"] is False
-        assert "HoldRecord is missing" in result["reason"]
+        assert "lifecycle record is missing" in result["reason"]
         assert any(
             entry.idempotency_key == "op-hold-missing-record"
             and entry.kernel == "hold_resolution"
