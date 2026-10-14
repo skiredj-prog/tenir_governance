@@ -1098,6 +1098,10 @@ class DualKernelGovernor:
         # only after both kernels and the composition lattice have run above.
         hold_resolved = False
         if composed_decision in (Decision.PASS.value, Decision.FLAG.value):
+            current = self.registry.get(idem_key)
+            old_hold_record = deepcopy(current.hold_record) if current else None
+            if current and current.hold_record:
+                current.hold_record.exit_reason = "resolved"
             capability = self.registry._issue_transition_authorization(
                 idem_key, OperationState.HOLD, OperationState.RESERVED,
                 "READJUDICATION_ALLOW",
@@ -1108,13 +1112,17 @@ class DualKernelGovernor:
             )
             if success:
                 hold_resolved = True
-                if record := self.registry.get(idem_key):
-                    if record.hold_record:
-                        record.hold_record.exit_reason = "resolved"
             else:
+                current = self.registry.get(idem_key)
+                if current:
+                    current.hold_record = old_hold_record
                 composed_decision = Decision.HOLD.value
                 composed_rationale = "Re-adjudication produced PASS/FLAG but RESERVED transition failed — staying in HOLD."
         elif composed_decision == Decision.HARD_VETO.value:
+            current = self.registry.get(idem_key)
+            old_hold_record = deepcopy(current.hold_record) if current else None
+            if current and current.hold_record:
+                current.hold_record.exit_reason = "resolved_veto"
             capability = self.registry._issue_transition_authorization(
                 idem_key, OperationState.HOLD, OperationState.FAILED,
                 "READJUDICATION_DENY",
@@ -1129,11 +1137,10 @@ class DualKernelGovernor:
                 if resource:
                     with self.membrane.state.get_lock(resource_id):
                         resource.release(amount)
-            if success:
-                if record := self.registry.get(idem_key):
-                    if record.hold_record:
-                        record.hold_record.exit_reason = "resolved_veto"
-            else:
+            if not success:
+                current = self.registry.get(idem_key)
+                if current:
+                    current.hold_record = old_hold_record
                 composed_decision = Decision.HOLD.value
                 composed_rationale = "Re-adjudication produced HARD_VETO but FAILED transition failed — staying in HOLD."
         elif composed_decision == Decision.HOLD.value:
