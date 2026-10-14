@@ -103,8 +103,8 @@ class TestHoldLifecycle:
         assert result["hold_record"]["tau_k_source"] == "on-call SLA P1"
         assert result["hold_record"]["hold_start"] != ""
 
-    def test_hold_manager_default_tau_k_is_one_hour_for_scenario(self):
-        """The demo default gives HOLD a meaningful one-hour expiry horizon."""
+    def test_hold_manager_scenario_tau_k_is_one_hour_when_explicit(self):
+        """Scenario callers can explicitly set a meaningful one-hour horizon."""
         reg = DurableOperationRegistry()
         rec = OperationRecord(
             idempotency_key="op-hold-default-tau", passage_id="p1",
@@ -113,11 +113,29 @@ class TestHoldLifecycle:
         reg.register(rec)
         hm = HoldManager(reg)
 
-        result = hm.enter_hold("op-hold-default-tau")
+        result = hm.enter_hold(
+            "op-hold-default-tau",
+            tau_k_seconds=3600.0,
+            tau_k_source="scenario default (1 hour)",
+        )
 
         assert result["entered"] is True
         assert result["hold_record"]["tau_k_seconds"] == 3600.0
         assert result["hold_record"]["tau_k_source"] == "scenario default (1 hour)"
+
+    def test_hold_manager_generic_tau_k_is_unset_by_default(self):
+        """Generic lifecycle entry must not invent an organization SLA."""
+        reg = DurableOperationRegistry()
+        rec = OperationRecord(
+            idempotency_key="op-hold-no-default-tau", passage_id="p1",
+            agent_id="alice", action_type="payment",
+        )
+        reg.register(rec)
+        result = HoldManager(reg).enter_hold("op-hold-no-default-tau")
+
+        assert result["entered"] is True
+        assert result["hold_record"]["tau_k_seconds"] == 0.0
+        assert result["hold_record"]["tau_k_source"] == ""
 
     def test_hold_manager_enter_hold_wrong_state(self):
         """enter_hold() fails if operation is not in CREATED state."""
