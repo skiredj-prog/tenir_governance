@@ -72,6 +72,31 @@ class TestHoldLifecycle:
         assert record.hold_record is not None
         assert record.hold_record.hold_start
 
+    def test_failed_hard_veto_transition_does_not_release_another_passage_reservation(self):
+        """A membrane-released reservation must not be subtracted twice."""
+        gov, state = _setup_governor()
+        resource = state.resources["budget"]
+        assert resource.reserve(30.0) is True  # another passage owns this reservation
+        gov.membrane.lock_quarantine(locked_by="test")
+
+        original_transition_to = gov.registry.transition_to
+        def reject_failed_transition(key, target, *args, **kwargs):
+            if target == OperationState.FAILED:
+                return False, None
+            return original_transition_to(key, target, *args, **kwargs)
+        gov.registry.transition_to = reject_failed_transition
+
+        passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        result = gov.adjudicate(
+            passage, pressure=0.2, velocity=0.3, capacity=1.0,
+            resource_id="budget", amount=10.0,
+        )
+
+        assert result["composed_decision"] == Decision.HOLD.value
+        # Membrane reserves 10 for this attempt and releases those 10 on its
+        # HARD_VETO. The failed registry transition must not release them again.
+        assert resource.reserved == 30.0
+
     def test_hold_state_in_registry(self):
         """An operation in HOLD state is visible in the registry."""
         gov, state = _setup_governor()
