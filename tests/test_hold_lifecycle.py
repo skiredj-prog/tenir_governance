@@ -506,6 +506,45 @@ class TestGovernorHoldLifecycle:
             for entry in gov.ledger.entries
         )
 
+    def test_governor_rejects_non_string_escalated_by(self):
+        gov, _state = _setup_governor()
+        from tenir_governance.operations import OperationRecord
+        rec = OperationRecord(
+            idempotency_key="op-hold-invalid-escalator", passage_id="p-test",
+            agent_id="alice", action_type="payment",
+        )
+        gov.registry.register(rec)
+        gov.hold_manager.enter_hold("op-hold-invalid-escalator", tau_k_seconds=300)
+
+        result = gov.escalate_hold("op-hold-invalid-escalator", escalated_by=object())
+
+        assert result["escalated"] is False
+        assert "must be a string" in result["reason"]
+        assert gov.registry.get("op-hold-invalid-escalator").state == OperationState.HOLD
+
+    def test_governor_rejects_missing_hold_record_with_audit_entry(self):
+        gov, _state = _setup_governor()
+        from tenir_governance.operations import OperationRecord
+        rec = OperationRecord(
+            idempotency_key="op-hold-missing-record", passage_id="p-missing",
+            agent_id="alice", action_type="payment",
+        )
+        gov.registry.register(rec)
+        gov.hold_manager.enter_hold("op-hold-missing-record", tau_k_seconds=300)
+        gov.registry.get("op-hold-missing-record").hold_record = None
+        passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        passage.idempotency_key = "op-hold-missing-record"
+
+        result = gov.resolve_hold("op-hold-missing-record", passage=passage)
+
+        assert result["hold_resolved"] is False
+        assert "HoldRecord is missing" in result["reason"]
+        assert any(
+            entry.idempotency_key == "op-hold-missing-record"
+            and entry.kernel == "hold_resolution"
+            for entry in gov.ledger.entries
+        )
+
     def test_governor_escalate_hold(self):
         """Governor.escalate_hold() transitions HOLD → ESCALATED."""
         gov, state = _setup_governor()
