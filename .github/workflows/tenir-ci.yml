@@ -255,5 +255,7 @@ jobs:
           echo "  Gate 3: R5 suite              56 cases"
           echo "  Gate 4: R4 monitor suite      61 cases"
           echo "  Gate 5: Nomenclature          aligned"
-          echo "  Total:                       445 tests"
+          echo "  Gate S1.3: Protected lifecycle (see pytest summary)"
+          echo "  Existing gate subtotal:      445 tests"
+          echo "  S1.3 test count:              reported by pytest"
           echo "================================================"
