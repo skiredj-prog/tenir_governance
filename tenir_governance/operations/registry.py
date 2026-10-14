@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from copy import deepcopy
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Optional
@@ -122,25 +123,43 @@ _LEGAL_TRANSITIONS = {
 }
 
 
-# Authorization capabilities are registry-issued and validated by object identity.
-# They are process-local control-flow tokens, not identity/signature credentials.
+# Capabilities enforce trusted in-process lifecycle paths. They are not
+# operator identity credentials or cryptographic signatures.
 _AUTHORIZATION_SEAL = object()
 
 
+@dataclass(frozen=True, slots=True)
+class _TransitionEvidence:
+    """Typed evidence descriptor bound to one operation and one transition."""
+    key: str
+    source: OperationState
+    target: OperationState
+    authorization_class: str
+    kind: str
+    detail: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True, eq=False, init=False)
 class _TransitionAuthorization:
-    """Opaque, one-use capability for one protected lifecycle transition."""
-    __slots__ = ("key", "source", "target", "authorization_class", "evidence", "nonce", "_seal")
+    """Immutable, opaque, one-use capability for one protected transition."""
+    key: str
+    source: OperationState
+    target: OperationState
+    authorization_class: str
+    evidence: _TransitionEvidence
+    nonce: str
+    _seal: object
 
     def __init__(self, seal, key, source, target, authorization_class, evidence, nonce):
         if seal is not _AUTHORIZATION_SEAL:
             raise TypeError("Transition authorizations are issued by DurableOperationRegistry")
-        self.key = key
-        self.source = source
-        self.target = target
-        self.authorization_class = authorization_class
-        self.evidence = evidence
-        self.nonce = nonce
-        self._seal = seal
+        object.__setattr__(self, "key", key)
+        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "target", target)
+        object.__setattr__(self, "authorization_class", authorization_class)
+        object.__setattr__(self, "evidence", evidence)
+        object.__setattr__(self, "nonce", nonce)
+        object.__setattr__(self, "_seal", seal)
 
 
 _PROTECTED_TRANSITIONS = {
@@ -311,6 +330,7 @@ class DurableOperationRegistry:
         self._store_path = store_path
         self._corrupted = False
         self._issued_authorizations: dict[_TransitionAuthorization, None] = {}
+        self._lifecycle_issuers: set[object] = set()
         if store_path and os.path.exists(store_path):
             self._load()
 
@@ -454,27 +474,45 @@ class DurableOperationRegistry:
                 self._load()
             return self._records.get(idempotency_key)
 
+    def _register_lifecycle_issuer(self, issuer: object) -> None:
+        """Register a lifecycle manager allowed to request transition tokens."""
+        with self._lock:
+            self._lifecycle_issuers.add(issuer)
+
     def _issue_transition_authorization(
         self,
         idempotency_key: str,
         source: OperationState,
         target: OperationState,
         authorization_class: str,
-        evidence: str,
+        evidence: _TransitionEvidence,
+        *,
+        issuer: object,
     ) -> _TransitionAuthorization:
-        """Issue an opaque one-use token for an explicitly validated lifecycle path.
+        """Issue a capability only to a registered lifecycle manager.
 
-        Internal API for Governor/HoldManager only. This enforces path provenance;
-        it does not authenticate a human or verify a cryptographic signature.
+        This enforces trusted code-path provenance, not operator identity or
+        cryptographic authorization. Evidence is typed and bound to the exact
+        operation, source, target, and authorization class.
         """
         allowed = _PROTECTED_TRANSITIONS.get((source, target), set())
         if authorization_class not in allowed:
             raise ValueError("Authorization class is not valid for this protected transition")
-        if not evidence:
-            raise ValueError("Transition authorization requires lifecycle evidence")
+        if issuer not in self._lifecycle_issuers:
+            raise PermissionError("Transition capability issuer is not a registered lifecycle manager")
+        if not isinstance(evidence, _TransitionEvidence) or (
+            evidence.key != idempotency_key
+            or evidence.source != source
+            or evidence.target != target
+            or evidence.authorization_class != authorization_class
+            or not evidence.kind
+        ):
+            raise ValueError("Transition evidence is missing or bound to a different operation/edge")
         record = self.get(idempotency_key)
         if record is None or record.state != source:
             raise RuntimeError("Cannot authorize transition: operation is missing or source state is stale")
+        if record.hold_record is None:
+            raise RuntimeError("Cannot authorize protected transition without an initialized HoldRecord")
         token = _TransitionAuthorization(
             _AUTHORIZATION_SEAL, idempotency_key, source, target,
             authorization_class, evidence, uuid4().hex,
@@ -489,6 +527,7 @@ class DurableOperationRegistry:
         new_state: OperationState,
         claimed_by: str = "",
         authorization: _TransitionAuthorization | None = None,
+        hold_record_updates: dict[str, object] | None = None,
     ) -> tuple[bool, OperationState | None]:
         """Atomically transition an operation to a new state.
 
@@ -537,21 +576,31 @@ class DurableOperationRegistry:
 
                 prev_state = record.state
 
+                # Drop abandoned tokens whose source edge is no longer current.
+                for stale_token in list(self._issued_authorizations):
+                    if stale_token.key == idempotency_key and stale_token.source != record.state:
+                        self._issued_authorizations.pop(stale_token, None)
+
                 # Check legal transition
                 if new_state not in _LEGAL_TRANSITIONS.get(record.state, set()):
                     return False, prev_state
 
-                # Protected edges require a matching registry-issued capability.
+                # Protected edges require a matching, immutable capability.
                 protected_classes = _PROTECTED_TRANSITIONS.get((record.state, new_state))
                 if protected_classes is not None:
                     if (
-                        authorization is None
+                        not isinstance(authorization, _TransitionAuthorization)
                         or authorization not in self._issued_authorizations
                         or authorization.key != idempotency_key
                         or authorization.source != record.state
                         or authorization.target != new_state
                         or authorization.authorization_class not in protected_classes
                         or authorization._seal is not _AUTHORIZATION_SEAL
+                        or authorization.evidence.key != idempotency_key
+                        or authorization.evidence.source != record.state
+                        or authorization.evidence.target != new_state
+                        or authorization.evidence.authorization_class != authorization.authorization_class
+                        or record.hold_record is None
                     ):
                         return False, prev_state
 
@@ -563,19 +612,55 @@ class DurableOperationRegistry:
                         return False, prev_state  # already dispatched
 
                 old_claimed_by = record.dispatch_claimed_by
+                old_hold_record = deepcopy(record.hold_record)
+                if hold_record_updates:
+                    if record.hold_record is None:
+                        return False, prev_state
+                    allowed_hold_fields = set(HoldRecord.__dataclass_fields__)
+                    if any(name not in allowed_hold_fields for name in hold_record_updates):
+                        raise ValueError("Unknown HoldRecord update field")
+                    for name, value in hold_record_updates.items():
+                        setattr(record.hold_record, name, value)
                 record.state = new_state
                 if claimed_by:
                     record.dispatch_claimed_by = claimed_by
                 try:
                     self._persist()
                 except Exception:
+                    # os.rename() is the durable store's commit point. If a
+                    # later directory fsync raises, the new state may already
+                    # be visible on disk; inspect the persisted state and report
+                    # that outcome consistently instead of rolling back in-memory.
+                    persisted_state = None
+                    if self._store_path and os.path.exists(self._store_path):
+                        try:
+                            with open(self._store_path, "r") as store:
+                                persisted = json.load(store)
+                            raw = persisted.get(idempotency_key)
+                            if raw is not None:
+                                persisted_state = OperationState(raw["state"])
+                        except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
+                            persisted_state = None
+                    if persisted_state == new_state:
+                        if protected_classes is not None:
+                            self._issued_authorizations.pop(authorization, None)
+                        for token in list(self._issued_authorizations):
+                            if token.key == idempotency_key and token.source == prev_state:
+                                self._issued_authorizations.pop(token, None)
+                        return True, prev_state
                     record.state = prev_state
                     record.dispatch_claimed_by = old_claimed_by
+                    record.hold_record = old_hold_record
+                    if persisted_state not in (None, prev_state):
+                        self._corrupted = True
+                        raise RuntimeError("Registry persistence outcome is indeterminate; registry marked corrupted")
                     raise
                 if protected_classes is not None:
-                    # Consume only after durable persistence succeeds. The registry
-                    # lock and file lock cover validation, state change, and consume.
-                    del self._issued_authorizations[authorization]
+                    self._issued_authorizations.pop(authorization, None)
+                # Any other capability for this now-advanced source state is stale.
+                for token in list(self._issued_authorizations):
+                    if token.key == idempotency_key and token.source == prev_state:
+                        self._issued_authorizations.pop(token, None)
                 return True, prev_state
             finally:
                 if flock:
