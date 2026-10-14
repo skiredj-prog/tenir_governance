@@ -1115,7 +1115,7 @@ class DualKernelGovernor:
                 hold_resolved = True
             else:
                 current = self.registry.get(idem_key)
-                if current:
+                if current and current.state == OperationState.HOLD:
                     current.hold_record = old_hold_record
                 composed_decision = Decision.HOLD.value
                 composed_rationale = "Re-adjudication produced PASS/FLAG but RESERVED transition failed — staying in HOLD."
