@@ -356,7 +356,7 @@ class TestTauKExpiry:
         )
         reg.register(rec)
         hm = HoldManager(reg)
-        hm.enter_hold("op-tau-3")  # No tau_k_seconds
+        hm.enter_hold("op-tau-3", tau_k_seconds=0.0, tau_k_source="explicitly unbounded test")
         result = hm.check_tau_k_expiry("op-tau-3")
         assert result["expired"] is False
         assert "No τ_K bound set" in result["reason"]
