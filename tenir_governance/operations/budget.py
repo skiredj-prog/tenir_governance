@@ -1,133 +1,125 @@
-"""Budget coordination protocol — abstracts atomic reservation.
+"""Operation-scoped budget coordination.
 
-Per review 2 §1: a per-resource threading.Lock protects threads in one process,
-but does NOT coordinate multiple worker processes, containers, hosts, or
-external writers. This module abstracts the coordination mechanism behind a
-protocol so the in-process lock can be replaced with a transactional database,
-serializable transaction, or distributed coordination service without changing
-the membrane or composition layer.
-
-The protocol defines linearizability as the correctness concept: concurrent
-operations should behave as though they occurred in a valid sequential order.
+The in-process implementation serializes mutations per resource within one
+process. It is not durable and does not coordinate multiple processes/hosts.
+Use a transactional or distributed implementation for those deployments.
 """
-# Profile: agentic-governance-profile-v1.0.0
-# Compliance class: profile-bound
-# This module is an extension on top of KB3 and TENIR 2.0 schema 1.2.
-# It is NOT canonical, NOT doctrinal. It carries implementation-level
-# governance enforcement authority only.
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable
 class BudgetCoordinator(Protocol):
-    """Protocol for atomic budget coordination.
-
-    Implementations must guarantee that check-and-reserve is atomic: no two
-    concurrent callers can both reserve the same available budget.
-
-    The in-process implementation (InProcessBudgetCoordinator) uses
-    threading.Lock and is sufficient for single-process, multi-threaded
-    deployments. For multi-process or distributed deployments, replace with a
-    transactional database, serializable transaction, or distributed lock.
-    """
-
-    def reserve(self, resource_id: str, amount: float) -> bool:
-        """Atomically check available capacity and reserve if sufficient.
-
-        Returns True if the reservation succeeded, False if insufficient
-        capacity. Must be atomic: no race condition between check and reserve.
-        """
-        ...
-
-    def commit(self, resource_id: str, amount: float) -> bool:
-        """Move a reservation from reserved to consumed. Returns True on success."""
-        ...
-
-    def release(self, resource_id: str, amount: float) -> None:
-        """Release a reservation (passage blocked, failed, or cancelled)."""
-        ...
-
-    def get_utilization(self, resource_id: str) -> float | None:
-        """Get current utilization fraction (0.0–1.0), or None if unavailable.
-
-        Per review 2 §3: if the utilization measurement is missing, stale, or
-        inconsistent, the composition layer must treat it as indeterminate and
-        fail closed (HOLD), not silently proceed.
-        """
-        ...
+    def reserve(self, resource_id: str, amount: float, reservation_id: str | None = None) -> bool: ...
+    def commit(self, resource_id: str, amount: float, reservation_id: str | None = None) -> bool: ...
+    def release(self, resource_id: str, amount: float, reservation_id: str | None = None) -> bool: ...
+    def refund(self, resource_id: str, amount: float, reservation_id: str | None = None) -> bool: ...
+    def get_utilization(self, resource_id: str) -> float | None: ...
 
 
 class InProcessBudgetCoordinator:
-    """In-process budget coordination using threading.Lock.
-
-    LIMITATIONS (per review 2 §1):
-        - Only coordinates threads sharing the same lock object in one process.
-        - Does NOT coordinate multiple worker processes, containers, or hosts.
-        - Does NOT provide durability: budget state is lost on process crash.
-        - Does NOT provide linearizability across distributed deployments.
-
-    For production deployments, replace with:
-        - A transactional database with SELECT ... FOR UPDATE or equivalent.
-        - A serializable transaction spanning the check and reserve.
-        - A distributed coordination service (etcd, Zookeeper, Redis with
-          atomic operations).
-        - A single-writer sequencer process.
-    """
+    """Single-process, thread-safe coordinator with operation-scoped idempotency."""
 
     def __init__(self):
-        self._resources: dict[str, any] = {}
-        self._locks: dict[str, threading.Lock] = {}
+        self._resources: dict[str, object] = {}
+        self._locks: dict[str, threading.RLock] = {}
+        self._locks_guard = threading.Lock()
+        self._reservations: dict[tuple[str, str], float] = {}
+        self._committed: dict[tuple[str, str], float] = {}
+
+    def _lock_for(self, resource_id: str) -> threading.RLock:
+        with self._locks_guard:
+            lock = self._locks.get(resource_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._locks[resource_id] = lock
+            return lock
 
     def register(self, resource) -> None:
-        """Register a Resource object with this coordinator."""
-        self._resources[resource.resource_id] = resource
-        self._locks[resource.resource_id] = threading.Lock()
+        """Register the shared Resource object; preserve an existing lock."""
+        with self._lock_for(resource.resource_id):
+            self._resources[resource.resource_id] = resource
 
     def get_resource(self, resource_id: str):
         return self._resources.get(resource_id)
 
-    def get_lock(self, resource_id: str) -> threading.Lock:
-        if resource_id not in self._locks:
-            self._locks[resource_id] = threading.Lock()
-        return self._locks[resource_id]
-
-    def reserve(self, resource_id: str, amount: float) -> bool:
+    def reserve(self, resource_id: str, amount: float, reservation_id: str | None = None) -> bool:
         resource = self._resources.get(resource_id)
-        if resource is None:
+        if resource is None or amount <= 0:
             return False
-        with self._locks[resource_id]:
-            if resource.available >= amount:
-                resource.reserved += amount
-                return True
-            return False
+        with self._lock_for(resource_id):
+            if reservation_id is not None:
+                key = (resource_id, reservation_id)
+                if key in self._reservations:
+                    return self._reservations[key] == amount
+                if key in self._committed:
+                    return self._committed[key] == amount
+            if resource.available < amount:
+                return False
+            if not resource.reserve(amount):
+                return False
+            if reservation_id is not None:
+                self._reservations[(resource_id, reservation_id)] = amount
+            return True
 
-    def commit(self, resource_id: str, amount: float) -> bool:
+    def commit(self, resource_id: str, amount: float, reservation_id: str | None = None) -> bool:
         resource = self._resources.get(resource_id)
-        if resource is None:
+        if resource is None or amount <= 0:
             return False
-        with self._locks[resource_id]:
-            if resource.reserved >= amount:
-                resource.reserved -= amount
-                resource.consumed += amount
-                return True
-            return False
+        with self._lock_for(resource_id):
+            if reservation_id is not None:
+                key = (resource_id, reservation_id)
+                if key in self._committed:
+                    return False
+                if self._reservations.get(key) != amount:
+                    return False
+            if not resource.commit(amount):
+                return False
+            if reservation_id is not None:
+                key = (resource_id, reservation_id)
+                self._reservations.pop(key, None)
+                self._committed[key] = amount
+            return True
 
-    def release(self, resource_id: str, amount: float) -> None:
+    def release(self, resource_id: str, amount: float, reservation_id: str | None = None) -> bool:
         resource = self._resources.get(resource_id)
-        if resource is None:
-            return
-        with self._locks[resource_id]:
-            resource.reserved = max(0.0, resource.reserved - amount)
+        if resource is None or amount <= 0:
+            return False
+        with self._lock_for(resource_id):
+            if reservation_id is not None:
+                key = (resource_id, reservation_id)
+                reserved = self._reservations.get(key)
+                if reserved is None or reserved != amount:
+                    return False
+                self._reservations.pop(key, None)
+            elif resource.reserved < amount:
+                return False
+            resource.release(amount)
+            return True
+
+    def refund(self, resource_id: str, amount: float, reservation_id: str | None = None) -> bool:
+        resource = self._resources.get(resource_id)
+        if resource is None or amount <= 0:
+            return False
+        with self._lock_for(resource_id):
+            if reservation_id is not None:
+                key = (resource_id, reservation_id)
+                committed = self._committed.get(key)
+                if committed is None or committed != amount:
+                    return False
+                self._committed.pop(key, None)
+            elif resource.consumed < amount:
+                return False
+            resource.refund(amount)
+            return True
 
     def get_utilization(self, resource_id: str) -> float | None:
         resource = self._resources.get(resource_id)
         if resource is None:
             return None
-        with self._locks[resource_id]:
+        with self._lock_for(resource_id):
             if resource.capacity <= 0:
-                return None  # indeterminate — fail closed
+                return None
             return (resource.consumed + resource.reserved) / resource.capacity
