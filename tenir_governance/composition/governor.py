@@ -301,7 +301,15 @@ class DualKernelGovernor:
         self.policy = policy or CompositionPolicy()
         self.policy.validate()
         self.registry = registry or DurableOperationRegistry()
-        self.budget_coordinator = budget_coordinator
+        self.budget_coordinator = (
+            budget_coordinator
+            or getattr(membrane_kernel, "budget_coordinator", None)
+            or InProcessBudgetCoordinator()
+        )
+        # The governor and membrane must share exactly one mutation authority.
+        for resource in self.membrane.state.resources.values():
+            self.budget_coordinator.register(resource)
+        self.membrane.budget_coordinator = self.budget_coordinator
         self.provider = provider
         self._worker_id = str(uuid4())
         self.hold_manager = HoldManager(self.registry)
@@ -394,8 +402,8 @@ class DualKernelGovernor:
         budget_utilization = None
         if resource_id and amount > 0:
             resource = self.membrane.state.resources.get(resource_id)
-            if resource and resource.capacity > 0:
-                budget_utilization = (resource.consumed + resource.reserved) / resource.capacity
+            if resource:
+                budget_utilization = self.budget_coordinator.get_utilization(resource_id)
 
         # 4. Compose using the decision lattice (fail-closed)
         budget_in_scope = resource_id is not None and amount > 0
@@ -439,7 +447,18 @@ class DualKernelGovernor:
         if composed_decision == Decision.PASS.value or composed_decision == Decision.FLAG.value:
             success, _prev = self.registry.transition_to(idem_key, OperationState.RESERVED)
             if not success:
-                # Transition failed — the operation cannot be reserved.
+                # A failed transition must not leak a newly-created reservation.
+                # Preserve the reservation only when the durable operation is
+                # already RESERVED (e.g. an idempotent repeated adjudication).
+                current = self.registry.get(idem_key)
+                if (
+                    current is None
+                    or current.state != OperationState.RESERVED
+                ):
+                    if resource_id and amount > 0:
+                        self.budget_coordinator.release(
+                            resource_id, amount, reservation_id=idem_key
+                        )
                 # This is an inconsistent state: the decision is PASS but
                 # the durable state does not confirm it. Return HOLD, not PASS.
                 self.ledger.append(
@@ -469,11 +488,17 @@ class DualKernelGovernor:
         elif composed_decision == Decision.HARD_VETO.value:
             self.registry.transition_to(idem_key, OperationState.FAILED)
             if resource_id and amount > 0:
-                resource = self.membrane.state.resources.get(resource_id)
-                if resource:
-                    with self.membrane.state.get_lock(resource_id):
-                        resource.release(amount)
+                self.budget_coordinator.release(
+                    resource_id, amount, reservation_id=idem_key
+                )
         elif composed_decision == Decision.HOLD.value:
+            # HOLD is not authorization to consume or retain budget. The
+            # membrane may have reserved during its local checks; release
+            # only this operation's reservation until a governed exit succeeds.
+            if resource_id and amount > 0:
+                self.budget_coordinator.release(
+                    resource_id, amount, reservation_id=idem_key
+                )
             # Enter through HoldManager so the lifecycle record is initialized.
             # Do not invent a τ_K here: this generic Governor has no
             # organization-owned SLA. Scenario callers pass their bound explicitly.
@@ -643,6 +668,27 @@ class DualKernelGovernor:
         if record is None:
             return {"dispatched": False, "reason": "Operation not registered."}
 
+        # The durable adjudication record is the source of truth. Reject
+        # conflicting caller arguments before changing state; omitted
+        # arguments are resolved from the record rather than skipping budget
+        # accounting.
+        if resource_id is not None and resource_id != (record.resource_id or None):
+            return {
+                "dispatched": False,
+                "idempotency_key": idempotency_key,
+                "operation_state": record.state.value,
+                "reason": "Dispatch resource does not match the durable operation record.",
+            }
+        if amount > 0 and amount != record.amount:
+            return {
+                "dispatched": False,
+                "idempotency_key": idempotency_key,
+                "operation_state": record.state.value,
+                "reason": "Dispatch amount does not match the durable operation record.",
+            }
+        resource_id = record.resource_id or None
+        amount = record.amount
+
         success, _prev = self.registry.transition_to(
             idempotency_key, OperationState.DISPATCHING,
             claimed_by=self._worker_id,
@@ -655,11 +701,24 @@ class DualKernelGovernor:
                 "operation_state": existing.state.value,
             }
 
+        # The reservation is operation-scoped. If it cannot be committed,
+        # fail closed and do not report a successful dispatch.
         if resource_id and amount > 0:
-            resource = self.membrane.state.resources.get(resource_id)
-            if resource:
-                with self.membrane.state.get_lock(resource_id):
-                    resource.commit(amount)
+            if not self.budget_coordinator.commit(
+                resource_id, amount, reservation_id=idempotency_key
+            ):
+                # No provider call has occurred yet, so this is a known
+                # non-dispatch failure rather than an UNKNOWN external outcome.
+                self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                self.budget_coordinator.release(
+                    resource_id, amount, reservation_id=idempotency_key
+                )
+                return {
+                    "dispatched": False,
+                    "idempotency_key": idempotency_key,
+                    "operation_state": OperationState.FAILED.value,
+                    "reason": "Budget reservation could not be committed; dispatch was not started.",
+                }
 
         return {
             "dispatched": True,
@@ -700,6 +759,11 @@ class DualKernelGovernor:
         record = self.registry.get(idempotency_key)
         if record is None:
             return dispatch_result
+
+        # Continue using the durable operation parameters for execution and
+        # any later refund/release, even when the caller omitted optional args.
+        resource_id = record.resource_id or None
+        amount = record.amount
 
         # 4. Call the provider
         from ..operations.provider import ProviderOutcome
@@ -832,10 +896,19 @@ class DualKernelGovernor:
         elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
             self.registry.transition_to(idempotency_key, OperationState.FAILED)
             if record.resource_id and record.amount > 0:
-                resource = self.membrane.state.resources.get(record.resource_id)
-                if resource:
-                    with self.membrane.state.get_lock(record.resource_id):
-                        resource.refund(record.amount)
+                refunded = self.budget_coordinator.refund(
+                    record.resource_id, record.amount,
+                    reservation_id=idempotency_key,
+                )
+                # Recovery may discover a crash after DISPATCHING was
+                # persisted but before the reservation was committed. If the
+                # provider confirms no effect, refund committed spend; if no
+                # commit exists, release the still-active reservation instead.
+                if not refunded:
+                    self.budget_coordinator.release(
+                        record.resource_id, record.amount,
+                        reservation_id=idempotency_key,
+                    )
             return {
                 "reconciled": True,
                 "idempotency_key": idempotency_key,
@@ -870,13 +943,14 @@ class DualKernelGovernor:
         success, prev_state = self.registry.transition_to(idempotency_key, OperationState.FAILED)
         if success and resource_id and amount > 0:
             was_dispatching = prev_state == OperationState.DISPATCHING
-            resource = self.membrane.state.resources.get(resource_id)
-            if resource:
-                with self.membrane.state.get_lock(resource_id):
-                    if was_dispatching:
-                        resource.refund(amount)
-                    else:
-                        resource.release(amount)
+            if was_dispatching:
+                self.budget_coordinator.refund(
+                    resource_id, amount, reservation_id=idempotency_key
+                )
+            else:
+                self.budget_coordinator.release(
+                    resource_id, amount, reservation_id=idempotency_key
+                )
         return success
 
     def mark_unknown(self, idempotency_key: str) -> bool:
@@ -1020,6 +1094,10 @@ class DualKernelGovernor:
         transitions HOLD → FAILED. If still HOLD, stays in HOLD.
         """
         idem_key = passage.idempotency_key
+        reservation_was_active = bool(
+            resource_id and amount > 0
+            and self.budget_coordinator.has_reservation(resource_id, idem_key)
+        )
 
         # 1. Scoring kernel — fail-closed
         scoring_result = None
@@ -1052,8 +1130,8 @@ class DualKernelGovernor:
         budget_utilization = None
         if resource_id and amount > 0:
             resource = self.membrane.state.resources.get(resource_id)
-            if resource and resource.capacity > 0:
-                budget_utilization = (resource.consumed + resource.reserved) / resource.capacity
+            if resource:
+                budget_utilization = self.budget_coordinator.get_utilization(resource_id)
 
         # 4. Compose
         budget_in_scope = resource_id is not None and amount > 0
@@ -1103,25 +1181,45 @@ class DualKernelGovernor:
                     if record.hold_record:
                         record.hold_record.exit_reason = "resolved"
             else:
-                # Transition failed — stay in HOLD
+                # A concurrent authorized transition may have won. Preserve
+                # its reservation if the durable record is already RESERVED;
+                # otherwise roll back only a reservation created by this
+                # failed re-adjudication.
+                current = self.registry.get(idem_key)
+                if (
+                    current is None
+                    or current.state != OperationState.RESERVED
+                ) and not reservation_was_active and resource_id and amount > 0:
+                    self.budget_coordinator.release(
+                        resource_id, amount, reservation_id=idem_key
+                    )
                 composed_decision = Decision.HOLD.value
-                composed_rationale = "Re-adjudication produced PASS/FLAG but RESERVED transition failed — staying in HOLD."
+                composed_rationale = "Re-adjudication produced PASS/FLAG but RESERVED transition failed — staying fail-closed."
         elif composed_decision == Decision.HARD_VETO.value:
-            self.registry.transition_to(idem_key, OperationState.FAILED)
-            hold_resolved = True  # Resolved (as denied)
-            if resource_id and amount > 0:
-                resource = self.membrane.state.resources.get(resource_id)
-                if resource:
-                    with self.membrane.state.get_lock(resource_id):
-                        resource.release(amount)
-            if record := self.registry.get(idem_key):
-                if record.hold_record:
-                    record.hold_record.exit_reason = "resolved_veto"
+            success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
+            if success:
+                hold_resolved = True  # Resolved (as denied)
+                if resource_id and amount > 0:
+                    self.budget_coordinator.release(
+                        resource_id, amount, reservation_id=idem_key
+                    )
+                if record := self.registry.get(idem_key):
+                    if record.hold_record:
+                        record.hold_record.exit_reason = "resolved_veto"
+            else:
+                # Do not release the operation's reservation if the durable
+                # denial transition lost a race to another lifecycle action.
+                composed_decision = Decision.HOLD.value
+                composed_rationale = "HARD_VETO could not commit HOLD → FAILED; no budget mutation applied."
         elif composed_decision == Decision.HOLD.value:
-            # Still HOLD — update the hold record's timestamp
+            # Still HOLD — it is not authorized to retain a budget reservation.
+            if resource_id and amount > 0:
+                self.budget_coordinator.release(
+                    resource_id, amount, reservation_id=idem_key
+                )
+            # Keep the original hold_start — τ_K continues counting
             if record := self.registry.get(idem_key):
                 if record.hold_record:
-                    # Keep the original hold_start — τ_K continues counting
                     pass
 
         return {
@@ -1182,18 +1280,32 @@ class DualKernelGovernor:
             reason: why the exit is being authorized
             approve: True → proceed (RESERVED); False → deny (FAILED)
         """
+        record = self.registry.get(idempotency_key)
+        reservation_acquired = False
+        reservation_was_active = False
+        if approve and record and record.resource_id and record.amount > 0:
+            reservation_was_active = self.budget_coordinator.has_reservation(
+                record.resource_id, idempotency_key
+            )
+            reservation_acquired = self.budget_coordinator.reserve(
+                record.resource_id, record.amount, reservation_id=idempotency_key
+            )
+            if not reservation_acquired:
+                return {
+                    "exited": False,
+                    "reason": "Budget reservation unavailable; ESCALATED state remains unchanged.",
+                }
         result = self.hold_manager.authorize_exit(
             idempotency_key, authorized_by, scope, authorization, reason, approve,
         )
-        # If approved and there's a resource to reserve, re-reserve it
-        if result.get("exited") and approve:
-            record = self.registry.get(idempotency_key)
-            if record and record.resource_id and record.amount > 0:
-                resource = self.membrane.state.resources.get(record.resource_id)
-                if resource:
-                    with self.membrane.state.get_lock(record.resource_id):
-                        if resource.available >= record.amount:
-                            resource.reserve(record.amount)
+        if (
+            reservation_acquired
+            and not reservation_was_active
+            and not result.get("exited")
+        ):
+            self.budget_coordinator.release(
+                record.resource_id, record.amount, reservation_id=idempotency_key
+            )
         return result
 
     def expire_hold(self, idempotency_key: str) -> dict[str, Any]:
@@ -1213,10 +1325,9 @@ class DualKernelGovernor:
 
         # Release any reserved budget
         if result.get("expired") and record.resource_id and record.amount > 0:
-            resource = self.membrane.state.resources.get(record.resource_id)
-            if resource:
-                with self.membrane.state.get_lock(record.resource_id):
-                    resource.release(record.amount)
+            self.budget_coordinator.release(
+                record.resource_id, record.amount, reservation_id=idempotency_key
+            )
 
         return result
 

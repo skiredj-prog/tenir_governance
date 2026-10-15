@@ -198,6 +198,52 @@ class TestDispatchAndExecute:
         assert result["dispatched"] is True
         assert result["operation_state"] == OperationState.DISPATCHING.value
 
+    def test_dispatch_uses_durable_amount_when_arguments_are_omitted(self):
+        """Omitted dispatch args must not bypass budget commit or provider amount."""
+        provider = MockProvider(behavior="confirmed")
+        gov, state = _setup_governor(provider=provider)
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        gov.adjudicate(p, pressure=0.2, velocity=0.2, capacity=0.9,
+                       resource_id="budget", amount=10.0)
+
+        result = gov.dispatch_and_execute(p.idempotency_key)
+
+        assert result["operation_state"] == OperationState.CONFIRMED.value
+        assert provider.calls[0]["amount"] == 10.0
+        assert state.resources["budget"].reserved == 0.0
+        assert state.resources["budget"].consumed == 10.0
+
+    def test_dispatch_rejects_conflicting_amount_without_changing_state(self):
+        """A caller cannot alter the amount authorized by durable adjudication."""
+        provider = MockProvider(behavior="confirmed")
+        gov, state = _setup_governor(provider=provider)
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        gov.adjudicate(p, pressure=0.2, velocity=0.2, capacity=0.9,
+                       resource_id="budget", amount=10.0)
+
+        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 20.0)
+
+        assert result["dispatched"] is False
+        assert "does not match" in result["reason"]
+        assert gov.registry.get(p.idempotency_key).state == OperationState.RESERVED
+        assert state.resources["budget"].reserved == 10.0
+        assert state.resources["budget"].consumed == 0.0
+        assert provider.calls == []
+
+    def test_failed_provider_refunds_durable_amount_when_args_omitted(self):
+        """Provider failure must refund the committed reservation using record data."""
+        provider = MockProvider(behavior="failed")
+        gov, state = _setup_governor(provider=provider)
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        gov.adjudicate(p, pressure=0.2, velocity=0.2, capacity=0.9,
+                       resource_id="budget", amount=10.0)
+
+        result = gov.dispatch_and_execute(p.idempotency_key)
+
+        assert result["operation_state"] == OperationState.FAILED.value
+        assert state.resources["budget"].reserved == 0.0
+        assert state.resources["budget"].consumed == 0.0
+
     def test_provider_exception_to_unknown(self):
         """Provider throws exception → UNKNOWN (fail-closed)."""
         provider = MockProvider()
@@ -268,6 +314,28 @@ class TestReconciliation:
         result = gov.reconcile_unknown(p.idempotency_key)
         assert result["reconciled"] is True
         assert result["operation_state"] == OperationState.FAILED.value
+
+    def test_reconcile_failed_releases_reservation_if_commit_was_interrupted(self):
+        """Crash recovery must clear a reservation if dispatch never committed it."""
+        provider = MockProvider(
+            behavior="timeout",
+            reconcile_outcome=ProviderOutcome.FAILED,
+        )
+        gov, state = _setup_governor(provider=provider)
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        gov.adjudicate(p, pressure=0.2, velocity=0.2, capacity=0.9,
+                       resource_id="budget", amount=10.0)
+
+        # Model a crash after the durable DISPATCHING transition but before
+        # the coordinator commits the operation's reservation.
+        gov.registry.transition_to(p.idempotency_key, OperationState.DISPATCHING)
+        gov.registry.transition_to(p.idempotency_key, OperationState.UNKNOWN)
+
+        result = gov.reconcile_unknown(p.idempotency_key)
+
+        assert result["operation_state"] == OperationState.FAILED.value
+        assert state.resources["budget"].reserved == 0.0
+        assert state.resources["budget"].consumed == 0.0
 
     def test_reconcile_still_unknown(self):
         """UNKNOWN → reconcile → still UNKNOWN (human review)."""
