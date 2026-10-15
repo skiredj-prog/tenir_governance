@@ -1087,6 +1087,10 @@ class DualKernelGovernor:
         transitions HOLD → FAILED. If still HOLD, stays in HOLD.
         """
         idem_key = passage.idempotency_key
+        reservation_was_active = bool(
+            resource_id and amount > 0
+            and self.budget_coordinator.has_reservation(resource_id, idem_key)
+        )
 
         # 1. Scoring kernel — fail-closed
         scoring_result = None
@@ -1170,19 +1174,36 @@ class DualKernelGovernor:
                     if record.hold_record:
                         record.hold_record.exit_reason = "resolved"
             else:
-                # Transition failed — stay in HOLD
+                # A concurrent authorized transition may have won. Preserve
+                # its reservation if the durable record is already RESERVED;
+                # otherwise roll back only a reservation created by this
+                # failed re-adjudication.
+                current = self.registry.get(idem_key)
+                if (
+                    current is None
+                    or current.state != OperationState.RESERVED
+                ) and not reservation_was_active and resource_id and amount > 0:
+                    self.budget_coordinator.release(
+                        resource_id, amount, reservation_id=idem_key
+                    )
                 composed_decision = Decision.HOLD.value
-                composed_rationale = "Re-adjudication produced PASS/FLAG but RESERVED transition failed — staying in HOLD."
+                composed_rationale = "Re-adjudication produced PASS/FLAG but RESERVED transition failed — staying fail-closed."
         elif composed_decision == Decision.HARD_VETO.value:
-            self.registry.transition_to(idem_key, OperationState.FAILED)
-            hold_resolved = True  # Resolved (as denied)
-            if resource_id and amount > 0:
-                self.budget_coordinator.release(
-                    resource_id, amount, reservation_id=idem_key
-                )
-            if record := self.registry.get(idem_key):
-                if record.hold_record:
-                    record.hold_record.exit_reason = "resolved_veto"
+            success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
+            if success:
+                hold_resolved = True  # Resolved (as denied)
+                if resource_id and amount > 0:
+                    self.budget_coordinator.release(
+                        resource_id, amount, reservation_id=idem_key
+                    )
+                if record := self.registry.get(idem_key):
+                    if record.hold_record:
+                        record.hold_record.exit_reason = "resolved_veto"
+            else:
+                # Do not release the operation's reservation if the durable
+                # denial transition lost a race to another lifecycle action.
+                composed_decision = Decision.HOLD.value
+                composed_rationale = "HARD_VETO could not commit HOLD → FAILED; no budget mutation applied."
         elif composed_decision == Decision.HOLD.value:
             # Still HOLD — update the hold record's timestamp
             if record := self.registry.get(idem_key):
