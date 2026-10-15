@@ -492,6 +492,13 @@ class DualKernelGovernor:
                     resource_id, amount, reservation_id=idem_key
                 )
         elif composed_decision == Decision.HOLD.value:
+            # HOLD is not authorization to consume or retain budget. The
+            # membrane may have reserved during its local checks; release
+            # only this operation's reservation until a governed exit succeeds.
+            if resource_id and amount > 0:
+                self.budget_coordinator.release(
+                    resource_id, amount, reservation_id=idem_key
+                )
             # Enter through HoldManager so the lifecycle record is initialized.
             # Do not invent a τ_K here: this generic Governor has no
             # organization-owned SLA. Scenario callers pass their bound explicitly.
@@ -1205,10 +1212,14 @@ class DualKernelGovernor:
                 composed_decision = Decision.HOLD.value
                 composed_rationale = "HARD_VETO could not commit HOLD → FAILED; no budget mutation applied."
         elif composed_decision == Decision.HOLD.value:
-            # Still HOLD — update the hold record's timestamp
+            # Still HOLD — it is not authorized to retain a budget reservation.
+            if resource_id and amount > 0:
+                self.budget_coordinator.release(
+                    resource_id, amount, reservation_id=idem_key
+                )
+            # Keep the original hold_start — τ_K continues counting
             if record := self.registry.get(idem_key):
                 if record.hold_record:
-                    # Keep the original hold_start — τ_K continues counting
                     pass
 
         return {
