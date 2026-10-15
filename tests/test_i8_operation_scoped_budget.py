@@ -53,3 +53,37 @@ def test_concurrent_reservations_respect_capacity():
         outcomes = list(pool.map(reserve, range(50)))
     assert sum(outcomes) == 10
     assert budget.get_resource("budget").reserved == 100.0
+
+def test_committed_operation_cannot_be_reserved_again():
+    budget = coordinator()
+    assert budget.reserve("budget", 25.0, reservation_id="op-1")
+    assert budget.commit("budget", 25.0, reservation_id="op-1")
+    assert not budget.reserve("budget", 25.0, reservation_id="op-1")
+    resource = budget.get_resource("budget")
+    assert resource.reserved == 0.0
+    assert resource.consumed == 25.0
+
+
+def test_resource_identity_cannot_be_silently_replaced():
+    budget = coordinator()
+    original = budget.get_resource("budget")
+    replacement = Resource(resource_id="budget", capacity=1000.0)
+    try:
+        budget.register(replacement)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("replacing a registered resource must be rejected")
+    assert budget.get_resource("budget") is original
+
+
+def test_refund_is_operation_scoped_and_idempotent():
+    budget = coordinator()
+    assert budget.reserve("budget", 20.0, reservation_id="op-1")
+    assert budget.reserve("budget", 30.0, reservation_id="op-2")
+    assert budget.commit("budget", 20.0, reservation_id="op-1")
+    assert budget.commit("budget", 30.0, reservation_id="op-2")
+    assert budget.refund("budget", 20.0, reservation_id="op-1")
+    assert not budget.refund("budget", 20.0, reservation_id="op-1")
+    resource = budget.get_resource("budget")
+    assert resource.consumed == 30.0
