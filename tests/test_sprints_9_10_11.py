@@ -36,6 +36,7 @@ from test_i8_operation_scoped_budget import (
     test_i8_dispatch_uses_durable_amount_when_arguments_are_omitted,
     test_i8_dispatch_rejects_amount_mismatch_without_state_change,
     test_i8_reconcile_failed_releases_uncommitted_reservation,
+    test_i8_hold_does_not_retain_budget_when_re_adjudication_transition_fails,
 )
 
 
