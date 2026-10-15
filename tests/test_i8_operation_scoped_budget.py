@@ -167,8 +167,9 @@ def test_i8_hold_does_not_retain_budget_when_re_adjudication_transition_fails():
 
         def adjudicate(self, **kwargs):
             self.calls += 1
-            decision = "HOLD" if self.calls == 1 else "PASS"
-            return {"decision": decision, "rationale": f"test {decision}", "s_score": 0.8}
+            if self.calls == 1:
+                raise RuntimeError("force fail-closed HOLD for lifecycle test")
+            return {"decision": "PASS", "rationale": "test PASS", "s_score": 0.8}
 
     scoring = SequentialScoring()
     gov, state = _lifecycle_governor(scoring=scoring)
