@@ -22,6 +22,19 @@ from tenir_governance import (
     CopyLinter, migrate_ledger, verify_migrated_ledger,
 )
 
+# Keep the I8 budget lifecycle contract in the CI-executed sprint test module.
+# The imported test functions are collected by pytest alongside this suite.
+from test_i8_operation_scoped_budget import (
+    test_reserve_is_idempotent_per_operation,
+    test_reservation_id_cannot_be_reused_for_different_amount,
+    test_release_is_scoped_and_idempotent,
+    test_commit_is_scoped_and_idempotent,
+    test_concurrent_reservations_respect_capacity,
+    test_committed_operation_cannot_be_reserved_again,
+    test_resource_identity_cannot_be_silently_replaced,
+    test_refund_is_operation_scoped_and_idempotent,
+)
+
 
 # ─── POLYMORPHIC SURFACE ─────────────────────────────────────────────────────
 
