@@ -33,6 +33,9 @@ from test_i8_operation_scoped_budget import (
     test_committed_operation_cannot_be_reserved_again,
     test_resource_identity_cannot_be_silently_replaced,
     test_refund_is_operation_scoped_and_idempotent,
+    test_i8_dispatch_uses_durable_amount_when_arguments_are_omitted,
+    test_i8_dispatch_rejects_amount_mismatch_without_state_change,
+    test_i8_reconcile_failed_releases_uncommitted_reservation,
 )
 
 
