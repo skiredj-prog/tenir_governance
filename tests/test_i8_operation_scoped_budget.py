@@ -94,12 +94,12 @@ def test_refund_is_operation_scoped_and_idempotent():
     assert resource.consumed == 30.0
 
 
-def _lifecycle_governor(provider=None):
+def _lifecycle_governor(provider=None, scoring=None):
     state = MembraneState()
     state.register_resource(Resource(resource_id="budget", capacity=100.0))
     membrane = TransitionMembrane(state)
     gov = DualKernelGovernor(
-        ScoringKernelAdapter(TenirKernel()),
+        scoring or ScoringKernelAdapter(TenirKernel()),
         membrane,
         registry=DurableOperationRegistry(),
         provider=provider,
@@ -155,5 +155,45 @@ def test_i8_reconcile_failed_releases_uncommitted_reservation():
     result = gov.reconcile_unknown(passage.idempotency_key)
 
     assert result["operation_state"] == OperationState.FAILED.value
+    assert state.resources["budget"].reserved == 0.0
+    assert state.resources["budget"].consumed == 0.0
+
+
+
+def test_i8_hold_does_not_retain_budget_when_re_adjudication_transition_fails():
+    class SequentialScoring:
+        def __init__(self):
+            self.calls = 0
+
+        def adjudicate(self, **kwargs):
+            self.calls += 1
+            decision = "HOLD" if self.calls == 1 else "PASS"
+            return {"decision": decision, "rationale": f"test {decision}", "s_score": 0.8}
+
+    scoring = SequentialScoring()
+    gov, state = _lifecycle_governor(scoring=scoring)
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    first = gov.adjudicate(passage, resource_id="budget", amount=10.0)
+
+    assert first["operation_state"] == OperationState.HOLD.value
+    assert state.resources["budget"].reserved == 0.0
+
+    original_transition = gov.registry.transition_to
+
+    def reject_reserved_transition(key, new_state, claimed_by=""):
+        if key == passage.idempotency_key and new_state == OperationState.RESERVED:
+            return False, OperationState.HOLD
+        return original_transition(key, new_state, claimed_by=claimed_by)
+
+    gov.registry.transition_to = reject_reserved_transition
+    result = gov.resolve_hold(
+        passage.idempotency_key,
+        passage=passage,
+        resource_id="budget",
+        amount=10.0,
+    )
+
+    assert result["hold_resolved"] is False
+    assert result["operation_state"] == OperationState.HOLD.value
     assert state.resources["budget"].reserved == 0.0
     assert state.resources["budget"].consumed == 0.0
