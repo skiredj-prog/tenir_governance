@@ -661,6 +661,27 @@ class DualKernelGovernor:
         if record is None:
             return {"dispatched": False, "reason": "Operation not registered."}
 
+        # The durable adjudication record is the source of truth. Reject
+        # conflicting caller arguments before changing state; omitted
+        # arguments are resolved from the record rather than skipping budget
+        # accounting.
+        if resource_id is not None and resource_id != (record.resource_id or None):
+            return {
+                "dispatched": False,
+                "idempotency_key": idempotency_key,
+                "operation_state": record.state.value,
+                "reason": "Dispatch resource does not match the durable operation record.",
+            }
+        if amount > 0 and amount != record.amount:
+            return {
+                "dispatched": False,
+                "idempotency_key": idempotency_key,
+                "operation_state": record.state.value,
+                "reason": "Dispatch amount does not match the durable operation record.",
+            }
+        resource_id = record.resource_id or None
+        amount = record.amount
+
         success, _prev = self.registry.transition_to(
             idempotency_key, OperationState.DISPATCHING,
             claimed_by=self._worker_id,
@@ -731,6 +752,11 @@ class DualKernelGovernor:
         record = self.registry.get(idempotency_key)
         if record is None:
             return dispatch_result
+
+        # Continue using the durable operation parameters for execution and
+        # any later refund/release, even when the caller omitted optional args.
+        resource_id = record.resource_id or None
+        amount = record.amount
 
         # 4. Call the provider
         from ..operations.provider import ProviderOutcome
