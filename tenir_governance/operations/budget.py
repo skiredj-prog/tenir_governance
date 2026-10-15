@@ -38,8 +38,14 @@ class InProcessBudgetCoordinator:
             return lock
 
     def register(self, resource) -> None:
-        """Register the shared Resource object; preserve an existing lock."""
+        """Register a Resource once; reject silent replacement of live state."""
         with self._lock_for(resource.resource_id):
+            existing = self._resources.get(resource.resource_id)
+            if existing is not None and existing is not resource:
+                raise ValueError(
+                    f"Resource '{resource.resource_id}' is already registered "
+                    "with a different object; replacing it could orphan reservations."
+                )
             self._resources[resource.resource_id] = resource
 
     def get_resource(self, resource_id: str):
@@ -52,10 +58,13 @@ class InProcessBudgetCoordinator:
         with self._lock_for(resource_id):
             if reservation_id is not None:
                 key = (resource_id, reservation_id)
+                # An active reservation is idempotent only for the same amount.
+                # A committed operation no longer owns a pending reservation;
+                # it must not be treated as reserved again.
                 if key in self._reservations:
                     return self._reservations[key] == amount
                 if key in self._committed:
-                    return self._committed[key] == amount
+                    return False
             if resource.available < amount:
                 return False
             if not resource.reserve(amount):
