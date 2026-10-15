@@ -303,22 +303,24 @@ class TransitionMembrane:
         }
 
     def commit_passage(self, passage: Passage, resource_id: str | None = None, amount: float = 0.0) -> None:
-        """Commit a passage that was allowed — update execution status and resource state."""
-        passage.execution_status = PassageStatus.DISPATCHED
+        """Commit a passage through the sole budget owner, then mark dispatch."""
+        reservation_id = passage.idempotency_key or passage.passage_id
         if resource_id and amount > 0:
             resource = self.state.resources.get(resource_id)
-            if resource:
-                with self.state.get_lock(resource_id):
-                    resource.commit(amount)
+            if resource is None:
+                return
+            if self.budget_coordinator.get_resource(resource_id) is not resource:
+                self.budget_coordinator.register(resource)
+            if not self.budget_coordinator.commit(resource_id, amount, reservation_id=reservation_id):
+                return
+        passage.execution_status = PassageStatus.DISPATCHED
 
     def fail_passage(self, passage: Passage, resource_id: str | None = None, amount: float = 0.0) -> None:
-        """Mark a passage as failed — release any reservation."""
-        passage.execution_status = PassageStatus.FAILED
+        """Mark a passage as failed and release only its own pending reservation."""
+        reservation_id = passage.idempotency_key or passage.passage_id
         if resource_id and amount > 0:
-            resource = self.state.resources.get(resource_id)
-            if resource:
-                with self.state.get_lock(resource_id):
-                    resource.release(amount)
+            self.budget_coordinator.release(resource_id, amount, reservation_id=reservation_id)
+        passage.execution_status = PassageStatus.FAILED
 
     def reconcile_unknown(self, passage: Passage, resource_id: str | None = None, amount: float = 0.0) -> str:
         """Reconcile an uncertain outcome (dispatch followed by timeout/lost response).
