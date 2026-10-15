@@ -447,7 +447,18 @@ class DualKernelGovernor:
         if composed_decision == Decision.PASS.value or composed_decision == Decision.FLAG.value:
             success, _prev = self.registry.transition_to(idem_key, OperationState.RESERVED)
             if not success:
-                # Transition failed — the operation cannot be reserved.
+                # A failed transition must not leak a newly-created reservation.
+                # Preserve the reservation only when the durable operation is
+                # already RESERVED (e.g. an idempotent repeated adjudication).
+                current = self.registry.get(idem_key)
+                if (
+                    current is None
+                    or current.state != OperationState.RESERVED
+                ):
+                    if resource_id and amount > 0:
+                        self.budget_coordinator.release(
+                            resource_id, amount, reservation_id=idem_key
+                        )
                 # This is an inconsistent state: the decision is PASS but
                 # the durable state does not confirm it. Return HOLD, not PASS.
                 self.ledger.append(
@@ -1204,7 +1215,11 @@ class DualKernelGovernor:
         """
         record = self.registry.get(idempotency_key)
         reservation_acquired = False
+        reservation_was_active = False
         if approve and record and record.resource_id and record.amount > 0:
+            reservation_was_active = self.budget_coordinator.has_reservation(
+                record.resource_id, idempotency_key
+            )
             reservation_acquired = self.budget_coordinator.reserve(
                 record.resource_id, record.amount, reservation_id=idempotency_key
             )
@@ -1216,7 +1231,11 @@ class DualKernelGovernor:
         result = self.hold_manager.authorize_exit(
             idempotency_key, authorized_by, scope, authorization, reason, approve,
         )
-        if reservation_acquired and not result.get("exited"):
+        if (
+            reservation_acquired
+            and not reservation_was_active
+            and not result.get("exited")
+        ):
             self.budget_coordinator.release(
                 record.resource_id, record.amount, reservation_id=idempotency_key
             )
