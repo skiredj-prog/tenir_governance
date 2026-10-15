@@ -402,8 +402,8 @@ class DualKernelGovernor:
         budget_utilization = None
         if resource_id and amount > 0:
             resource = self.membrane.state.resources.get(resource_id)
-            if resource and resource.capacity > 0:
-                budget_utilization = (resource.consumed + resource.reserved) / resource.capacity
+            if resource:
+                budget_utilization = self.budget_coordinator.get_utilization(resource_id)
 
         # 4. Compose using the decision lattice (fail-closed)
         budget_in_scope = resource_id is not None and amount > 0
@@ -668,13 +668,17 @@ class DualKernelGovernor:
             if not self.budget_coordinator.commit(
                 resource_id, amount, reservation_id=idempotency_key
             ):
-                self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+                # No provider call has occurred yet, so this is a known
+                # non-dispatch failure rather than an UNKNOWN external outcome.
+                self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                self.budget_coordinator.release(
+                    resource_id, amount, reservation_id=idempotency_key
+                )
                 return {
                     "dispatched": False,
                     "idempotency_key": idempotency_key,
-                    "operation_state": OperationState.UNKNOWN.value,
-                    "reason": "Budget reservation could not be committed; outcome requires reconciliation.",
-                    "recommendation": "human_review",
+                    "operation_state": OperationState.FAILED.value,
+                    "reason": "Budget reservation could not be committed; dispatch was not started.",
                 }
 
         return {
@@ -1069,8 +1073,8 @@ class DualKernelGovernor:
         budget_utilization = None
         if resource_id and amount > 0:
             resource = self.membrane.state.resources.get(resource_id)
-            if resource and resource.capacity > 0:
-                budget_utilization = (resource.consumed + resource.reserved) / resource.capacity
+            if resource:
+                budget_utilization = self.budget_coordinator.get_utilization(resource_id)
 
         # 4. Compose
         budget_in_scope = resource_id is not None and amount > 0
