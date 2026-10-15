@@ -315,6 +315,28 @@ class TestReconciliation:
         assert result["reconciled"] is True
         assert result["operation_state"] == OperationState.FAILED.value
 
+    def test_reconcile_failed_releases_reservation_if_commit_was_interrupted(self):
+        """Crash recovery must clear a reservation if dispatch never committed it."""
+        provider = MockProvider(
+            behavior="timeout",
+            reconcile_outcome=ProviderOutcome.FAILED,
+        )
+        gov, state = _setup_governor(provider=provider)
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        gov.adjudicate(p, pressure=0.2, velocity=0.2, capacity=0.9,
+                       resource_id="budget", amount=10.0)
+
+        # Model a crash after the durable DISPATCHING transition but before
+        # the coordinator commits the operation's reservation.
+        gov.registry.transition_to(p.idempotency_key, OperationState.DISPATCHING)
+        gov.registry.transition_to(p.idempotency_key, OperationState.UNKNOWN)
+
+        result = gov.reconcile_unknown(p.idempotency_key)
+
+        assert result["operation_state"] == OperationState.FAILED.value
+        assert state.resources["budget"].reserved == 0.0
+        assert state.resources["budget"].consumed == 0.0
+
     def test_reconcile_still_unknown(self):
         """UNKNOWN → reconcile → still UNKNOWN (human review)."""
         provider = MockProvider(behavior="timeout")
