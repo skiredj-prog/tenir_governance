@@ -889,10 +889,19 @@ class DualKernelGovernor:
         elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
             self.registry.transition_to(idempotency_key, OperationState.FAILED)
             if record.resource_id and record.amount > 0:
-                self.budget_coordinator.refund(
+                refunded = self.budget_coordinator.refund(
                     record.resource_id, record.amount,
                     reservation_id=idempotency_key,
                 )
+                # Recovery may discover a crash after DISPATCHING was
+                # persisted but before the reservation was committed. If the
+                # provider confirms no effect, refund committed spend; if no
+                # commit exists, release the still-active reservation instead.
+                if not refunded:
+                    self.budget_coordinator.release(
+                        record.resource_id, record.amount,
+                        reservation_id=idempotency_key,
+                    )
             return {
                 "reconciled": True,
                 "idempotency_key": idempotency_key,
