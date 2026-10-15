@@ -16,6 +16,7 @@ class BudgetCoordinator(Protocol):
     def commit(self, resource_id: str, amount: float, reservation_id: str | None = None) -> bool: ...
     def release(self, resource_id: str, amount: float, reservation_id: str | None = None) -> bool: ...
     def refund(self, resource_id: str, amount: float, reservation_id: str | None = None) -> bool: ...
+    def has_reservation(self, resource_id: str, reservation_id: str) -> bool: ...
     def get_utilization(self, resource_id: str) -> float | None: ...
 
 
@@ -123,6 +124,11 @@ class InProcessBudgetCoordinator:
                 return False
             resource.refund(amount)
             return True
+
+    def has_reservation(self, resource_id: str, reservation_id: str) -> bool:
+        """Return whether an operation currently owns an active reservation."""
+        with self._lock_for(resource_id):
+            return (resource_id, reservation_id) in self._reservations
 
     def get_utilization(self, resource_id: str) -> float | None:
         resource = self._resources.get(resource_id)
