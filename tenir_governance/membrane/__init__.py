@@ -229,9 +229,16 @@ class TransitionMembrane:
                 checks.append(CheckResult("I8", CheckType.MANDATORY, Decision.HARD_VETO,
                                            f"I8: Resource '{resource_id}' not registered."))
             else:
-                if self.budget_coordinator.get_resource(resource_id) is not resource:
+                coordinated_resource = self.budget_coordinator.get_resource(resource_id)
+                if coordinated_resource is None:
                     self.budget_coordinator.register(resource)
-                if self.budget_coordinator.reserve(resource_id, amount, reservation_id=_reservation_id):
+                    coordinated_resource = resource
+                if coordinated_resource is not resource:
+                    checks.append(CheckResult(
+                        "I8", CheckType.MANDATORY, Decision.HARD_VETO,
+                        f"I8: Resource identity mismatch for '{resource_id}'; budget state cannot be safely replaced."
+                    ))
+                elif self.budget_coordinator.reserve(resource_id, amount, reservation_id=_reservation_id):
                     _reserved_amount = amount
                     checks.append(CheckResult("I8", CheckType.MANDATORY, Decision.PASS,
                                                f"I8: Budget OK — reserved {amount}, available now {resource.available:.2f}."))
