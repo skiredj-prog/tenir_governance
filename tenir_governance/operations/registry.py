@@ -215,6 +215,11 @@ class OperationRecord:
     composed_decision: str = ""
     # Which worker/process claimed the dispatch (for cross-process coordination)
     dispatch_claimed_by: str = ""
+    # Budget ownership flags (single source of truth for reserve/commit):
+    #   budget_reserved  — a reservation is currently held for this operation
+    #   budget_committed — the reservation was committed (consumed) at dispatch
+    budget_reserved: bool = False
+    budget_committed: bool = False
     # HOLD lifecycle metadata (None unless operation has been in HOLD)
     hold_record: HoldRecord | None = None
 
@@ -493,6 +498,18 @@ class DurableOperationRegistry:
             finally:
                 if flock:
                     flock.close()
+
+    def set_budget_flags(self, idempotency_key: str, **flags: bool) -> bool:
+        """Persist budget ownership flags (budget_reserved / budget_committed)."""
+        record = self.get(idempotency_key)
+        if record is None:
+            return False
+        for name, value in flags.items():
+            if name not in ("budget_reserved", "budget_committed"):
+                raise ValueError(f"unknown budget flag: {name}")
+            setattr(record, name, bool(value))
+        self._persist()
+        return True
 
     def find_by_state(self, state: OperationState) -> list[OperationRecord]:
         """Find all operations in a given state. Used for recovery.

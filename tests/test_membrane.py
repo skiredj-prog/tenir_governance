@@ -92,7 +92,9 @@ class TestBudgetGate:
         passage = Passage(agent_id="alice", action_type="payment", amount=30.0)
         result = m.adjudicate(passage, resource_id="budget", amount=30.0)
         assert result["decision"] == Decision.PASS.value
-        assert state.resources["budget"].reserved == 30.0
+        # The membrane is a pure evaluator: it never mutates the budget.
+        # Reservation is owned by the governor's transitions.
+        assert state.resources["budget"].reserved == 0.0
         assert state.resources["budget"].consumed == 0.0
 
     def test_payment_exceeding_budget_blocked(self):
@@ -100,7 +102,9 @@ class TestBudgetGate:
         p1 = Passage(agent_id="alice", action_type="payment", amount=30.0)
         r1 = m.adjudicate(p1, resource_id="budget", amount=30.0)
         assert r1["decision"] == Decision.PASS.value
-        m.commit_passage(p1, resource_id="budget", amount=30.0)
+        # Simulate the governor having reserved and committed the first payment.
+        state.resources["budget"].reserve(30.0)
+        state.resources["budget"].commit(30.0)
         assert state.resources["budget"].consumed == 30.0
         p2 = Passage(agent_id="alice", action_type="payment", amount=30.0)
         r2 = m.adjudicate(p2, resource_id="budget", amount=30.0)
@@ -114,7 +118,9 @@ class TestBudgetGate:
             p = Passage(agent_id="alice", action_type="payment", amount=25.0)
             r = m.adjudicate(p, resource_id="budget", amount=25.0)
             assert r["decision"] == Decision.PASS.value
-            m.commit_passage(p, resource_id="budget", amount=25.0)
+            # Governor-owned reserve + commit, simulated here.
+            state.resources["budget"].reserve(25.0)
+            state.resources["budget"].commit(25.0)
         assert state.resources["budget"].consumed == 100.0
         p5 = Passage(agent_id="alice", action_type="payment", amount=1.0)
         r5 = m.adjudicate(p5, resource_id="budget", amount=1.0)
@@ -125,7 +131,9 @@ class TestBudgetGate:
         p = Passage(agent_id="alice", action_type="payment", amount=60.0)
         r = m.adjudicate(p, resource_id="budget", amount=60.0)
         assert r["decision"] == Decision.PASS.value
-        assert state.resources["budget"].reserved == 60.0
+        # Governor holds a 60 reservation (simulated). The membrane must not
+        # touch it, neither when it passes nor when it vetoes.
+        state.resources["budget"].reserve(60.0)
         p2 = Passage(agent_id="alice", action_type="payment", amount=50.0)
         r2 = m.adjudicate(p2, resource_id="budget", amount=50.0)
         assert r2["decision"] == Decision.HARD_VETO.value
@@ -193,37 +201,28 @@ class TestUncertainOutcome:
 class TestConcurrencyBudgetRace:
     """Per review §4: two agents reading the same budget state must not both pass."""
 
-    def test_concurrent_budget_reservations_are_atomic(self):
-        """Two threads each try to reserve $1000 from a $1500 budget.
-        Without atomicity, both would read $0 consumed and both pass ($2000 total).
-        With the lock, only one succeeds."""
+    def test_concurrent_membrane_checks_do_not_mutate_budget(self):
+        """Membrane is a pure evaluator: concurrent I8 checks never reserve.
+
+        Atomic reservation is the governor's responsibility (see
+        test_hold_budget_regression.py::test_concurrent_adjudication_reserves_budget_once).
+        """
         state = MembraneState()
         budget = Resource(resource_id="budget", capacity=1500.0)
         state.register_resource(budget)
         state.register_agent(Agent(agent_id="agent_a"))
         state.register_agent(Agent(agent_id="agent_b"))
         m = TransitionMembrane(state)
-
-        results = []
         barrier = threading.Barrier(2)
 
         def attempt(agent_id, amount):
-            barrier.wait()  # Both threads start simultaneously
+            barrier.wait()
             p = Passage(agent_id=agent_id, action_type="payment", amount=amount)
-            r = m.adjudicate(p, resource_id="budget", amount=amount)
-            results.append(r["decision"])
+            m.adjudicate(p, resource_id="budget", amount=amount)
 
         t1 = threading.Thread(target=attempt, args=("agent_a", 1000.0))
         t2 = threading.Thread(target=attempt, args=("agent_b", 1000.0))
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
+        t1.start(); t2.start(); t1.join(); t2.join()
 
-        # Exactly one should PASS, one should HARD_VETO
-        passes = sum(1 for d in results if d == Decision.PASS.value)
-        vetoes = sum(1 for d in results if d == Decision.HARD_VETO.value)
-        assert passes == 1, f"Expected exactly 1 PASS, got {passes}"
-        assert vetoes == 1, f"Expected exactly 1 HARD_VETO, got {vetoes}"
-        # Total reserved must not exceed capacity
-        assert budget.reserved <= 1000.0
+        assert budget.reserved == 0.0
+        assert budget.consumed == 0.0

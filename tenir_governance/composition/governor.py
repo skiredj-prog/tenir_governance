@@ -395,7 +395,7 @@ class DualKernelGovernor:
         if resource_id and amount > 0:
             resource = self.membrane.state.resources.get(resource_id)
             if resource and resource.capacity > 0:
-                budget_utilization = (resource.consumed + resource.reserved) / resource.capacity
+                budget_utilization = self._prospective_utilization(idem_key, resource, amount)
 
         # 4. Compose using the decision lattice (fail-closed)
         budget_in_scope = resource_id is not None and amount > 0
@@ -435,6 +435,27 @@ class DualKernelGovernor:
             composed_decision=composed_decision,
         )
 
+        # 6a. Budget ownership: a reservation is taken here, exactly once,
+        # for every outcome that keeps the operation alive (PASS/FLAG/HOLD).
+        # A failed reservation at this point (concurrent consumption since
+        # the membrane check) is fail-closed to HARD_VETO.
+        if budget_in_scope and composed_decision in (
+            Decision.PASS.value, Decision.FLAG.value, Decision.HOLD.value,
+        ):
+            if not self._reserve_budget(idem_key, resource_id, amount):
+                composed_decision = Decision.HARD_VETO.value
+                composed_rationale = (
+                    "Budget reservation failed at commit point (concurrent consumption) "
+                    "— fail-closed HARD_VETO."
+                )
+                self.ledger.append(
+                    kernel="composed",
+                    decision=composed_decision,
+                    rationale=composed_rationale,
+                    passage_id=passage.passage_id,
+                    idempotency_key=idem_key,
+                )
+
         # 6. State machine transitions
         if composed_decision == Decision.PASS.value or composed_decision == Decision.FLAG.value:
             success, _prev = self.registry.transition_to(idem_key, OperationState.RESERVED)
@@ -467,12 +488,9 @@ class DualKernelGovernor:
                     "ledger_valid": self.ledger.verify_chain(),
                 }
         elif composed_decision == Decision.HARD_VETO.value:
+            # No reservation is taken before the decision point (6a), so a
+            # veto has nothing to release.
             self.registry.transition_to(idem_key, OperationState.FAILED)
-            if resource_id and amount > 0:
-                resource = self.membrane.state.resources.get(resource_id)
-                if resource:
-                    with self.membrane.state.get_lock(resource_id):
-                        resource.release(amount)
         elif composed_decision == Decision.HOLD.value:
             # Enter through HoldManager so the lifecycle record is initialized.
             # Do not invent a τ_K here: this generic Governor has no
@@ -508,6 +526,40 @@ class DualKernelGovernor:
             "ledger_entries": self.ledger.entry_count,
             "ledger_valid": self.ledger.verify_chain(),
         }
+
+    def _prospective_utilization(self, idempotency_key: str, resource, amount: float) -> float:
+        """Budget utilization as it will be once this operation holds its budget.
+
+        The operation's own amount is counted until it holds a reservation
+        (record.budget_reserved), so the policy sees the same load it would
+        see after the reservation is taken.
+        """
+        record = self.registry.get(idempotency_key)
+        own = 0.0 if (record is not None and record.budget_reserved) else amount
+        return (resource.consumed + resource.reserved + own) / resource.capacity
+
+    def _reserve_budget(self, idempotency_key: str, resource_id: str | None, amount: float) -> bool:
+        """Reserve budget for an operation, at most once.
+
+        Idempotent through record.budget_reserved: a second call on an
+        operation that already holds its reservation is a no-op. Returns
+        False if the budget cannot be reserved (fail-closed for the caller).
+        """
+        if not resource_id or amount <= 0:
+            return True
+        record = self.registry.get(idempotency_key)
+        if record is None:
+            return False
+        if record.budget_reserved:
+            return True
+        resource = self.membrane.state.resources.get(resource_id)
+        if resource is None:
+            return False
+        with self.membrane.state.get_lock(resource_id):
+            if not resource.reserve(amount):
+                return False
+        self.registry.set_budget_flags(idempotency_key, budget_reserved=True)
+        return True
 
     def resume_existing(
         self,
@@ -659,7 +711,38 @@ class DualKernelGovernor:
             resource = self.membrane.state.resources.get(resource_id)
             if resource:
                 with self.membrane.state.get_lock(resource_id):
-                    resource.commit(amount)
+                    # Revalidate budget at dispatch if policy requires it.
+                    # The reservation was taken at adjudication time (step 6a);
+                    # check it is still held (not released by a concurrent
+                    # fail/expire on this operation).  available already
+                    # excludes our own reservation, so we check reserved
+                    # directly: if reserved < amount, the reservation is gone.
+                    if self.policy.revalidate_budget_at_dispatch:
+                        if resource.reserved < amount:
+                            self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                            return {
+                                "dispatched": False,
+                                "reason": (
+                                    "Budget revalidation at dispatch failed — "
+                                    f"reservation lost (reserved {resource.reserved:.2f} < required {amount}). "
+                                    "Fail-closed."
+                                ),
+                                "operation_state": OperationState.FAILED.value,
+                            }
+                    committed = resource.commit(amount)
+                if committed:
+                    self.registry.set_budget_flags(
+                        idempotency_key, budget_reserved=False, budget_committed=True,
+                    )
+                else:
+                    # Commit failed — the reservation is no longer held
+                    # (e.g. released by a concurrent fail/expire). Fail-closed.
+                    self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                    return {
+                        "dispatched": False,
+                        "reason": "Budget commit failed — reservation lost. Fail-closed.",
+                        "operation_state": OperationState.FAILED.value,
+                    }
 
         return {
             "dispatched": True,
@@ -830,12 +913,22 @@ class DualKernelGovernor:
                 "provider_reference": recon.provider_reference,
             }
         elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
+            committed = record.budget_committed
             self.registry.transition_to(idempotency_key, OperationState.FAILED)
             if record.resource_id and record.amount > 0:
                 resource = self.membrane.state.resources.get(record.resource_id)
                 if resource:
                     with self.membrane.state.get_lock(record.resource_id):
-                        resource.refund(record.amount)
+                        # committed → consumed must be reversed (refund);
+                        # never committed → only the reservation exists (release).
+                        if committed:
+                            resource.refund(record.amount)
+                        else:
+                            resource.release(record.amount)
+                if committed or record.budget_reserved:
+                    self.registry.set_budget_flags(
+                        idempotency_key, budget_reserved=False, budget_committed=False,
+                    )
             return {
                 "reconciled": True,
                 "idempotency_key": idempotency_key,
@@ -863,20 +956,25 @@ class DualKernelGovernor:
     def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0) -> bool:
         """Transition to FAILED. No effect occurred. Release or refund reservation.
 
-        Uses the previous state returned atomically by transition_to() so
-        the refund-vs-release decision is based on the state observed under
-        the lock.
+        Uses the durable budget_committed flag so the refund-vs-release
+        decision is based on whether the budget was actually committed
+        at dispatch, not on a fragile previous-state deduction.
         """
-        success, prev_state = self.registry.transition_to(idempotency_key, OperationState.FAILED)
+        record = self.registry.get(idempotency_key)
+        committed = bool(record and record.budget_committed)
+        success, _prev_state = self.registry.transition_to(idempotency_key, OperationState.FAILED)
         if success and resource_id and amount > 0:
-            was_dispatching = prev_state == OperationState.DISPATCHING
             resource = self.membrane.state.resources.get(resource_id)
             if resource:
                 with self.membrane.state.get_lock(resource_id):
-                    if was_dispatching:
+                    if committed:
                         resource.refund(amount)
                     else:
                         resource.release(amount)
+            if committed or (record and record.budget_reserved):
+                self.registry.set_budget_flags(
+                    idempotency_key, budget_reserved=False, budget_committed=False,
+                )
         return success
 
     def mark_unknown(self, idempotency_key: str) -> bool:
@@ -1053,7 +1151,7 @@ class DualKernelGovernor:
         if resource_id and amount > 0:
             resource = self.membrane.state.resources.get(resource_id)
             if resource and resource.capacity > 0:
-                budget_utilization = (resource.consumed + resource.reserved) / resource.capacity
+                budget_utilization = self._prospective_utilization(idem_key, resource, amount)
 
         # 4. Compose
         budget_in_scope = resource_id is not None and amount > 0
@@ -1096,6 +1194,7 @@ class DualKernelGovernor:
         # 6. State transitions from HOLD
         hold_resolved = False
         if composed_decision in (Decision.PASS.value, Decision.FLAG.value):
+            # No new reservation here: the HOLD already holds it (budget_reserved).
             success, _prev = self.registry.transition_to(idem_key, OperationState.RESERVED)
             if success:
                 hold_resolved = True
@@ -1185,15 +1284,16 @@ class DualKernelGovernor:
         result = self.hold_manager.authorize_exit(
             idempotency_key, authorized_by, scope, authorization, reason, approve,
         )
-        # If approved and there's a resource to reserve, re-reserve it
-        if result.get("exited") and approve:
+        # approve → RESERVED keeps the reservation taken at HOLD (no re-reserve).
+        # deny → FAILED releases it; otherwise the budget leaks.
+        if result.get("exited") and not approve:
             record = self.registry.get(idempotency_key)
-            if record and record.resource_id and record.amount > 0:
+            if record and record.budget_reserved and record.resource_id and record.amount > 0:
                 resource = self.membrane.state.resources.get(record.resource_id)
                 if resource:
                     with self.membrane.state.get_lock(record.resource_id):
-                        if resource.available >= record.amount:
-                            resource.reserve(record.amount)
+                        resource.release(record.amount)
+                self.registry.set_budget_flags(idempotency_key, budget_reserved=False)
         return result
 
     def expire_hold(self, idempotency_key: str) -> dict[str, Any]:
@@ -1217,6 +1317,10 @@ class DualKernelGovernor:
             if resource:
                 with self.membrane.state.get_lock(record.resource_id):
                     resource.release(record.amount)
+            if record.budget_reserved or record.budget_committed:
+                self.registry.set_budget_flags(
+                    idempotency_key, budget_reserved=False, budget_committed=False,
+                )
 
         return result
 

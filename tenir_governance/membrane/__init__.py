@@ -215,21 +215,19 @@ class TransitionMembrane:
         # If no delegation in scope, I7 is not applicable — don't check
 
         # I8 — Aggregate budget (MANDATORY when resource is in scope)
-        _reserved_amount = 0.0
+        # Pure check: the membrane never mutates the budget. Reservation is
+        # owned by the governor's state transitions (see DualKernelGovernor).
         if resource_id is not None and amount > 0:
             resource = self.state.resources.get(resource_id)
             if resource is None:
                 checks.append(CheckResult("I8", CheckType.MANDATORY, Decision.HARD_VETO,
                                            f"I8: Resource '{resource_id}' not registered."))
             else:
-                # ATOMIC reservation under lock — prevents race condition
                 lock = self.state.get_lock(resource_id)
                 with lock:
                     if resource.available >= amount:
-                        resource.reserve(amount)
-                        _reserved_amount = amount
                         checks.append(CheckResult("I8", CheckType.MANDATORY, Decision.PASS,
-                                                   f"I8: Budget OK — reserved {amount}, available now {resource.available:.2f}."))
+                                                   f"I8: Budget OK — {amount} within available {resource.available:.2f}."))
                     else:
                         checks.append(CheckResult("I8", CheckType.MANDATORY, Decision.HARD_VETO,
                                                    f"I8: Aggregate budget violation — requested {amount} but only "
@@ -268,12 +266,6 @@ class TransitionMembrane:
         if hard_reasons:
             decision = Decision.HARD_VETO
             rationale = "; ".join(c.rationale for c in hard_reasons)
-            # Release any reservation we made
-            if _reserved_amount > 0 and resource_id:
-                resource = self.state.resources.get(resource_id)
-                if resource:
-                    with self.state.get_lock(resource_id):
-                        resource.release(_reserved_amount)
         else:
             hold_reasons = [c for c in checks if c.decision == Decision.HOLD]
             if hold_reasons:
