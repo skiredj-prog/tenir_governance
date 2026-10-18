@@ -6,6 +6,39 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [5.4.2] — 2026-10-18 — Patch: Budget Coordination Fix
+
+This patch fixes two bugs in the I8 aggregate budget invariant and hardens the budget lifecycle.
+
+### Fixed
+- **Double-reservation on HOLD resolve** — The membrane's I8 check no longer mutates the budget (pure `available >= amount` check). Reservation ownership moved entirely to the governor's `_reserve_budget()`, which is idempotent via the `budget_reserved` flag. `resolve_hold()` no longer re-reserves.
+- **Phantom reservation after ESCALATED→UNKNOWN→FAILED** — `reconcile_unknown()` and `fail()` now use the durable `budget_committed` flag to choose `refund()` (if committed) vs `release()` (if only reserved), instead of inferring from the previous state.
+- **`authorize_exit` approve double-reservation** — Approve no longer re-reserves the budget already held by the HOLD; it keeps the existing reservation.
+- **`authorize_exit` deny budget leak** — Deny now releases the reservation and clears the `budget_reserved` flag.
+- **`revalidate_budget_at_dispatch` now applied** — Budget is rechecked at the dispatch boundary (policy declared `True` but it was never read). The revalidation checks that the operation's reservation is still held (`reserved >= amount`), fail-closed to FAILED if not.
+- **`dispatch()` silent commit failure** — If `resource.commit()` returns `False`, the governor now fail-closes to FAILED instead of silently proceeding to DISPATCHING with no budget consumed.
+- **`fail()` and `expire_hold()` flag cleanup** — Both now clear `budget_reserved` and `budget_committed` flags after releasing/refunding the budget.
+
+### Added
+- `budget_reserved` and `budget_committed` fields on `OperationRecord` (persisted).
+- `set_budget_flags()` method on `DurableOperationRegistry`.
+- `_prospective_utilization()` method on `DualKernelGovernor` — counts the operation's own amount until it holds a reservation, so the policy sees the same load it would see after the reservation is taken.
+- `_reserve_budget()` method on `DualKernelGovernor` — idempotent, under lock, fail-closed.
+- `tests/test_hold_budget_regression.py` — 3 regression tests: double-reservation on HOLD resolve, phantom reservation after ESCALATED→UNKNOWN→FAILED, concurrent adjudication reserves budget once.
+
+### Changed
+- `tests/test_membrane.py` — Updated for pure membrane behavior (no budget mutation). Concurrency test moved to governor level.
+
+### Tests
+- Total: 669 tests passing, 0 failures, 0 regressions (including `test_coverage_uplift.py`).
+- I8 invariant verified on 9 paths: PASS/FLAG, HARD_VETO, HOLD→resolve, ESCALATED→UNKNOWN→FAILED, authorize_exit deny, concurrent, aggregate, fail from RESERVED, expire_hold.
+
+### Known Limitations
+- Budget coordination is single-process only (`InProcessBudgetCoordinator` with `threading.Lock`). Cross-process requires a `DurableBudgetCoordinator` backed by `fcntl.flock` or a database transaction.
+- Legacy HOLD operations created before this patch have `budget_reserved = False` by default; the reservation from the old membrane code is in `resource.reserved` but not tracked by the flag. Migration is needed if persistent registries contain old HOLD operations.
+
+---
+
 ## [5.4.1] — 2026-10-13 — Patch: Assessment Semantics Hardening
 
 This patch corrects two semantic issues in the τ⁻¹ classifier identified during the v5.4.0 hardening review.

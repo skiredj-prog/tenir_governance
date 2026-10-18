@@ -13,8 +13,8 @@ abstract: >
   Release 5.2.0 extends the R5 governance middleware with a dependency-light
   schema 1.2 execution kernel, runtime constraint geometry, connectors, and
   security hardening. Validation is performed through the repository CI gate.
-version: "5.2.0"
-date-released: "2026-10-07"
+version: "5.4.2"
+date-released: "2026-10-18"
 license: Apache-2.0
 repository-code: "https://github.com/skiredj-prog/tenir-governance"
 doi: 10.5281/zenodo.21264803
