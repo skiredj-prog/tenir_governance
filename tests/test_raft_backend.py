@@ -1260,6 +1260,14 @@ class TestListOneRegressions:
         assert result[0] == "RESERVED"
         assert result[1] == "legacy-command-reservation"
 
+    @pytest.mark.parametrize("amount", ["1e-129", "1e999999", "0e-999999"])
+    def test_pathological_decimal_exponents_are_rejected(self, cluster, amount):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-DECIMAL-BOUNDS", 10) == "REGISTERED"
+        result = leader.reserve("bounded-key-" + amount, amount, "budget-DECIMAL-BOUNDS")
+        assert result.status == "INVALID_AMOUNT"
+        assert leader.get_state("budget-DECIMAL-BOUNDS").reserved == Decimal("0")
+
     def test_large_capacity_preserves_fractional_available_value(self, cluster):
         leader = _get_leader(cluster)
         assert leader.register_resource("budget-LARGE-DECIMAL", "1000000000000000000") == "REGISTERED"
