@@ -998,3 +998,83 @@ def test_concurrent_confirm_and_proven_fail_settle_budget_consistently(tmp_path,
         assert state.reserved == Decimal("0")
     else:
         raise AssertionError(f"Unexpected terminal race result: {record.state}")
+
+
+
+def test_cross_instance_confirm_and_proven_fail_cannot_diverge_durable_budget(tmp_path, monkeypatch):
+    """Separate governors sharing disk must serialize terminal budget settlement."""
+    import threading
+    from tenir_governance.operations.registry import DurableOperationRegistry
+
+    registry_path = str(tmp_path / "shared-operations.json")
+    gov1, _state1, backend1 = _setup_durable_backend_governor(tmp_path)
+    gov1.registry = DurableOperationRegistry(registry_path)
+    gov1.hold_manager.registry = gov1.registry
+
+    # A second governor has independent process-local locks and backend object,
+    # but points at the same durable registry and single-host budget store.
+    gov2, _state2 = _setup_governor(budget_capacity=100.0)
+    gov2.registry = DurableOperationRegistry(registry_path)
+    gov2.hold_manager.registry = gov2.registry
+    gov2.consensus_backend = SingleHostLockBackend(str(tmp_path))
+
+    passage, _result = _adjudicate_durable_budget(gov1)
+    assert gov1.dispatch(passage.idempotency_key, "budget", 10.0)["dispatched"] is True
+    key = passage.idempotency_key
+
+    # Force both instances to read DISPATCHING before either settles. This
+    # exposes a cross-instance TOCTOU that an instance-local RLock cannot close.
+    both_read = threading.Barrier(2)
+    original_get1 = gov1.registry.get
+    original_get2 = gov2.registry.get
+    first1 = {"pending": True}
+    first2 = {"pending": True}
+
+    def synchronized_get(original, first):
+        def get_once(idempotency_key):
+            record = original(idempotency_key)
+            if idempotency_key == key and first["pending"]:
+                first["pending"] = False
+                both_read.wait(timeout=5)
+            return record
+        return get_once
+
+    monkeypatch.setattr(gov1.registry, "get", synchronized_get(original_get1, first1))
+    monkeypatch.setattr(gov2.registry, "get", synchronized_get(original_get2, first2))
+    results = {}
+
+    def confirm_worker():
+        results["confirm"] = gov1.confirm(key)
+
+    def fail_worker():
+        results["fail"] = gov2.fail(
+            key, "budget", 10.0, authoritative_non_execution=True,
+        )
+
+    confirm_thread = threading.Thread(target=confirm_worker)
+    fail_thread = threading.Thread(target=fail_worker)
+    confirm_thread.start()
+    fail_thread.start()
+    confirm_thread.join(timeout=10)
+    fail_thread.join(timeout=10)
+
+    assert not confirm_thread.is_alive()
+    assert not fail_thread.is_alive()
+    final_record = DurableOperationRegistry(registry_path).get(key)
+    final_state = SingleHostLockBackend(str(tmp_path)).get_state("budget")
+
+    # Exactly one terminal interpretation may own the budget outcome.
+    if final_record.state == OperationState.CONFIRMED:
+        assert results["confirm"] is True
+        assert results["fail"] is False
+        assert final_record.budget_committed is True
+        assert final_state.committed == Decimal("10.0")
+        assert final_state.reserved == Decimal("0")
+    elif final_record.state == OperationState.FAILED:
+        assert results["fail"] is True
+        assert results["confirm"] is False
+        assert final_record.budget_committed is False
+        assert final_state.committed == Decimal("0")
+        assert final_state.reserved == Decimal("0")
+    else:
+        raise AssertionError(f"Unexpected terminal race result: {final_record.state}")
