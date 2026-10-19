@@ -590,7 +590,20 @@ class DualKernelGovernor:
         with self.membrane.state.get_lock(resource_id):
             if not resource.reserve(amount):
                 return False
-        self.registry.set_budget_flags(idempotency_key, budget_reserved=True)
+        # The resource and operation registry are separate stores. If the
+        # ownership flag cannot be durably recorded, compensate the reservation
+        # and fail closed; otherwise a retry could reserve the same operation
+        # twice because the registry still says it owns no budget.
+        try:
+            recorded = self.registry.set_budget_flags(
+                idempotency_key, budget_reserved=True,
+            )
+        except Exception:
+            recorded = False
+        if not recorded:
+            with self.membrane.state.get_lock(resource_id):
+                resource.release(amount)
+            return False
         return True
 
     def resume_existing(
