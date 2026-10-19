@@ -184,6 +184,42 @@ class TestMultiNodeReserveCommitRelease:
             assert state.reserved == 0, f"Node {i} reserved={state.reserved}"
             assert state.committed == 40, f"Node {i} committed={state.committed}"
 
+
+    def test_release_refuses_unknown_reservation_state(self, cluster):
+        """Ambiguous reservation state must not be guessed to be releasable."""
+        leader = _get_leader(cluster)
+        assert leader is not None
+        leader.register_resource("budget-unknown-release", 100)
+        assert _wait_until(
+            lambda: all(
+                node.get_state("budget-unknown-release").capacity == 100
+                for node in cluster
+            ),
+            timeout=5.0,
+        )
+        reservation = leader.reserve("unknown-release-key", 25, "budget-unknown-release")
+        assert reservation.status == "RESERVED"
+        assert _wait_until(
+            lambda: all(
+                any(item.get("reservation_id") == reservation.reservation_id
+                    for item in node.get_state("budget-unknown-release").reservations)
+                for node in cluster
+            ),
+            timeout=5.0,
+        )
+
+        # Inject an ambiguous reservation record on each replica to exercise
+        # the state-machine guard without changing the reserved accounting.
+        for node in cluster:
+            node._raft._reservations[reservation.reservation_id]["state"] = "UNKNOWN"
+
+        result = leader.release(reservation.reservation_id)
+        assert result.status == "INVALID_STATE"
+        for node in cluster:
+            state = node.get_state("budget-unknown-release")
+            assert state.reserved == 25
+            assert state.committed == 0
+
     def test_release_from_leader(self, cluster):
         """Release from the leader and verify state on all nodes."""
         leader = _get_leader(cluster)
