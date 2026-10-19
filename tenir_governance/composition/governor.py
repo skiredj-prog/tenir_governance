@@ -1572,9 +1572,15 @@ class DualKernelGovernor:
                 }
     
     def confirm(self, idempotency_key: str) -> bool:
-        """Serialize confirmation with failure compensation for one governor instance."""
+        """Serialize confirmation with failure compensation across local processes."""
         with self._settlement_lock:
-            return self._confirm_under_settlement_lock(idempotency_key)
+            try:
+                with self.registry.settlement_lock(idempotency_key):
+                    return self._confirm_under_settlement_lock(idempotency_key)
+            except Exception:
+                # An unavailable durable coordination lock is an indeterminate
+                # settlement: fail closed without touching budget ownership.
+                return False
 
     def _confirm_under_settlement_lock(self, idempotency_key: str) -> bool:
         """Confirm an external effect only after durable budget ownership agrees."""
@@ -1623,10 +1629,15 @@ class DualKernelGovernor:
     def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, authoritative_non_execution: bool = False) -> bool:
         """Serialize failure compensation with confirmation for this governor instance."""
         with self._settlement_lock:
-            return self._fail_under_settlement_lock(
-                idempotency_key, resource_id, amount,
-                authoritative_non_execution=authoritative_non_execution,
-            )
+            try:
+                with self.registry.settlement_lock(idempotency_key):
+                    return self._fail_under_settlement_lock(
+                        idempotency_key, resource_id, amount,
+                        authoritative_non_execution=authoritative_non_execution,
+                    )
+            except Exception:
+                # Do not mutate budget if cross-process coordination is uncertain.
+                return False
 
     def _fail_under_settlement_lock(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, authoritative_non_execution: bool = False) -> bool:
         """Transition to FAILED and mutate only this operation's budget.
