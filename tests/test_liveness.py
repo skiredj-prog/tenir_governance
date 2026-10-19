@@ -157,6 +157,87 @@ class TestLivenessTermination:
         assert backend.get_state("identity-budget-a").reserved == 0
         assert backend.get_state("identity-budget-b").reserved == 0
 
+    class SimulatedProcessCrash(BaseException):
+        """Bypass ordinary exception compensation to model abrupt process death."""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Known crash window: budget and reservation registry are separate durable stores",
+    )
+    def test_crash_after_budget_reserve_is_recoverable(self, tmp_path, monkeypatch):
+        """A process crash after budget mutation must not orphan reserved capacity."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("crash-reserve-budget", Decimal("1"))
+
+        def crash_before_registry_durability(_reservations):
+            raise self.SimulatedProcessCrash("crash after budget write")
+
+        monkeypatch.setattr(backend, "_persist_reservations", crash_before_registry_durability)
+        with pytest.raises(self.SimulatedProcessCrash):
+            backend.reserve("crash-reserve-key", Decimal("0.1"), "crash-reserve-budget")
+
+        reopened = SingleHostLockBackend(str(tmp_path))
+        state = reopened.get_state("crash-reserve-budget")
+        assert state.reserved == 0
+        assert state.available == 1
+        assert reopened.reserve(
+            "crash-reserve-key", Decimal("0.1"), "crash-reserve-budget"
+        ).status == "RESERVED"
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Known crash window: commit persists budget before reservation lifecycle state",
+    )
+    def test_crash_after_budget_commit_is_recoverable(self, tmp_path, monkeypatch):
+        """A crash between budget commit and registry write must reconcile on restart."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("crash-commit-budget", Decimal("1"))
+        reservation = backend.reserve(
+            "crash-commit-key", Decimal("0.1"), "crash-commit-budget"
+        )
+        assert reservation.status == "RESERVED"
+
+        def crash_after_budget_commit(_reservations):
+            raise self.SimulatedProcessCrash("crash after budget commit")
+
+        monkeypatch.setattr(backend, "_persist_reservations", crash_after_budget_commit)
+        with pytest.raises(self.SimulatedProcessCrash):
+            backend.commit(reservation.reservation_id)
+
+        reopened = SingleHostLockBackend(str(tmp_path))
+        state = reopened.get_state("crash-commit-budget")
+        registry = reopened._load_reservations()
+        assert registry[reservation.reservation_id]["state"] == "COMMITTED"
+        assert state.reserved == 0
+        assert state.committed == Decimal("0.1")
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Known crash window: release persists budget before reservation lifecycle state",
+    )
+    def test_crash_after_budget_release_is_recoverable(self, tmp_path, monkeypatch):
+        """A crash between budget release and registry write must be idempotently recoverable."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("crash-release-budget", Decimal("1"))
+        reservation = backend.reserve(
+            "crash-release-key", Decimal("0.1"), "crash-release-budget"
+        )
+        assert reservation.status == "RESERVED"
+
+        def crash_after_budget_release(_reservations):
+            raise self.SimulatedProcessCrash("crash after budget release")
+
+        monkeypatch.setattr(backend, "_persist_reservations", crash_after_budget_release)
+        with pytest.raises(self.SimulatedProcessCrash):
+            backend.release(reservation.reservation_id)
+
+        reopened = SingleHostLockBackend(str(tmp_path))
+        state = reopened.get_state("crash-release-budget")
+        registry = reopened._load_reservations()
+        assert registry[reservation.reservation_id]["state"] == "RELEASED"
+        assert state.reserved == 0
+        assert state.committed == 0
+
     def test_reserve_persistence_failure_compensates_budget(self, tmp_path, monkeypatch):
         """A failed reservation-registry write must not leak reserved capacity."""
         backend = SingleHostLockBackend(str(tmp_path))
