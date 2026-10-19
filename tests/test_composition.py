@@ -24,7 +24,7 @@ from tenir_governance.composition.decisions import Decision
 from tenir_governance.composition.policy import CompositionPolicy
 from tenir_governance.membrane import TransitionMembrane, MembraneState
 from tenir_governance.objects import Agent, Passage, Resource, Delegation
-from tenir_governance.operations.registry import OperationRecord, OperationState
+from tenir_governance.operations.registry import DurableOperationRegistry, OperationRecord, OperationState
 
 
 class TestCompose:
@@ -224,6 +224,34 @@ class TestDualKernelGovernor:
         membrane = TransitionMembrane(state)
         governor = DualKernelGovernor(scoring, membrane, policy=policy)
         return governor, state
+
+    def test_registry_budget_flags_roll_back_when_persistence_fails(self, tmp_path, monkeypatch):
+        store = tmp_path / "operations.json"
+        registry = DurableOperationRegistry(str(store))
+        record = OperationRecord(
+            idempotency_key="registry-write-failure",
+            passage_id="passage-registry-write-failure",
+            agent_id="alice",
+            action_type="payment",
+            amount=10.0,
+            resource_id="budget",
+            state=OperationState.CREATED,
+        )
+        assert registry.register(record)
+
+        def fail_persist():
+            raise OSError("simulated registry disk failure")
+
+        monkeypatch.setattr(registry, "_persist", fail_persist)
+        with pytest.raises(OSError, match="simulated registry disk failure"):
+            registry.set_budget_flags("registry-write-failure", budget_reserved=True)
+
+        # Both the live record and the durable copy remain at the old value.
+        assert registry._records["registry-write-failure"].budget_reserved is False
+        reloaded = DurableOperationRegistry(str(store))
+        current = reloaded.get("registry-write-failure")
+        assert current is not None
+        assert current.budget_reserved is False
 
     @pytest.mark.parametrize("failure_mode", ["false", "exception"])
     def test_failed_budget_flag_persistence_compensates_reservation(
