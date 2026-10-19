@@ -143,10 +143,10 @@ class SingleHostLockBackend:
         if isinstance(capacity, bool):
             raise ValueError("Resource capacity must be finite and non-negative.")
         try:
-            normalized_capacity = float(capacity)
-        except (TypeError, ValueError, OverflowError) as exc:
+            normalized_capacity = capacity if isinstance(capacity, Decimal) else Decimal(str(capacity))
+        except (TypeError, ValueError, ArithmeticError) as exc:
             raise ValueError("Resource capacity must be finite and non-negative.") from exc
-        if not math.isfinite(normalized_capacity) or normalized_capacity < 0:
+        if not normalized_capacity.is_finite() or normalized_capacity < 0:
             raise ValueError("Resource capacity must be finite and non-negative.")
 
         # Delegate both idempotent re-registration and corruption checks to
