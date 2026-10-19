@@ -38,6 +38,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from .decisions import Decision
+from .._profile_meta import DISCLOSURE
 
 
 # ── Posture Mapping ─────────────────────────────────────────────────────
@@ -137,7 +138,7 @@ def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
         # ── Disclosure metadata (per versioning policy §6) ──
         "disclosure": {
             "doctrinal_version": "TENIR 2.0",
-            "platform_version": "5.3.0",
+            "platform_version": DISCLOSURE.platform_version,
             "contract_version": "1.2",
             "compliance_class": COMPLIANCE_CLASS,
             "active_profiles": [PROFILE_VERSION],
