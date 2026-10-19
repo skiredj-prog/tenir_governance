@@ -53,6 +53,29 @@ class TestLivenessTermination:
         assert state.reserved == 0.1
         assert state.available == 0.9
 
+    def test_resource_reregistration_preserves_accounting(self, tmp_path):
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("reregister-budget", 1)
+        first = backend.reserve("reregister-key", Decimal("0.4"), "reregister-budget")
+        assert first.status == "RESERVED"
+        assert backend.commit(first.reservation_id).status == "COMMITTED"
+
+        # Same-capacity registration is idempotent and must not reset counters.
+        backend.register_resource("reregister-budget", 1)
+        state = backend.get_state("reregister-budget")
+        assert state.reserved == 0
+        assert state.committed == 0.4
+        assert state.available == pytest.approx(0.6)
+
+        with pytest.raises(ValueError, match="different capacity"):
+            backend.register_resource("reregister-budget", 2)
+
+    def test_resource_registration_rejects_invalid_capacity(self, tmp_path):
+        backend = SingleHostLockBackend(str(tmp_path))
+        for capacity in (-1, float("nan"), float("inf"), True):
+            with pytest.raises(ValueError, match="finite and non-negative"):
+                backend.register_resource("invalid-capacity", capacity)
+
     def test_replay_preserves_terminal_state_and_resource_identity(self, tmp_path):
         """An idempotency key cannot revive a released or cross-resource reservation."""
         backend = SingleHostLockBackend(str(tmp_path))
