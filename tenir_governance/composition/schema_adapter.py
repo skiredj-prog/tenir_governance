@@ -150,14 +150,12 @@ def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
         },
     }
 
-    # Irreversible pathway assessment (if scoring result has it)
-    scoring_s = governor_result.get("scoring_s")
-    if scoring_s is not None:
-        result["irreversible_pathway_assessment"] = {
-            "materially_affects_irreversible_pathway": False,
-            "raw_data_human_verification_required": False,
-            "human_verified_raw_data": True,
-        }
+    # Never infer human verification or pathway materiality from the
+    # existence of a scalar score. The governor may attach an assessment only
+    # when an upstream component actually performed and recorded it.
+    pathway_assessment = governor_result.get("irreversible_pathway_assessment")
+    if isinstance(pathway_assessment, Mapping):
+        result["irreversible_pathway_assessment"] = dict(pathway_assessment)
 
     # Constraint geometry (if available from scoring)
     # The scoring adapter passes this through from TenirKernel
