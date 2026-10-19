@@ -737,3 +737,20 @@ def test_manual_fail_cannot_refund_committed_durable_budget_without_proof(tmp_pa
     assert record_after.budget_committed is True
     assert after.committed == before.committed == Decimal("10.0")
     assert after.reserved == before.reserved == Decimal("0")
+
+
+def test_direct_provider_confirmation_uses_durable_confirm_path(tmp_path):
+    provider = MockProvider(behavior="confirmed")
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
+    passage, _result = _adjudicate_durable_budget(gov)
+
+    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    record = gov.registry.get(passage.idempotency_key)
+    state = backend.get_state("budget")
+
+    assert result["operation_state"] == OperationState.CONFIRMED.value
+    assert record.state == OperationState.CONFIRMED
+    assert record.budget_reserved is False
+    assert record.budget_committed is True
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("10.0")
