@@ -31,6 +31,34 @@ from tenir_governance.objects import Passage
 from tenir_kernel.kernel import TenirKernel
 
 
+def test_reconcile_can_recover_interrupted_dispatching_operation():
+    gov, state = _setup_governor(provider=MockProvider(behavior="timeout"))
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    result = gov.adjudicate(
+        p, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    assert result["operation_state"] == OperationState.RESERVED.value
+    assert state.resources["budget"].commit(10.0)
+    assert gov.registry.set_budget_flags(
+        p.idempotency_key, budget_reserved=False, budget_committed=True,
+    )
+    success, _ = gov.registry.transition_to(p.idempotency_key, OperationState.DISPATCHING)
+    assert success
+
+    class ConfirmedNoEffectProvider:
+        def reconcile(self, **kwargs):
+            return ReconciliationResult(resolved=True, outcome=ProviderOutcome.FAILED)
+
+    gov.provider = ConfirmedNoEffectProvider()
+    reconciled = gov.reconcile_unknown(p.idempotency_key)
+
+    assert reconciled["reconciled"] is True
+    assert reconciled["operation_state"] == OperationState.FAILED.value
+    assert state.resources["budget"].consumed == 0.0
+    assert state.resources["budget"].reserved == 0.0
+
+
 def test_concurrent_failed_reconciliation_refunds_only_once():
     initial_provider = MockProvider(behavior="timeout")
     gov, state = _setup_governor(provider=initial_provider)
