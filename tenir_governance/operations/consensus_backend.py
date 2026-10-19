@@ -224,7 +224,19 @@ class SingleHostLockBackend:
                     "state": "RESERVED",
                     "created_at": time.time(),
                 }
-                self._persist_reservations(reservations)
+                try:
+                    self._persist_reservations(reservations)
+                except Exception:
+                    # The coordinator is a separate durable store. If the
+                    # registry write fails, compensate the budget mutation so
+                    # a failed reserve does not leak capacity.
+                    reservations.pop(reservation_id, None)
+                    try:
+                        self._coordinator.release(resource_id, amount)
+                    except Exception:
+                        # Do not report success when compensation is uncertain.
+                        return ReservationResult(status="ERROR")
+                    return ReservationResult(status="ERROR")
 
                 return ReservationResult(
                     status="RESERVED",
