@@ -1121,7 +1121,7 @@ class DualKernelGovernor:
             }
         elif prov_result.outcome == ProviderOutcome.FAILED:
             try:
-                self.fail(idempotency_key, resource_id, amount)
+                self.fail(idempotency_key, resource_id, amount, authoritative_non_execution=True)
             finally:
                 with self._active_dispatches_lock:
                     self._active_dispatches.discard(idempotency_key)
@@ -1519,8 +1519,12 @@ class DualKernelGovernor:
         success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
         return success
 
-    def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0) -> bool:
-        """Transition to FAILED and mutate only this operation's budget."""
+    def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, authoritative_non_execution: bool = False) -> bool:
+        """Transition to FAILED and mutate only this operation's budget.
+
+        authoritative_non_execution must be true only when the provider or
+        reconciliation protocol explicitly confirms that no external effect occurred.
+        """
         record = self.registry.get(idempotency_key)
         if record is None:
             return False
@@ -1546,22 +1550,31 @@ class DualKernelGovernor:
             # durable backend is configured but reservation ownership is unknown.
             return False
         if self.consensus_backend is not None and record.reservation_id and owns_budget:
-            # A committed reservation can only be refunded after authoritative
-            # non-execution evidence. This API has no such proof parameter, so
-            # leave it for reconcile_unknown() rather than guessing.
             if committed:
-                return False
-            if record.state not in (
-                OperationState.CREATED, OperationState.HOLD,
-                OperationState.RESERVED, OperationState.ESCALATED,
-            ):
-                return False
-            try:
-                released = self.consensus_backend.release(record.reservation_id)
-            except Exception:
-                return False
-            if getattr(released, "status", None) not in ("RELEASED", "ALREADY_RELEASED"):
-                return False
+                # A committed budget can be refunded only when this call is
+                # backed by explicit provider/reconciliation non-execution proof.
+                if not authoritative_non_execution or record.state not in (
+                    OperationState.DISPATCHING, OperationState.UNKNOWN,
+                ):
+                    return False
+                try:
+                    compensated = self.consensus_backend.refund(record.reservation_id)
+                except Exception:
+                    return False
+                if getattr(compensated, "status", None) not in ("REFUNDED", "ALREADY_REFUNDED"):
+                    return False
+            else:
+                if record.state not in (
+                    OperationState.CREATED, OperationState.HOLD,
+                    OperationState.RESERVED, OperationState.ESCALATED,
+                ):
+                    return False
+                try:
+                    compensated = self.consensus_backend.release(record.reservation_id)
+                except Exception:
+                    return False
+                if getattr(compensated, "status", None) not in ("RELEASED", "ALREADY_RELEASED"):
+                    return False
             try:
                 flags_ok = self.registry.set_budget_flags(
                     idempotency_key,
