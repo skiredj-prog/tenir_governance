@@ -28,6 +28,7 @@ Limitations:
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -178,12 +179,21 @@ class SingleHostLockBackend:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         return f
 
-    def reserve(self, key: str, amount: int, resource_id: str) -> ReservationResult:
+    def reserve(self, key: str, amount: int | float | Decimal, resource_id: str) -> ReservationResult:
         """Reserve budget for an idempotency key.
 
-        Idempotent: if key already reserved with same amount, returns existing.
-        If key already reserved with different amount, returns DUPLICATE_KEY.
+        This reference backend uses float accounting internally. Normalize
+        Decimal inputs before mutating the coordinator so the durable JSON
+        reservation record remains serializable.
         """
+        if isinstance(amount, bool):
+            return ReservationResult(status="INVALID_AMOUNT")
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError, OverflowError):
+            return ReservationResult(status="INVALID_AMOUNT")
+        if not math.isfinite(amount) or amount <= 0:
+            return ReservationResult(status="INVALID_AMOUNT")
         with self._lock:
             flock = self._lock_file()
             try:
