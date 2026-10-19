@@ -500,16 +500,45 @@ class DurableOperationRegistry:
                     flock.close()
 
     def set_budget_flags(self, idempotency_key: str, **flags: bool) -> bool:
-        """Persist budget ownership flags (budget_reserved / budget_committed)."""
-        record = self.get(idempotency_key)
-        if record is None:
-            return False
-        for name, value in flags.items():
-            if name not in ("budget_reserved", "budget_committed"):
-                raise ValueError(f"unknown budget flag: {name}")
-            setattr(record, name, bool(value))
-        self._persist()
-        return True
+        """Atomically update and persist budget ownership flags."""
+        allowed = {"budget_reserved", "budget_committed"}
+        unknown = set(flags) - allowed
+        if unknown:
+            raise ValueError(f"unknown budget flag(s): {sorted(unknown)}")
+
+        with self._lock:
+            if self._corrupted:
+                raise RuntimeError(
+                    "Registry store is corrupted — refuse to update budget flags."
+                )
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                if self._corrupted:
+                    raise RuntimeError(
+                        "Registry store became corrupted on reload — refuse to update budget flags."
+                    )
+                record = self._records.get(idempotency_key)
+                if record is None:
+                    return False
+
+                previous = {name: getattr(record, name) for name in flags}
+                for name, value in flags.items():
+                    setattr(record, name, bool(value))
+                try:
+                    self._persist()
+                except Exception:
+                    # Keep in-memory state consistent with the last known
+                    # persisted state. The caller must compensate any budget
+                    # mutation when this write fails.
+                    for name, value in previous.items():
+                        setattr(record, name, value)
+                    raise
+                return True
+            finally:
+                if flock:
+                    flock.close()
 
     def find_by_state(self, state: OperationState) -> list[OperationRecord]:
         """Find all operations in a given state. Used for recovery.
