@@ -171,11 +171,19 @@ def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
         },
     })
 
-    assessment = governor_result.get("irreversible_pathway_assessment")
-    if isinstance(assessment, Mapping):
+    if "irreversible_pathway_assessment" in governor_result:
+        assessment = governor_result["irreversible_pathway_assessment"]
+        if not isinstance(assessment, Mapping):
+            raise ValueError(
+                "governor_result.irreversible_pathway_assessment must be a mapping when supplied"
+            )
         result["irreversible_pathway_assessment"] = dict(assessment)
-    geometry = governor_result.get("constraint_geometry")
-    if isinstance(geometry, Mapping):
+    if "constraint_geometry" in governor_result:
+        geometry = governor_result["constraint_geometry"]
+        if not isinstance(geometry, Mapping):
+            raise ValueError(
+                "governor_result.constraint_geometry must be a mapping when supplied"
+            )
         result["constraint_geometry"] = dict(geometry)
 
     return validate_runtime_object(result)
