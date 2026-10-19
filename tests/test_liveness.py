@@ -762,3 +762,19 @@ def test_operation_record_persists_backend_reservation_identity(tmp_path):
     assert recovered is not None
     assert recovered.reservation_id == "backend-reservation-123"
     assert recovered.budget_reserved is True
+
+
+def test_release_is_durable_and_idempotent(tmp_path):
+    backend = SingleHostLockBackend(str(tmp_path))
+    backend.register_resource("release-budget", Decimal("20"))
+    reservation = backend.reserve("release-key", Decimal("7"), "release-budget")
+    assert reservation.status == "RESERVED"
+
+    first = backend.release(reservation.reservation_id)
+    replay = backend.release(reservation.reservation_id)
+
+    assert first.status == "RELEASED"
+    assert replay.status == "ALREADY_RELEASED"
+    state = backend.get_state("release-budget")
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("0")
