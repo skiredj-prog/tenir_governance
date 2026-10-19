@@ -1203,6 +1203,39 @@ class DualKernelGovernor:
             }
 
         if recon.resolved and recon.outcome == ProviderOutcome.CONFIRMED:
+            if self.consensus_backend is not None and record.reservation_id:
+                try:
+                    backend_state = self.consensus_backend.get_state(record.resource_id)
+                    durable_reservation = next(
+                        (item for item in backend_state.reservations
+                         if item.get("reservation_id") == record.reservation_id),
+                        None,
+                    )
+                    if durable_reservation is None:
+                        raise RuntimeError("Durable reservation identity cannot be verified")
+                    if durable_reservation.get("state") == "RESERVED":
+                        committed_result = self.consensus_backend.commit(record.reservation_id)
+                        if getattr(committed_result, "status", None) not in ("COMMITTED", "ALREADY_COMMITTED"):
+                            raise RuntimeError("Could not commit reservation for confirmed external effect")
+                    elif durable_reservation.get("state") != "COMMITTED":
+                        raise RuntimeError(
+                            f"External effect confirmed but durable reservation is {durable_reservation.get('state')}"
+                        )
+                    flags_ok = self.registry.set_budget_flags(
+                        idempotency_key,
+                        budget_reserved=False,
+                        budget_committed=True,
+                        reservation_id=record.reservation_id,
+                    )
+                    if not flags_ok:
+                        raise RuntimeError("Could not persist committed budget ownership")
+                except Exception as exc:
+                    return {
+                        "reconciled": False, "idempotency_key": idempotency_key,
+                        "operation_state": record.state.value,
+                        "recommendation": "human_review",
+                        "reason": f"External effect confirmed but budget ownership needs reconciliation: {exc}",
+                    }
             success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
             if not success:
                 current = self.registry.get(idempotency_key)
