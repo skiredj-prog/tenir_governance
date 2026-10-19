@@ -1325,3 +1325,14 @@ def test_durable_backend_refuses_to_release_unknown_reservation_state(tmp_path):
     assert durable_state["state"] == "UNKNOWN"
     assert budget.reserved == Decimal("10.0")
     assert budget.committed == Decimal("0")
+
+
+def test_durable_settlement_rejects_in_memory_operation_registry(tmp_path):
+    """A durable budget backend must not imply cross-instance safety with an in-memory registry."""
+    from tenir_governance.operations.registry import DurableOperationRegistry
+
+    registry = DurableOperationRegistry()
+    with pytest.raises(RuntimeError, match="requires a persistent operation registry"):
+        with registry.settlement_lock("operation-key"):
+            pytest.fail("unsafe settlement lock unexpectedly acquired")
+
