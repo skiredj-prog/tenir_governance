@@ -838,9 +838,33 @@ class DualKernelGovernor:
                             }
                     committed = resource.commit(amount)
                 if committed:
-                    self.registry.set_budget_flags(
-                        idempotency_key, budget_reserved=False, budget_committed=True,
-                    )
+                    try:
+                        flags_ok = self.registry.set_budget_flags(
+                            idempotency_key,
+                            budget_reserved=False,
+                            budget_committed=True,
+                        )
+                    except Exception:
+                        flags_ok = False
+                    if not flags_ok:
+                        # The provider has not been called yet. Restore the
+                        # accounting to its pre-dispatch reservation and leave
+                        # DISPATCHING for explicit reconciliation; do not allow
+                        # an external effect when ownership persistence failed.
+                        with self.membrane.state.get_lock(resource_id):
+                            resource.refund(amount)
+                            restored = resource.reserve(amount)
+                        if not restored:
+                            return {
+                                "dispatched": False,
+                                "reason": "Budget ownership persistence failed and reservation restoration failed; manual reconciliation required.",
+                                "operation_state": OperationState.DISPATCHING.value,
+                            }
+                        return {
+                            "dispatched": False,
+                            "reason": "Budget ownership persistence failed; provider execution blocked and reservation restored.",
+                            "operation_state": OperationState.DISPATCHING.value,
+                        }
                 else:
                     # Commit failed — the reservation is no longer held
                     # (e.g. released by a concurrent fail/expire). Fail-closed.
