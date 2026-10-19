@@ -201,7 +201,7 @@ class TestLivenessTermination:
         registry = reopened._load_reservations()
         assert registry[reservation.reservation_id]["state"] == "COMMITTED"
         assert state.reserved == 0
-        assert state.committed == Decimal("0.1")
+        assert Decimal(str(state.committed)) == Decimal("0.1")
 
     def test_crash_after_budget_release_is_recoverable(self, tmp_path, monkeypatch):
         """A crash between budget release and registry write must be idempotently recoverable."""
