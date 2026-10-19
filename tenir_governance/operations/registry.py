@@ -533,7 +533,7 @@ class DurableOperationRegistry:
 
                 previous = {name: getattr(record, name) for name in flags}
                 for name, value in flags.items():
-                    setattr(record, name, bool(value))
+                    setattr(record, name, bool(value) if name in ("budget_reserved", "budget_committed") else value)
                 desired = {name: getattr(record, name) for name in flags}
                 try:
                     self._persist()
