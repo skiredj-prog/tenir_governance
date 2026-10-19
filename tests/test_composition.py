@@ -310,6 +310,28 @@ class TestDualKernelGovernor:
         assert current is not None
         assert current.budget_reserved is False
 
+    def test_quarantine_activated_after_membrane_check_blocks_admission(self, monkeypatch):
+        gov, state = self._setup()
+        original = gov.membrane.adjudicate
+
+        def adjudicate_then_quarantine(**kwargs):
+            result = original(**kwargs)
+            state.lock_quarantine("race-test")
+            return result
+
+        monkeypatch.setattr(gov.membrane, "adjudicate", adjudicate_then_quarantine)
+        passage = Passage(
+            agent_id="alice", action_type="payment", amount=10.0,
+            idempotency_key="quarantine-admission-race",
+        )
+        result = gov.adjudicate(
+            passage, pressure=0.2, velocity=0.3, capacity=1.0,
+            resource_id="budget", amount=10.0,
+        )
+        assert result["composed_decision"] == Decision.HARD_VETO.value
+        assert state.resources["budget"].reserved == 0.0
+        assert result["operation_state"] != OperationState.RESERVED.value
+
     def test_resource_reregistration_cannot_reset_budget_or_lock(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
