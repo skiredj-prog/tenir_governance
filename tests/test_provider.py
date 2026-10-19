@@ -12,10 +12,11 @@ Covers:
 import pytest
 import tempfile
 import os
+from types import SimpleNamespace
 
 from tenir_governance.operations.provider import (
     DispatchProvider, DispatchResult, ProviderOutcome,
-    ReconciliationResult, MockProvider,
+    ReconciliationResult, MockProvider, StripeProvider,
 )
 from tenir_governance.composition.governor import (
     DualKernelGovernor, ScoringKernelAdapter,
@@ -27,6 +28,18 @@ from tenir_governance.operations.registry import (
 )
 from tenir_governance.objects import Passage
 from tenir_kernel.kernel import TenirKernel
+
+
+def test_stripe_reconciliation_empty_search_remains_unknown(monkeypatch):
+    provider = StripeProvider(api_key="sk_test_placeholder")
+    payment_intent = SimpleNamespace(search=lambda **kwargs: SimpleNamespace(data=[]))
+    provider._get_stripe = lambda: SimpleNamespace(PaymentIntent=payment_intent)
+
+    result = provider.reconcile("operation-key")
+
+    assert result.resolved is False
+    assert result.outcome == ProviderOutcome.UNKNOWN
+    assert "does not prove non-execution" in result.error
 
 
 def _setup_governor(provider=None, budget_capacity=100.0):
