@@ -54,6 +54,19 @@ def _get_leader(nodes):
     return None
 
 
+def _wait_for_leader(nodes, exclude=None, timeout=10.0, interval=0.1):
+    """Wait for leader election with a bounded timeout instead of a fixed sleep."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for node in nodes:
+            if node is exclude:
+                continue
+            if node.is_leader():
+                return node
+        time.sleep(interval)
+    return None
+
+
 def _wait_until(predicate, timeout=5.0, interval=0.05):
     """Poll an eventual-consistency condition with a bounded timeout."""
     deadline = time.monotonic() + timeout
@@ -524,20 +537,11 @@ class TestLeaderFailover:
         assert leader.commit(res.reservation_id).status == "COMMITTED"
         time.sleep(0.5)
 
-        # Crash leader
+        # Crash leader and wait for a bounded, observable election.
         leader.destroy()
-        time.sleep(2.0)
+        new_leader = _wait_for_leader(cluster, exclude=leader, timeout=10.0)
 
-        # Find new leader
-        new_leader = None
-        for node in cluster:
-            if node is leader:
-                continue
-            if node.is_leader():
-                new_leader = node
-                break
-
-        assert new_leader is not None
+        assert new_leader is not None, "no replacement leader elected within 10 seconds"
 
         # State should be preserved
         state = new_leader.get_state("budget-PRES")
