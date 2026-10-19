@@ -35,10 +35,12 @@ Limitations:
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
 import uuid
+from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -60,6 +62,25 @@ from tenir_governance.operations.consensus_backend import (
 )
 
 
+MAX_AMOUNT = Decimal("1000000000000000000")
+
+
+def _validated_amount(value, *, allow_zero=False):
+    """Return a finite, bounded float or None; reject bool and malformed input."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if not amount.is_finite() or amount < 0 or (amount == 0 and not allow_zero):
+        return None
+    if amount > MAX_AMOUNT:
+        return None
+    converted = float(amount)
+    return converted if math.isfinite(converted) else None
+
+
 class _RaftStateMachine(SyncObj):
     """Replicated state machine for budget + reservations.
 
@@ -78,20 +99,34 @@ class _RaftStateMachine(SyncObj):
         self._resources = {}
         self._reservations = {}
         self._key_index = {}
+        self._logical_clock = 0
+        self._incidents = []
+
+    def _tick_logical(self):
+        """Advance the replicated logical clock deterministically."""
+        self._logical_clock += 1
+        return self._logical_clock
+
+    def _record_incident(self, code, reservation_id, previous_state):
+        self._incidents.append({
+            "code": code, "reservation_id": reservation_id,
+            "previous_state": previous_state, "logical_time": self._tick_logical(),
+        })
 
     @replicated
     def register_resource(self, resource_id, capacity):
-        """Register a resource with a capacity ceiling."""
-        if resource_id not in self._resources:
-            self._resources[resource_id] = {
-                "capacity": float(capacity),
-                "reserved": 0.0,
-                "committed": 0.0,
-            }
-        return True
+        """Register once; never reset an existing resource's accounting."""
+        normalized = _validated_amount(capacity, allow_zero=True)
+        if normalized is None:
+            return "INVALID_CAPACITY"
+        existing = self._resources.get(resource_id)
+        if existing is not None:
+            return "ALREADY_REGISTERED" if existing["capacity"] == normalized else "RESOURCE_CONFLICT"
+        self._resources[resource_id] = {"capacity": normalized, "reserved": 0.0, "committed": 0.0}
+        return "REGISTERED"
 
     @replicated
-    def reserve(self, key, amount, resource_id, reservation_id, timestamp):
+    def reserve(self, key, amount, resource_id, reservation_id):
         """Reserve budget for an idempotency key.
 
         reservation_id and timestamp are generated client-side and passed as
@@ -103,135 +138,120 @@ class _RaftStateMachine(SyncObj):
         - INSUFFICIENT_BUDGET: not enough budget
         - DUPLICATE_KEY: key exists with different amount
         """
-        # Check for existing reservation with this key
+        normalized = _validated_amount(amount)
+        if normalized is None:
+            return ("INVALID_AMOUNT", None, None)
         if key in self._key_index:
             rid = self._key_index[key]
-            rec = self._reservations[rid]
-            if rec["amount"] == amount:
-                return ("RESERVED", rid, amount)
-            else:
-                return ("DUPLICATE_KEY", None, None)
-
-        # Check I8: reserved + committed + amount <= capacity
+            rec = self._reservations.get(rid)
+            if rec is None:
+                return ("IDEMPOTENCY_INDEX_CORRUPTED", None, None)
+            if rec["amount"] == normalized and rec["resource_id"] == resource_id:
+                return (rec["state"], rid, normalized)
+            return ("DUPLICATE_KEY", None, None)
         res = self._resources.get(resource_id)
         if res is None:
-            return ("ERROR", None, None)
-
-        if res["reserved"] + res["committed"] + float(amount) > res["capacity"]:
+            return ("UNKNOWN_RESOURCE", None, None)
+        if res["reserved"] + res["committed"] + normalized > res["capacity"]:
             return ("INSUFFICIENT_BUDGET", None, None)
-
-        # Create reservation with client-provided deterministic ID
+        if reservation_id in self._reservations:
+            return ("RESERVATION_ID_CONFLICT", None, None)
         self._reservations[reservation_id] = {
-            "key": key,
-            "amount": amount,
-            "resource_id": resource_id,
-            "state": "RESERVED",
-            "created_at": timestamp,
+            "key": key, "amount": normalized, "resource_id": resource_id,
+            "state": "RESERVED", "created_at_logical": self._tick_logical(),
         }
         self._key_index[key] = reservation_id
-        res["reserved"] += float(amount)
-
-        return ("RESERVED", reservation_id, amount)
+        res["reserved"] += normalized
+        return ("RESERVED", reservation_id, normalized)
 
     @replicated
     def commit(self, reservation_id):
-        """Commit a reservation: transfer from reserved to committed.
-
-        Returns: status string
-        - COMMITTED: successfully committed
-        - NOT_FOUND: reservation doesn't exist
-        - ALREADY_COMMITTED: already committed
-        - ERROR: invalid state
-        """
         if reservation_id not in self._reservations:
             return "NOT_FOUND"
-
         rec = self._reservations[reservation_id]
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
         if rec["state"] != "RESERVED":
-            return "ERROR"
-
+            return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
+        amount = float(rec["amount"])
         if res is None:
             return "ERROR"
-
-        # Transfer from reserved to committed
-        res["reserved"] -= float(rec["amount"])
-        res["committed"] += float(rec["amount"])
+        if res["reserved"] < amount:
+            return "INCONSISTENT_RESERVED_AMOUNT"
+        res["reserved"] -= amount
+        res["committed"] += amount
         rec["state"] = "COMMITTED"
-        rec["committed_at"] = time.time()
-
+        rec["committed_at_logical"] = self._tick_logical()
         return "COMMITTED"
 
     @replicated
     def release(self, reservation_id):
-        """Release a non-committed reservation.
-
-        Returns: status string
-        """
         if reservation_id not in self._reservations:
             return "NOT_FOUND"
-
         rec = self._reservations[reservation_id]
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
         if rec["state"] not in ("RESERVED", "UNKNOWN"):
-            return "ERROR"
-
+            return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
+        amount = float(rec["amount"])
         if res is None:
             return "ERROR"
-
-        res["reserved"] -= float(rec["amount"])
+        if rec["state"] == "RESERVED":
+            if res["reserved"] < amount:
+                return "INCONSISTENT_RESERVED_AMOUNT"
+            res["reserved"] -= amount
         rec["state"] = "RELEASED"
-        rec["released_at"] = time.time()
-
+        rec["released_at_logical"] = self._tick_logical()
         return "RELEASED"
 
     @replicated
     def reconcile_commit(self, reservation_id):
-        """Reconcile by committing (provider confirmed effect)."""
         if reservation_id not in self._reservations:
             return "NOT_FOUND"
-
         rec = self._reservations[reservation_id]
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
-
+        if rec["state"] != "RESERVED":
+            if rec["state"] == "RELEASED":
+                self._record_incident("LATE_EFFECT_AFTER_RELEASE", reservation_id, "RELEASED")
+                return "RECONCILE_CONFLICT"
+            return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
+        amount = float(rec["amount"])
         if res is None:
             return "ERROR"
-
-        if rec["state"] == "RESERVED":
-            res["reserved"] -= float(rec["amount"])
+        if res["reserved"] < amount:
+            self._record_incident("RESERVED_AMOUNT_MISSING", reservation_id, rec["state"])
+            return "INCONSISTENT_RESERVED_AMOUNT"
+        res["reserved"] -= amount
+        res["committed"] += amount
         rec["state"] = "COMMITTED"
-        rec["committed_at"] = time.time()
-        res["committed"] += float(rec["amount"])
-
+        rec["committed_at_logical"] = self._tick_logical()
         return "COMMITTED"
 
     @replicated
     def reconcile_release(self, reservation_id):
-        """Reconcile by releasing (provider confirmed no effect)."""
         if reservation_id not in self._reservations:
             return "NOT_FOUND"
-
         rec = self._reservations[reservation_id]
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
         if rec["state"] == "RELEASED":
             return "RELEASED"
-
+        if rec["state"] not in ("RESERVED", "UNKNOWN"):
+            return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
         if res is None:
             return "ERROR"
-
+        amount = float(rec["amount"])
         if rec["state"] == "RESERVED":
-            res["reserved"] -= float(rec["amount"])
+            if res["reserved"] < amount:
+                return "INCONSISTENT_RESERVED_AMOUNT"
+            res["reserved"] -= amount
         rec["state"] = "RELEASED"
-        rec["released_at"] = time.time()
-
+        rec["released_at_logical"] = self._tick_logical()
         return "RELEASED"
 
     # --- Read-only methods (local, not replicated) ---
@@ -354,8 +374,11 @@ class RaftConsensusBackend:
         return self._raft.getStatus()
 
     def register_resource(self, resource_id, capacity):
-        """Register a resource with the backend (replicated)."""
-        self._raft.register_resource(resource_id, capacity, sync=True, timeout=5.0)
+        """Register without overwriting existing accounting state."""
+        normalized = _validated_amount(capacity, allow_zero=True)
+        if normalized is None:
+            return "INVALID_CAPACITY"
+        return self._raft.register_resource(resource_id, normalized, sync=True, timeout=5.0)
 
     def reserve(self, key, amount, resource_id) -> ReservationResult:
         """Reserve budget for an idempotency key (replicated via Raft).
@@ -367,11 +390,13 @@ class RaftConsensusBackend:
 
         I8 is enforced on the leader before the command is committed.
         """
+        normalized = _validated_amount(amount)
+        if normalized is None:
+            return ReservationResult(status="INVALID_AMOUNT")
         reservation_id = str(uuid.uuid4())
-        timestamp = time.time()
         try:
             result = self._raft.reserve(
-                key, amount, resource_id, reservation_id, timestamp,
+                key, normalized, resource_id, reservation_id,
                 sync=True, timeout=10.0
             )
             status, rid, amt = result
