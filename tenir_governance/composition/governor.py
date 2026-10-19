@@ -1455,7 +1455,41 @@ class DualKernelGovernor:
             }
 
     def confirm(self, idempotency_key: str) -> bool:
-        """Transition DISPATCHING → CONFIRMED. The external effect occurred."""
+        """Confirm an external effect only after durable budget ownership agrees."""
+        record = self.registry.get(idempotency_key)
+        if record is None:
+            return False
+        if self.consensus_backend is not None and record.resource_id and record.amount > 0:
+            if not record.reservation_id:
+                return False
+            try:
+                state = self.consensus_backend.get_state(record.resource_id)
+                reservation = next(
+                    (item for item in state.reservations
+                     if item.get("reservation_id") == record.reservation_id),
+                    None,
+                )
+                if reservation is None:
+                    return False
+                reservation_state = reservation.get("state")
+                if reservation_state == "RESERVED":
+                    committed = self.consensus_backend.commit(record.reservation_id)
+                    if getattr(committed, "status", None) not in ("COMMITTED", "ALREADY_COMMITTED"):
+                        return False
+                elif reservation_state != "COMMITTED":
+                    # A released/refunded reservation cannot back a newly
+                    # confirmed external effect.
+                    return False
+                flags_ok = self.registry.set_budget_flags(
+                    idempotency_key,
+                    budget_reserved=False,
+                    budget_committed=True,
+                    reservation_id=record.reservation_id,
+                )
+                if not flags_ok:
+                    return False
+            except Exception:
+                return False
         success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
         return success
 
