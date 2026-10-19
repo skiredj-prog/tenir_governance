@@ -212,7 +212,7 @@ class TestMembraneResourceLockCreation:
             except Exception as exc:
                 errors.append(exc)
 
-        threads = [threading.Thread(target=get_lock) for _ in range(16)]
+        threads = [threading.Thread(target=get_lock, daemon=True) for _ in range(16)]
         for thread in threads:
             thread.start()
         for thread in threads:
