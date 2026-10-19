@@ -70,6 +70,29 @@ class TestLivenessTermination:
         assert state.available == pytest.approx(0.0)
         assert state.reserved + state.committed <= state.capacity
 
+    def test_high_precision_decimal_reservation_survives_restart(self, tmp_path):
+        amount = Decimal("0.123456789012345678901")
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("precision-budget", amount)
+        first = backend.reserve("precision-key", amount, "precision-budget")
+        assert first.status == "RESERVED"
+
+        # The durable reservation record must preserve the decimal spelling,
+        # not round it through a JSON float.
+        import json
+        record = json.loads((tmp_path / "reservations.json").read_text())
+        persisted = next(iter(record.values()))
+        assert persisted["amount"] == str(amount)
+
+        reopened = SingleHostLockBackend(str(tmp_path))
+        replay = reopened.reserve("precision-key", amount, "precision-budget")
+        assert replay.status == "RESERVED"
+        assert replay.reservation_id == first.reservation_id
+        assert reopened.commit(first.reservation_id).status == "COMMITTED"
+        assert reopened.reserve(
+            "precision-overrun", Decimal("0.000000000000000000001"), "precision-budget"
+        ).status == "INSUFFICIENT_BUDGET"
+
     def test_corrupted_budget_store_fails_closed(self, tmp_path):
         (tmp_path / "budget.json").write_text("{not-json")
         with pytest.raises(RuntimeError, match="Corrupted durable budget store"):
