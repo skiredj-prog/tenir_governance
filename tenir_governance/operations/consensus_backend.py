@@ -506,7 +506,7 @@ class SingleHostLockBackend:
                     "before": before,
                     "after": after,
                 })
-                if not self._coordinator.refund(rec["resource_id"], amount):
+                if not self._coordinator._refund_committed(rec["resource_id"], amount):
                     self._clear_transaction()
                     return RefundResult(status="ERROR")
                 reservations[reservation_id] = updated
