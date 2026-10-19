@@ -1392,7 +1392,7 @@ class DualKernelGovernor:
                             }
                         if durable_reservation.get("state") == "COMMITTED":
                             committed = True
-                        elif durable_reservation.get("state") in ("RESERVED", "UNKNOWN"):
+                        elif durable_reservation.get("state") == "RESERVED":
                             committed = False
                         elif durable_reservation.get("state") in ("REFUNDED", "RELEASED"):
                             # A prior attempt may have compensated before crashing.
