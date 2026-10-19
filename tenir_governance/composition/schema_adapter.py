@@ -121,10 +121,15 @@ def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
             "the adapter will not fabricate a trace identifier"
         )
     trace_context["trace_id"] = trace_id
-    trace_context["stages"] = _build_trace_stages(governor_result)
+    canonical_stages = trace_context.get("stages")
+    if canonical_stages is None or canonical_stages == []:
+        trace_context["stages"] = _build_trace_stages(governor_result)
+    elif not isinstance(canonical_stages, list):
+        raise ValueError("canonical_context.trace.stages must be a list when supplied")
     for trace_key in ("ledger_entries", "ledger_valid", "passage_id"):
         if trace_key in governor_result:
             trace_context[trace_key] = governor_result[trace_key]
+    degraded_modes = _degraded_modes(context, is_degraded)
     result.update({
         "schema_version": "1.2",
         "engine_spec_version": "TENIR-2.0",
@@ -135,7 +140,7 @@ def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
         "execution_disposition": EXECUTION_DISPOSITION_MAP.get(composed, "hold"),
         "execution_allowed": composed in (Decision.PASS.value, Decision.FLAG.value),
         "compliance_class": COMPLIANCE_CLASS,
-        "degraded_mode": _degraded_modes(context, is_degraded),
+        "degraded_mode": degraded_modes,
         "active_profiles": active_profiles,
         "trace": trace_context,
         "synthesis": {
@@ -144,7 +149,7 @@ def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
             "structural_core": dict(context.get("synthesis", {}).get("structural_core", {})),
             "epistemic_state": dict(context.get("synthesis", {}).get("epistemic_state", {})),
             "rationale": _rationale_items(governor_result),
-            "degraded_inputs": _degraded_modes(context, is_degraded),
+            "degraded_inputs": [] if degraded_modes == ["none"] else degraded_modes,
             "agency_state": {
                 "membrane_decision": governor_result.get("membrane_decision"),
                 "membrane_rationale": governor_result.get("membrane_rationale"),
@@ -236,7 +241,11 @@ def _build_trace_stages(governor_result: Mapping[str, Any]) -> list[dict[str, An
     if operation_state:
         stages.append({
             "stage": "operation",
-            "status": "warning" if str(operation_state).upper() in {"UNKNOWN", "HOLD"} else "ok",
+            "status": (
+                "failed" if str(operation_state).upper() in {"FAILED", "ERROR", "HARD_VETO", "REJECTED"}
+                else "warning" if str(operation_state).upper() in {"UNKNOWN", "HOLD", "HELD"}
+                else "ok"
+            ),
             "summary": str(operation_state),
             "outputs_emitted": [str(operation_state)],
         })
