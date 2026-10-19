@@ -1107,10 +1107,22 @@ class DualKernelGovernor:
         # 5. Transition based on provider outcome
         if prov_result.outcome == ProviderOutcome.CONFIRMED:
             try:
-                self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+                confirmed = self.confirm(idempotency_key)
             finally:
                 with self._active_dispatches_lock:
                     self._active_dispatches.discard(idempotency_key)
+            if not confirmed:
+                latest = self.registry.get(idempotency_key)
+                return {
+                    "dispatched": True,
+                    "executed": True,
+                    "idempotency_key": idempotency_key,
+                    "operation_state": latest.state.value if latest else "not_found",
+                    "provider_reference": prov_result.provider_reference,
+                    "provider_latency_ms": prov_result.latency_ms,
+                    "recommendation": "human_review",
+                    "reason": "Provider confirmed the external effect, but durable budget ownership or terminal state could not be confirmed.",
+                }
             return {
                 "dispatched": True,
                 "executed": True,
