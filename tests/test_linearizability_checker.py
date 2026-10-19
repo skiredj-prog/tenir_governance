@@ -48,8 +48,9 @@ def test_checker_does_not_leak_mutations_from_failed_search_branch():
 
 
 def test_sequential_spec_rejects_commit_after_release():
+    state = {"capacity": 100, "reserved": 0, "consumed": 0, "reservations": {}}
     state, reserved = consensus_sequential_spec(
-        "reserve", None, ("key-A", 10, "budget")
+        "reserve", state, ("key-A", 10, "budget")
     )
     reservation_id = reserved["reservation_id"]
     state, released = consensus_sequential_spec("release", state, (reservation_id,))
