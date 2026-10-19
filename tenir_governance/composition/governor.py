@@ -303,8 +303,8 @@ class DualKernelGovernor:
         registry: DurableOperationRegistry | None = None,
         budget_coordinator: BudgetCoordinator | None = None,
         provider: Any = None,
-        consensus_backend: Any = None,
         assessor: PostExecutionAssessor | None = None,
+        consensus_backend: Any = None,
     ):
         # scoring_kernel is a ScoringKernelAdapter wrapping TenirKernel,
         # or any object with a compatible adjudicate() interface.
