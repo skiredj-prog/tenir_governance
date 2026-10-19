@@ -129,6 +129,19 @@ class TestMultiNodeReserveCommitRelease:
             state = node.get_state("budget-A")
             assert state.reserved == 30, f"Node {i} has reserved={state.reserved}, expected 30"
 
+    def test_get_state_fails_closed_on_overcommitted_restored_state(self, cluster):
+        """A corrupt persisted total must not expose negative available budget."""
+        leader = _get_leader(cluster)
+        assert leader is not None
+        leader._raft._resources["corrupt-budget"] = {
+            "capacity": Decimal("1.0"),
+            "reserved": Decimal("0.8"),
+            "committed": Decimal("0.3"),
+        }
+
+        with pytest.raises(RuntimeError, match="Corrupt persisted Raft accounting state"):
+            leader.get_state("corrupt-budget")
+
     def test_commit_from_leader(self, cluster):
         """Commit from the leader and verify state transitions on all nodes."""
         leader = _get_leader(cluster)
