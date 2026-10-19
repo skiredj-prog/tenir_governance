@@ -96,6 +96,16 @@ def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
     composed = governor_result.get("composed_decision", Decision.HOLD.value)
     posture = POSTURE_MAP.get(composed, "HOLDING-FIRST")
     is_degraded = composed in (Decision.HOLD.value, Decision.HARD_VETO.value)
+    active_profiles = context.get("active_profiles")
+    if not isinstance(active_profiles, (list, tuple)) or any(
+        not isinstance(profile, str) or not profile.strip()
+        for profile in active_profiles
+    ):
+        raise ValueError(
+            "canonical_context.active_profiles must explicitly list active profiles; "
+            "the adapter will not infer profile activation"
+        )
+    active_profiles = list(active_profiles)
     trace_context = dict(context.get("trace", {}))
     trace_id = governor_result.get("idempotency_key") or trace_context.get("trace_id")
     if not isinstance(trace_id, str) or not trace_id.strip():
@@ -119,7 +129,7 @@ def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
         "execution_allowed": composed in (Decision.PASS.value, Decision.FLAG.value),
         "compliance_class": COMPLIANCE_CLASS,
         "degraded_mode": _degraded_modes(context, is_degraded),
-        "active_profiles": list(context.get("active_profiles", [PROFILE_VERSION])),
+        "active_profiles": active_profiles,
         "trace": trace_context,
         "synthesis": {
             **dict(context.get("synthesis", {})),
@@ -141,7 +151,7 @@ def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
             "platform_version": DISCLOSURE.platform_version,
             "contract_version": "1.2",
             "compliance_class": COMPLIANCE_CLASS,
-            "active_profiles": list(context.get("active_profiles", [PROFILE_VERSION])),
+            "active_profiles": active_profiles,
             "semantic_authority_held": [],
             "semantic_authority_not_held": [
                 "canonical-doctrine", "schema-definition", "posture-determination",
