@@ -198,6 +198,32 @@ class TestUncertainOutcome:
         assert p.execution_status == ExecutionStatus.HELD
 
 
+class TestMembraneResourceLockCreation:
+    def test_concurrent_first_access_returns_one_lock(self):
+        state = MembraneState()
+        barrier = threading.Barrier(16)
+        locks = []
+        errors = []
+
+        def get_lock():
+            try:
+                barrier.wait(timeout=2)
+                locks.append(state.get_lock("first-access-resource"))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=get_lock) for _ in range(16)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=3)
+
+        assert not errors
+        assert len(locks) == 16
+        assert all(lock is locks[0] for lock in locks)
+        assert state._locks["first-access-resource"] is locks[0]
+
+
 class TestConcurrencyBudgetRace:
     """Per review §4: two agents reading the same budget state must not both pass."""
 
