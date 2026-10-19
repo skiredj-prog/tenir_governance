@@ -1231,7 +1231,9 @@ class DualKernelGovernor:
     def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0) -> bool:
         """Transition to FAILED and mutate only this operation's budget."""
         record = self.registry.get(idempotency_key)
-        if record is None:
+        if record is None or record.state == OperationState.UNKNOWN:
+            # UNKNOWN is not proof of non-execution. Require reconciliation
+            # before transitioning to FAILED or compensating committed spend.
             return False
         recorded_resource = record.resource_id or None
         if resource_id is None:
