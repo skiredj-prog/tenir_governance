@@ -1210,6 +1210,70 @@ class DualKernelGovernor:
             }
         elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
             committed = record.budget_committed
+            if self.consensus_backend is not None and record.reservation_id:
+                # Provider reconciliation is authoritative non-execution proof:
+                # compensate the durable reservation before terminalizing the registry.
+                try:
+                    compensation = (
+                        self.consensus_backend.refund(record.reservation_id)
+                        if committed
+                        else self.consensus_backend.release(record.reservation_id)
+                    )
+                except Exception as exc:
+                    return {
+                        "reconciled": False, "idempotency_key": idempotency_key,
+                        "operation_state": record.state.value,
+                        "recommendation": "human_review",
+                        "reason": f"Durable budget compensation failed: {exc}",
+                    }
+                accepted = (
+                    ("REFUNDED", "ALREADY_REFUNDED")
+                    if committed else ("RELEASED", "ALREADY_RELEASED")
+                )
+                if getattr(compensation, "status", None) not in accepted:
+                    return {
+                        "reconciled": False, "idempotency_key": idempotency_key,
+                        "operation_state": record.state.value,
+                        "recommendation": "human_review",
+                        "reason": "Durable budget compensation was not confirmed; registry remains unresolved.",
+                    }
+                try:
+                    flags_ok = self.registry.set_budget_flags(
+                        idempotency_key,
+                        budget_reserved=False,
+                        budget_committed=False,
+                        reservation_id=record.reservation_id,
+                    )
+                except Exception:
+                    flags_ok = False
+                if not flags_ok:
+                    return {
+                        "reconciled": False, "idempotency_key": idempotency_key,
+                        "operation_state": record.state.value,
+                        "recommendation": "human_review",
+                        "reason": "Compensation durable but registry ownership update failed; replay reconciliation.",
+                    }
+                success, _prev = self.registry.transition_to(
+                    idempotency_key, OperationState.FAILED,
+                )
+                if not success:
+                    latest = self.registry.get(idempotency_key)
+                    if latest and latest.state == OperationState.FAILED:
+                        return {
+                            "reconciled": True, "idempotency_key": idempotency_key,
+                            "operation_state": OperationState.FAILED.value,
+                            "budget_compensation": getattr(compensation, "status", None),
+                        }
+                    return {
+                        "reconciled": False, "idempotency_key": idempotency_key,
+                        "operation_state": latest.state.value if latest else "not_found",
+                        "reason": "Compensation completed but terminal transition needs replay.",
+                    }
+                return {
+                    "reconciled": True, "idempotency_key": idempotency_key,
+                    "operation_state": OperationState.FAILED.value,
+                    "budget_compensation": getattr(compensation, "status", None),
+                }
             if record.resource_id and record.amount > 0:
                 resource = self.membrane.state.resources.get(record.resource_id)
                 if resource is None:
