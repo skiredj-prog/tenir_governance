@@ -994,7 +994,15 @@ class DualKernelGovernor:
             }
 
         if recon.resolved and recon.outcome == ProviderOutcome.CONFIRMED:
-            self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+            success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+            if not success:
+                current = self.registry.get(idempotency_key)
+                return {
+                    "reconciled": False,
+                    "idempotency_key": idempotency_key,
+                    "operation_state": current.state.value if current else "not_found",
+                    "reason": "Confirmation lost the terminal-state race.",
+                }
             return {
                 "reconciled": True,
                 "idempotency_key": idempotency_key,
@@ -1385,7 +1393,10 @@ class DualKernelGovernor:
                 composed_decision = Decision.HOLD.value
                 composed_rationale = "Re-adjudication produced PASS/FLAG but RESERVED transition failed — staying in HOLD."
         elif composed_decision == Decision.HARD_VETO.value:
-            if resource_id and amount > 0:
+            held_record = self.registry.get(idem_key)
+            # Only release a reservation that this durable operation actually owns.
+            should_release_budget = bool(held_record and held_record.budget_reserved)
+            if resource_id and amount > 0 and should_release_budget:
                 resource = self.membrane.state.resources.get(resource_id)
                 if resource is None:
                     composed_decision = Decision.HOLD.value
