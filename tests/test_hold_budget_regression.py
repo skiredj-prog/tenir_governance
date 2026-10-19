@@ -488,3 +488,32 @@ def test_fail_refuses_dispatching_without_confirmed_provider_outcome():
     ) is True
     assert gov.registry.get(passage.idempotency_key).state == OperationState.FAILED
     assert budget.consumed == 0.0
+
+
+
+def test_fail_uses_atomic_expected_state_for_unbudgeted_operation(monkeypatch):
+    """A concurrent dispatch/UNKNOWN cannot be overwritten in the no-budget path."""
+    gov, _state = _setup_governor()
+    passage = Passage(agent_id="alice", action_type="noop", amount=0.0)
+    result = gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+    )
+    assert result["operation_state"] == OperationState.RESERVED.value
+
+    registry = gov.registry
+    original_transition = registry.transition_to
+    injected = False
+
+    def transition_with_race(key, new_state, claimed_by="", **kwargs):
+        nonlocal injected
+        if key == passage.idempotency_key and new_state == OperationState.FAILED and not injected:
+            injected = True
+            # Another worker starts dispatch, then cannot establish the outcome.
+            assert original_transition(key, OperationState.DISPATCHING)[0]
+            assert original_transition(key, OperationState.UNKNOWN)[0]
+        return original_transition(key, new_state, claimed_by, **kwargs)
+
+    monkeypatch.setattr(registry, "transition_to", transition_with_race)
+    assert gov.fail(passage.idempotency_key) is False
+    assert injected is True
+    assert registry.get(passage.idempotency_key).state == OperationState.UNKNOWN
