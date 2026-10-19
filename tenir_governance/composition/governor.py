@@ -599,6 +599,16 @@ class DualKernelGovernor:
         """
         record = self.registry.get(idempotency_key)
         own = 0.0 if (record is not None and record.budget_reserved) else amount
+        if self.consensus_backend is not None and record is not None and record.resource_id:
+            try:
+                state = self.consensus_backend.get_state(record.resource_id)
+                capacity = float(state.capacity)
+                if not math.isfinite(capacity) or capacity <= 0:
+                    return float("inf")
+                return (float(state.committed) + float(state.reserved) + own) / capacity
+            except Exception:
+                # Missing/stale durable utilization is indeterminate: fail closed.
+                return float("inf")
         return (resource.consumed + resource.reserved + own) / resource.capacity
 
     def _reserve_budget(self, idempotency_key: str, resource_id: str | None, amount: float) -> bool:
