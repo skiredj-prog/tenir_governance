@@ -69,139 +69,156 @@ PROFILE_VERSION = "agentic-governance-profile-v1.0.0"
 
 
 def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
-    """Map a governor adjudicate() result to TENIR 2.0 schema 1.2 fields.
+    """Build and validate a canonical TENIR 2.0 schema 1.2 runtime object.
 
-    This produces a dict with canonical schema field names. The schema
-    already defines these fields — this adapter populates them from the
-    governor's implementation-level output.
-
-    Per KB3: posture and execution mode are separate output fields.
-    Per versioning policy §6: disclosure metadata is included.
+    The governor result alone is not a complete canonical runtime object.
+    Callers must supply an explicit canonical_context mapping containing the
+    canonical input/evidence fields. Missing context is rejected; this adapter
+    never fabricates identity, epistemic evidence, or human verification.
     """
+    from tenir_kernel.schema import validate_runtime_object
+
+    if not isinstance(governor_result, Mapping):
+        raise ValueError("governor_result must be a mapping")
+    context = governor_result.get("canonical_context")
+    if not isinstance(context, Mapping):
+        raise ValueError(
+            "canonical_context is required: governor decisions do not contain "
+            "all evidence and identity fields required by TENIR schema 1.2"
+        )
+
+    result: dict[str, Any] = dict(context)
+    for key in ("scores", "identity", "tau", "epistemic", "trace", "synthesis",
+                "constraint_geometry", "irreversible_pathway_assessment"):
+        if isinstance(result.get(key), Mapping):
+            result[key] = dict(result[key])
+
     composed = governor_result.get("composed_decision", Decision.HOLD.value)
     posture = POSTURE_MAP.get(composed, "HOLDING-FIRST")
-    disposition = EXECUTION_DISPOSITION_MAP.get(composed, "hold")
     is_degraded = composed in (Decision.HOLD.value, Decision.HARD_VETO.value)
-
-    # Build the schema-conformant output
-    result: dict[str, Any] = {
-        # ── Canonical schema fields ──
+    result.update({
         "schema_version": "1.2",
         "engine_spec_version": "TENIR-2.0",
-
-        # Posture (separate from execution mode per KB3)
         "posture": posture,
-
-        # Execution mode (separate from posture per KB3)
-        "execution_mode": EXECUTION_MODE,
-        "execution_disposition": disposition,
-        "execution_allowed": composed in (Decision.PASS.value, Decision.FLAG.value),
-
-        # Compliance class (visible per KB3)
         "compliance_class": COMPLIANCE_CLASS,
-
-        # Degraded mode (visible per KB3)
-        "degraded_mode": is_degraded,
-
-        # Scores
-        "scores": {
-            "s_score": governor_result.get("scoring_s"),
+        "degraded_mode": _degraded_modes(context, is_degraded),
+        "active_profiles": list(context.get("active_profiles", [PROFILE_VERSION])),
+        "trace": {
+            **dict(context.get("trace", {})),
+            "trace_id": str(governor_result.get("idempotency_key")
+                            or context.get("trace", {}).get("trace_id", "")),
+            "stages": _build_trace_stages(governor_result),
+            "ledger_entries": governor_result.get("ledger_entries", 0),
+            "ledger_valid": governor_result.get("ledger_valid", False),
+            "passage_id": governor_result.get("passage_id", ""),
         },
-
-        # Synthesis (composite)
         "synthesis": {
+            **dict(context.get("synthesis", {})),
             "final_posture": posture,
-            "structural_core": {
-                "scoring_decision": governor_result.get("scoring_decision"),
-                "scoring_rationale": governor_result.get("scoring_rationale"),
-            },
+            "structural_core": dict(context.get("synthesis", {}).get("structural_core", {})),
+            "epistemic_state": dict(context.get("synthesis", {}).get("epistemic_state", {})),
+            "rationale": _rationale_items(governor_result),
+            "degraded_inputs": _degraded_modes(context, is_degraded),
             "agency_state": {
                 "membrane_decision": governor_result.get("membrane_decision"),
                 "membrane_rationale": governor_result.get("membrane_rationale"),
                 "membrane_checks": governor_result.get("membrane_checks", []),
             },
-            "trajectory_state": {
-                "operation_state": governor_result.get("operation_state"),
-            },
+            "trajectory_state": {"operation_state": governor_result.get("operation_state")},
             "principal_failure_mode": _principal_failure_mode(governor_result),
         },
-
-        # Trace
-        "trace": {
-            "trace_id": governor_result.get("idempotency_key", ""),
-            "passage_id": governor_result.get("passage_id", ""),
-            "stages": _build_trace_stages(governor_result),
-            "ledger_entries": governor_result.get("ledger_entries", 0),
-            "ledger_valid": governor_result.get("ledger_valid", False),
-        },
-
-        # ── Disclosure metadata (per versioning policy §6) ──
         "disclosure": {
             "doctrinal_version": "TENIR 2.0",
             "platform_version": DISCLOSURE.platform_version,
             "contract_version": "1.2",
             "compliance_class": COMPLIANCE_CLASS,
-            "active_profiles": [PROFILE_VERSION],
+            "active_profiles": list(context.get("active_profiles", [PROFILE_VERSION])),
             "semantic_authority_held": [],
             "semantic_authority_not_held": [
-                "canonical-doctrine",
-                "schema-definition",
-                "posture-determination",
+                "canonical-doctrine", "schema-definition", "posture-determination",
             ],
         },
-    }
+    })
 
-    # Never infer human verification or pathway materiality from the
-    # existence of a scalar score. The governor may attach an assessment only
-    # when an upstream component actually performed and recorded it.
-    pathway_assessment = governor_result.get("irreversible_pathway_assessment")
-    if isinstance(pathway_assessment, Mapping):
-        result["irreversible_pathway_assessment"] = dict(pathway_assessment)
+    assessment = governor_result.get("irreversible_pathway_assessment")
+    if isinstance(assessment, Mapping):
+        result["irreversible_pathway_assessment"] = dict(assessment)
+    geometry = governor_result.get("constraint_geometry")
+    if isinstance(geometry, Mapping):
+        result["constraint_geometry"] = dict(geometry)
 
-    # Constraint geometry (if available from scoring)
-    # The scoring adapter passes this through from TenirKernel
-    if "constraint_geometry" in governor_result:
-        result["constraint_geometry"] = governor_result["constraint_geometry"]
+    return validate_runtime_object(result)
 
-    return result
+
+def _degraded_modes(context: Mapping[str, Any], is_degraded: bool) -> list[str]:
+    """Return schema-defined degradation labels without inventing causes."""
+    supplied = context.get("degraded_mode")
+    modes = list(supplied) if isinstance(supplied, (list, tuple)) else []
+    if is_degraded and not modes:
+        modes = ["sparse_ingress"]
+    if not is_degraded and not modes:
+        modes = ["none"]
+    allowed = {"none", "missing_agency", "missing_trajectory",
+               "missing_epistemic", "sparse_ingress", "legacy_shape"}
+    if any(mode not in allowed for mode in modes):
+        raise ValueError("canonical_context.degraded_mode contains an unknown schema 1.2 label")
+    if "none" in modes and len(modes) > 1:
+        raise ValueError("degraded_mode cannot combine 'none' with degradation labels")
+    return modes
+
+
+def _rationale_items(governor_result: Mapping[str, Any]) -> list[str]:
+    """Normalize decision rationale to the canonical string-array contract."""
+    items = []
+    for key in ("composed_rationale", "scoring_rationale", "membrane_rationale"):
+        value = governor_result.get(key)
+        if isinstance(value, str) and value.strip() and value not in items:
+            items.append(value)
+    return items or ["Decision recorded; no rationale supplied by the governor."]
+
 
 
 def _build_trace_stages(governor_result: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Build trace.stages[] from the governor's operation state and decisions."""
-    stages = []
+    """Build schema-valid trace stages without losing decision details."""
+    stages: list[dict[str, Any]] = []
+    for label, decision_key, rationale_key in (
+        ("scoring", "scoring_decision", "scoring_rationale"),
+        ("membrane", "membrane_decision", "membrane_rationale"),
+        ("composition", "composed_decision", "composed_rationale"),
+    ):
+        decision = governor_result.get(decision_key)
+        rationale = governor_result.get(rationale_key)
+        if decision is None and label != "composition":
+            continue
+        stage = {
+            "stage": label,
+            "status": _trace_status(decision),
+            "outputs_emitted": [str(decision)] if decision is not None else [],
+        }
+        if isinstance(rationale, str) and rationale:
+            stage["summary"] = rationale
+        if decision is not None:
+            stage["decision"] = decision
+        stages.append(stage)
 
-    # Scoring stage
-    if governor_result.get("scoring_decision"):
-        stages.append({
-            "stage": "scoring",
-            "decision": governor_result["scoring_decision"],
-            "rationale": governor_result.get("scoring_rationale", ""),
-        })
-
-    # Membrane stage
-    if governor_result.get("membrane_decision"):
-        stages.append({
-            "stage": "membrane",
-            "decision": governor_result["membrane_decision"],
-            "rationale": governor_result.get("membrane_rationale", ""),
-        })
-
-    # Composition stage
-    stages.append({
-        "stage": "composition",
-        "decision": governor_result.get("composed_decision", ""),
-        "rationale": governor_result.get("composed_rationale", ""),
-    })
-
-    # Operation state
-    op_state = governor_result.get("operation_state")
-    if op_state:
+    operation_state = governor_result.get("operation_state")
+    if operation_state:
         stages.append({
             "stage": "operation",
-            "state": op_state,
+            "status": "warning" if str(operation_state).upper() in {"UNKNOWN", "HOLD"} else "ok",
+            "summary": str(operation_state),
+            "outputs_emitted": [str(operation_state)],
         })
-
     return stages
+
+
+def _trace_status(decision: Any) -> str:
+    if decision == Decision.PASS.value:
+        return "ok"
+    if decision in (Decision.FLAG.value, Decision.HOLD.value):
+        return "warning"
+    return "failed"
+
 
 
 def _principal_failure_mode(governor_result: Mapping[str, Any]) -> str | None:
