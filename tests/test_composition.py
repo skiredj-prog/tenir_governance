@@ -1032,7 +1032,7 @@ class TestSchemaAdapter:
         assert result["posture"] == "CAUTION"
         assert result["execution_disposition"] == "allow_with_alert"
         assert result["execution_allowed"] is True
-        assert result["degraded_mode"] is False
+        assert result["degraded_mode"] == ["none"]
 
     def test_hold_maps_to_holding_first_posture(self):
         result = conform_to_schema(self._make_result(composed="HOLD"))
@@ -1046,7 +1046,7 @@ class TestSchemaAdapter:
         assert result["posture"] == "HOLDING-FIRST"
         assert result["execution_disposition"] == "block"
         assert result["execution_allowed"] is False
-        assert result["degraded_mode"] is True
+        assert result["degraded_mode"] == ["sparse_ingress"]
 
     def test_posture_and_execution_mode_separate(self):
         """Per KB3: posture and execution mode are separate fields."""
