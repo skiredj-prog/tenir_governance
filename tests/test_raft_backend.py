@@ -763,8 +763,8 @@ class TestLinearizability:
         inv = Invocation(op="get_state", args=("budget-LIN",), client_id=0, event_id=eid)
         state = leader.get_state("budget-LIN")
         eid += 1
-        resp = Response(result={"reserved": state.reserved, "consumed": state.committed,
-                                 "capacity": state.capacity},
+        resp = Response(result={"available": state.available, "reserved": state.reserved,
+                                 "consumed": state.committed, "capacity": state.capacity},
                         client_id=0, event_id=eid)
         ops.append(Operation(invocation=inv, response=resp))
 
