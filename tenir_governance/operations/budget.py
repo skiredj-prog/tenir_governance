@@ -210,7 +210,7 @@ class DurableBudgetCoordinator:
                         old_capacity = self._decimal(existing["capacity"])
                         reserved = self._decimal(existing["reserved"])
                         consumed = self._decimal(existing["consumed"])
-                    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                    except (KeyError, TypeError, ValueError, OverflowError, InvalidOperation) as exc:
                         raise RuntimeError("Corrupt persisted budget state; registration refused.") from exc
                     if (
                         not all(v.is_finite() and v >= 0 for v in (old_capacity, reserved, consumed))
