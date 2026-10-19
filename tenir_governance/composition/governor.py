@@ -1258,7 +1258,11 @@ class DualKernelGovernor:
                 return False
             with self.membrane.state.get_lock(recorded_resource):
                 current = self.registry.get(idempotency_key)
-                if current is None or current.state in (OperationState.FAILED, OperationState.CONFIRMED):
+                if current is None or current.state in (
+                    OperationState.FAILED,
+                    OperationState.CONFIRMED,
+                    OperationState.UNKNOWN,
+                ):
                     return False
                 accounted = resource.consumed if committed else resource.reserved
                 if accounted < recorded_amount:
