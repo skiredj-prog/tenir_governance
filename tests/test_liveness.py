@@ -53,6 +53,23 @@ class TestLivenessTermination:
         assert state.reserved == 0.1
         assert state.available == 0.9
 
+    def test_decimal_budget_accepts_exact_capacity_without_float_drift(self, tmp_path):
+        """Decimal reservations may consume an exact decimal capacity fully."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("exact-decimal-budget", Decimal("0.3"))
+
+        first = backend.reserve("exact-decimal-key-1", Decimal("0.1"), "exact-decimal-budget")
+        second = backend.reserve("exact-decimal-key-2", Decimal("0.2"), "exact-decimal-budget")
+        over = backend.reserve("exact-decimal-key-3", Decimal("0.0000001"), "exact-decimal-budget")
+
+        assert first.status == "RESERVED"
+        assert second.status == "RESERVED"
+        assert over.status == "INSUFFICIENT_BUDGET"
+        state = backend.get_state("exact-decimal-budget")
+        assert state.reserved == pytest.approx(0.3)
+        assert state.available == pytest.approx(0.0)
+        assert state.reserved + state.committed <= state.capacity
+
     def test_corrupted_budget_store_fails_closed(self, tmp_path):
         (tmp_path / "budget.json").write_text("{not-json")
         with pytest.raises(RuntimeError, match="Corrupted durable budget store"):
