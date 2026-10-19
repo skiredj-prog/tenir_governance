@@ -494,7 +494,10 @@ class TestDualKernelGovernor:
 
         assert result["scoring_decision"] == Decision.HARD_VETO.value
         assert result["composed_decision"] == Decision.HARD_VETO.value
-        assert result["hold_resolved"] is False
+        # Missing evidence must veto and terminally close the HOLD.
+        # "hold_resolved" means safely terminal, not admitted for execution.
+        assert result["hold_resolved"] is True
+        assert result["operation_state"] == OperationState.FAILED.value
         assert "authority missing" in result["scoring_rationale"]
         assert "context_fit missing" in result["scoring_rationale"]
         assert "evidence_quality missing" in result["scoring_rationale"]
