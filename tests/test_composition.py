@@ -429,6 +429,32 @@ class TestDualKernelGovernor:
         worker.join(2)
         assert not worker.is_alive()
 
+    def test_dispatch_blocks_provider_when_budget_flag_commit_fails(self, monkeypatch):
+        gov, state = self._setup()
+        passage = Passage(
+            agent_id="alice", action_type="payment", amount=10.0,
+            idempotency_key="dispatch-flag-write-failure",
+        )
+        result = gov.adjudicate(
+            passage, pressure=0.2, velocity=0.3, capacity=1.0,
+            resource_id="budget", amount=10.0,
+        )
+        assert result["operation_state"] == OperationState.RESERVED.value
+        resource = state.resources["budget"]
+
+        def fail_flags(*_args, **_kwargs):
+            raise OSError("simulated flag persistence failure")
+
+        monkeypatch.setattr(gov.registry, "set_budget_flags", fail_flags)
+        dispatched = gov.dispatch("dispatch-flag-write-failure", "budget", 10.0)
+        assert dispatched["dispatched"] is False
+        assert "provider execution blocked" in dispatched["reason"]
+        assert resource.reserved == 10.0
+        assert resource.consumed == 0.0
+        current = gov.registry.get("dispatch-flag-write-failure")
+        assert current.budget_reserved is True
+        assert current.budget_committed is False
+
     def test_safe_payment_both_pass(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
