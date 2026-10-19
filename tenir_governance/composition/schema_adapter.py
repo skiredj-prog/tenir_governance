@@ -177,8 +177,10 @@ def _degraded_modes(context: Mapping[str, Any], is_degraded: bool) -> list[str]:
                "missing_epistemic", "sparse_ingress", "legacy_shape"}
     if not modes:
         raise ValueError("canonical_context.degraded_mode must explicitly describe degradation state")
-    if any(mode not in allowed for mode in modes):
-        raise ValueError("canonical_context.degraded_mode contains an unknown schema 1.2 label")
+    if any(not isinstance(mode, str) or mode not in allowed for mode in modes):
+        raise ValueError("canonical_context.degraded_mode contains a non-string or unknown schema 1.2 label")
+    if len(set(modes)) != len(modes):
+        raise ValueError("canonical_context.degraded_mode must not contain duplicate labels")
     if "none" in modes and len(modes) > 1:
         raise ValueError("degraded_mode cannot combine 'none' with degradation labels")
     if is_degraded and modes == ["none"]:
