@@ -1221,6 +1221,38 @@ class DualKernelGovernor:
         elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
             committed = record.budget_committed
             if self.consensus_backend is not None and record.reservation_id:
+                # The backend is authoritative when a crash occurred between
+                # its commit and the registry ownership-flag write.
+                try:
+                    backend_state = self.consensus_backend.get_state(record.resource_id)
+                    durable_reservation = next(
+                        (item for item in backend_state.reservations
+                         if item.get("reservation_id") == record.reservation_id),
+                        None,
+                    )
+                except Exception:
+                    durable_reservation = None
+                if durable_reservation is None:
+                    return {
+                        "reconciled": False, "idempotency_key": idempotency_key,
+                        "operation_state": record.state.value,
+                        "recommendation": "human_review",
+                        "reason": "Durable reservation identity cannot be verified.",
+                    }
+                if durable_reservation.get("state") == "COMMITTED":
+                    committed = True
+                elif durable_reservation.get("state") in ("RESERVED", "UNKNOWN"):
+                    committed = False
+                elif durable_reservation.get("state") in ("REFUNDED", "RELEASED"):
+                    # A prior attempt may have compensated before crashing.
+                    committed = durable_reservation.get("state") == "REFUNDED"
+                else:
+                    return {
+                        "reconciled": False, "idempotency_key": idempotency_key,
+                        "operation_state": record.state.value,
+                        "recommendation": "human_review",
+                        "reason": "Durable reservation is in a non-compensable state.",
+                    }
                 # Provider reconciliation is authoritative non-execution proof:
                 # compensate the durable reservation before terminalizing the registry.
                 try:
