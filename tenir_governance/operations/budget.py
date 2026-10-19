@@ -83,9 +83,21 @@ class InProcessBudgetCoordinator:
         self._locks: dict[str, threading.Lock] = {}
 
     def register(self, resource) -> None:
-        """Register a Resource object with this coordinator."""
+        """Register once without replacing live accounting or synchronization."""
+        existing = self._resources.get(resource.resource_id)
+        if existing is not None:
+            if existing is resource:
+                return
+            if float(existing.capacity) == float(resource.capacity):
+                # Keep the original object and lock: its counters may already
+                # represent live reservations or committed usage.
+                return
+            raise ValueError(
+                f"Resource {resource.resource_id!r} is already registered "
+                "with a different capacity."
+            )
         self._resources[resource.resource_id] = resource
-        self._locks[resource.resource_id] = threading.Lock()
+        self._locks.setdefault(resource.resource_id, threading.Lock())
 
     def get_resource(self, resource_id: str):
         return self._resources.get(resource_id)
@@ -133,6 +145,7 @@ class InProcessBudgetCoordinator:
             return (resource.consumed + resource.reserved) / resource.capacity
 
 import json
+import math
 import os
 import tempfile
 
@@ -174,14 +187,60 @@ class DurableBudgetCoordinator:
             self._load()
 
     def register(self, resource) -> None:
-        """Register a Resource object's capacity with this coordinator."""
+        """Register once; preserve accounting for already-known resources."""
+        capacity = getattr(resource, "capacity", None)
+        if isinstance(capacity, bool):
+            raise ValueError("Resource capacity must be finite and non-negative.")
+        try:
+            capacity = float(capacity)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("Resource capacity must be finite and non-negative.") from exc
+        if not math.isfinite(capacity) or capacity < 0:
+            raise ValueError("Resource capacity must be finite and non-negative.")
+
         with self._lock:
-            self._resources[resource.resource_id] = {
-                "capacity": resource.capacity,
-                "reserved": getattr(resource, "reserved", 0.0),
-                "consumed": getattr(resource, "consumed", 0.0),
-            }
-            self._persist()
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                existing = self._resources.get(resource.resource_id)
+                if existing is not None:
+                    try:
+                        old_capacity = float(existing["capacity"])
+                        reserved = float(existing["reserved"])
+                        consumed = float(existing["consumed"])
+                    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                        raise RuntimeError("Corrupt persisted budget state; registration refused.") from exc
+                    if (
+                        not all(math.isfinite(v) and v >= 0 for v in (old_capacity, reserved, consumed))
+                        or reserved + consumed > old_capacity
+                    ):
+                        raise RuntimeError("Corrupt persisted budget invariant; registration refused.")
+                    if old_capacity != capacity:
+                        raise ValueError(
+                            f"Resource {resource.resource_id!r} is already registered "
+                            "with a different capacity; explicit migration is required."
+                        )
+                    return
+
+                reserved = getattr(resource, "reserved", 0.0)
+                consumed = getattr(resource, "consumed", 0.0)
+                try:
+                    reserved, consumed = float(reserved), float(consumed)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError("Initial resource counters must be finite and non-negative.") from exc
+                if (
+                    not math.isfinite(reserved) or not math.isfinite(consumed)
+                    or reserved < 0 or consumed < 0 or reserved + consumed > capacity
+                ):
+                    raise ValueError("Initial resource counters violate the budget invariant.")
+                self._resources[resource.resource_id] = {
+                    "capacity": capacity, "reserved": reserved, "consumed": consumed,
+                }
+                self._persist()
+            finally:
+                if flock:
+                    flock.close()
 
     def get_resource(self, resource_id: str):
         """Return a lightweight view of the resource state."""
