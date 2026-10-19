@@ -479,3 +479,85 @@ def test_reconcile_failed_provider_refunds_durable_commit(tmp_path):
     assert record.budget_committed is False
     assert state.reserved == Decimal("0")
     assert state.committed == Decimal("0")
+
+
+class _SimulatedProcessCrash(BaseException):
+    pass
+
+
+def test_crash_after_backend_reserve_reuses_same_reservation(tmp_path, monkeypatch):
+    from tenir_governance.operations.registry import DurableOperationRegistry, OperationRecord
+
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path)
+    registry_path = str(tmp_path / "operations.json")
+    gov.registry = DurableOperationRegistry(registry_path)
+    key = "crash-after-reserve"
+    assert gov.registry.register(OperationRecord(
+        idempotency_key=key, passage_id="passage-crash",
+        agent_id="alice", action_type="payment",
+        amount=10.0, resource_id="budget",
+    ))
+
+    def crash_before_registry_ownership(*args, **kwargs):
+        raise _SimulatedProcessCrash("simulated process termination")
+
+    monkeypatch.setattr(gov.registry, "set_budget_flags", crash_before_registry_ownership)
+    with pytest.raises(_SimulatedProcessCrash):
+        gov._reserve_budget(key, "budget", 10.0)
+
+    reopened_backend = SingleHostLockBackend(str(tmp_path))
+    reopened_registry = DurableOperationRegistry(registry_path)
+    gov.consensus_backend = reopened_backend
+    gov.registry = reopened_registry
+
+    assert gov._reserve_budget(key, "budget", 10.0) is True
+    record = reopened_registry.get(key)
+    state = reopened_backend.get_state("budget")
+    assert record.reservation_id
+    assert record.budget_reserved is True
+    assert state.reserved == Decimal("10.0")
+    assert len([
+        item for item in state.reservations
+        if item["key"] == key and item["state"] == "RESERVED"
+    ]) == 1
+
+
+def test_crash_after_backend_commit_reconciles_using_backend_state(tmp_path, monkeypatch):
+    from tenir_governance.operations.registry import DurableOperationRegistry
+
+    provider = MockProvider(
+        behavior="timeout",
+        reconcile_outcome=ProviderOutcome.FAILED,
+    )
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
+    registry_path = str(tmp_path / "operations.json")
+    gov.registry = DurableOperationRegistry(registry_path)
+    passage, _result = _adjudicate_durable_budget(gov)
+    key = passage.idempotency_key
+
+    def crash_after_commit_before_registry_flags(*args, **kwargs):
+        raise _SimulatedProcessCrash("crash after durable commit")
+
+    monkeypatch.setattr(gov.registry, "set_budget_flags", crash_after_commit_before_registry_flags)
+    with pytest.raises(_SimulatedProcessCrash):
+        gov.dispatch_and_execute(key, "budget", 10.0)
+
+    reopened_backend = SingleHostLockBackend(str(tmp_path))
+    reopened_registry = DurableOperationRegistry(registry_path)
+    gov.consensus_backend = reopened_backend
+    gov.registry = reopened_registry
+
+    durable_state = reopened_backend.get_state("budget")
+    assert durable_state.reserved == Decimal("0")
+    assert durable_state.committed == Decimal("10.0")
+    assert reopened_registry.get(key).budget_committed is False  # deliberately stale pre-crash flag
+
+    reconciled = gov.reconcile_unknown(key)
+    assert reconciled["reconciled"] is True
+    final_record = reopened_registry.get(key)
+    final_state = reopened_backend.get_state("budget")
+    assert final_record.state == OperationState.FAILED
+    assert final_record.budget_reserved is False
+    assert final_record.budget_committed is False
+    assert final_state.reserved == Decimal("0")
+    assert final_state.committed == Decimal("0")
