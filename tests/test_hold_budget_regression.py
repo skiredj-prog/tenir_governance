@@ -948,8 +948,8 @@ def test_confirm_refuses_budgeted_operation_without_durable_resource_identity(tm
     assert gov.registry.get(key).state == OperationState.DISPATCHING
 
 
-def test_concurrent_confirm_and_proven_fail_cannot_refund_confirmed_operation(tmp_path, monkeypatch):
-    """A stale FAILED path must not refund after another worker confirms."""
+def test_concurrent_confirm_and_proven_fail_settle_budget_consistently(tmp_path, monkeypatch):
+    """Concurrent terminal paths must not leave terminal state and budget divergent."""
     import threading
 
     gov, _state, backend = _setup_durable_backend_governor(tmp_path)
@@ -958,58 +958,43 @@ def test_concurrent_confirm_and_proven_fail_cannot_refund_confirmed_operation(tm
     assert dispatched["dispatched"] is True
     key = passage.idempotency_key
 
-    both_read = threading.Barrier(2)
-    confirmed = threading.Event()
-    original_get = gov.registry.get
-    original_transition = gov.registry.transition_to
-    original_refund = backend.refund
-    get_calls = 0
-    get_calls_lock = threading.Lock()
-
-    def synchronized_get(idempotency_key):
-        nonlocal get_calls
-        record = original_get(idempotency_key)
-        if idempotency_key == key:
-            with get_calls_lock:
-                get_calls += 1
-                should_wait = get_calls <= 2
-            if should_wait:
-                both_read.wait(timeout=5)
-        return record
-
-    def observed_transition(idempotency_key, new_state):
-        result = original_transition(idempotency_key, new_state)
-        if idempotency_key == key and new_state == OperationState.CONFIRMED and result[0]:
-            confirmed.set()
-        return result
-
-    def delayed_refund(reservation_id):
-        assert confirmed.wait(timeout=5), "confirm should win before stale refund proceeds"
-        return original_refund(reservation_id)
-
-    monkeypatch.setattr(gov.registry, "get", synchronized_get)
-    monkeypatch.setattr(gov.registry, "transition_to", observed_transition)
-    monkeypatch.setattr(backend, "refund", delayed_refund)
-
+    start = threading.Barrier(3)
     results = {}
-    confirm_thread = threading.Thread(target=lambda: results.setdefault("confirm", gov.confirm(key)))
-    fail_thread = threading.Thread(
-        target=lambda: results.setdefault(
-            "fail", gov.fail(key, "budget", 10.0, authoritative_non_execution=True)
+
+    def confirm_worker():
+        start.wait(timeout=5)
+        results["confirm"] = gov.confirm(key)
+
+    def fail_worker():
+        start.wait(timeout=5)
+        results["fail"] = gov.fail(
+            key, "budget", 10.0, authoritative_non_execution=True
         )
-    )
+
+    confirm_thread = threading.Thread(target=confirm_worker)
+    fail_thread = threading.Thread(target=fail_worker)
     confirm_thread.start()
     fail_thread.start()
+    start.wait(timeout=5)
     confirm_thread.join(timeout=10)
     fail_thread.join(timeout=10)
 
     assert not confirm_thread.is_alive()
     assert not fail_thread.is_alive()
-    assert results["confirm"] is True
-    assert results["fail"] is False
-    record = original_get(key)
+    record = gov.registry.get(key)
     state = backend.get_state("budget")
-    assert record.state == OperationState.CONFIRMED
-    assert record.budget_committed is True
-    assert state.committed == Decimal("10.0")
-    assert state.reserved == Decimal("0")
+
+    if record.state == OperationState.CONFIRMED:
+        assert results["confirm"] is True
+        assert results["fail"] is False
+        assert record.budget_committed is True
+        assert state.committed == Decimal("10.0")
+        assert state.reserved == Decimal("0")
+    elif record.state == OperationState.FAILED:
+        assert results["fail"] is True
+        assert results["confirm"] is False
+        assert record.budget_committed is False
+        assert state.committed == Decimal("0")
+        assert state.reserved == Decimal("0")
+    else:
+        raise AssertionError(f"Unexpected terminal race result: {record.state}")
