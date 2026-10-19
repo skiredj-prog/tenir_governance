@@ -927,6 +927,10 @@ class TestScoringKernelAdapter:
 class TestSchemaAdapter:
     """Tests for the TENIR 2.0 schema 1.2 conformance adapter."""
 
+    def test_missing_canonical_context_fails_closed(self):
+        with pytest.raises(ValueError, match="canonical_context is required"):
+            conform_to_schema({"composed_decision": "PASS"})
+
     def _make_result(self, composed="PASS", scoring="PASS", membrane="PASS"):
         # Explicit test evidence/context: production callers must supply real
         # values rather than relying on the adapter to fabricate them.
