@@ -198,3 +198,42 @@ def test_i8_hold_does_not_retain_budget_when_re_adjudication_transition_fails():
     assert result["operation_state"] == OperationState.HOLD.value
     assert state.resources["budget"].reserved == 0.0
     assert state.resources["budget"].consumed == 0.0
+
+
+def test_fail_without_budget_arguments_releases_durable_reservation():
+    gov, state = _lifecycle_governor()
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+
+    assert state.resources["budget"].reserved == 10.0
+    assert gov.fail(passage.idempotency_key)
+
+    record = gov.registry.get(passage.idempotency_key)
+    assert record.state == OperationState.FAILED
+    assert state.resources["budget"].reserved == 0.0
+    assert state.resources["budget"].consumed == 0.0
+
+
+def test_fail_without_budget_arguments_refunds_durable_committed_spend():
+    gov, state = _lifecycle_governor()
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+
+    dispatched = gov.dispatch(passage.idempotency_key)
+    assert dispatched["dispatched"] is True
+    assert state.resources["budget"].reserved == 0.0
+    assert state.resources["budget"].consumed == 10.0
+
+    # fail() documents that this caller has confirmed no external effect occurred.
+    assert gov.fail(passage.idempotency_key)
+
+    record = gov.registry.get(passage.idempotency_key)
+    assert record.state == OperationState.FAILED
+    assert state.resources["budget"].reserved == 0.0
+    assert state.resources["budget"].consumed == 0.0
