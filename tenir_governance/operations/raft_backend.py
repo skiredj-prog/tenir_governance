@@ -35,7 +35,6 @@ Limitations:
 from __future__ import annotations
 
 import json
-import math
 import os
 import threading
 import time
@@ -77,8 +76,7 @@ def _validated_amount(value, *, allow_zero=False):
         return None
     if amount > MAX_AMOUNT:
         return None
-    converted = float(amount)
-    return converted if math.isfinite(converted) else None
+    return amount
 
 
 class _RaftStateMachine(SyncObj):
@@ -122,7 +120,7 @@ class _RaftStateMachine(SyncObj):
         existing = self._resources.get(resource_id)
         if existing is not None:
             return "ALREADY_REGISTERED" if existing["capacity"] == normalized else "RESOURCE_CONFLICT"
-        self._resources[resource_id] = {"capacity": normalized, "reserved": 0.0, "committed": 0.0}
+        self._resources[resource_id] = {"capacity": normalized, "reserved": Decimal("0"), "committed": Decimal("0")}
         return "REGISTERED"
 
     @replicated
@@ -174,7 +172,7 @@ class _RaftStateMachine(SyncObj):
         if rec["state"] != "RESERVED":
             return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
-        amount = float(rec["amount"])
+        amount = rec["amount"]
         if res is None:
             return "ERROR"
         if res["reserved"] < amount:
@@ -195,7 +193,7 @@ class _RaftStateMachine(SyncObj):
         if rec["state"] not in ("RESERVED", "UNKNOWN"):
             return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
-        amount = float(rec["amount"])
+        amount = rec["amount"]
         if res is None:
             return "ERROR"
         if rec["state"] == "RESERVED":
@@ -219,7 +217,7 @@ class _RaftStateMachine(SyncObj):
                 return "RECONCILE_CONFLICT"
             return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
-        amount = float(rec["amount"])
+        amount = rec["amount"]
         if res is None:
             return "ERROR"
         if res["reserved"] < amount:
@@ -245,7 +243,7 @@ class _RaftStateMachine(SyncObj):
         res = self._resources.get(rec["resource_id"])
         if res is None:
             return "ERROR"
-        amount = float(rec["amount"])
+        amount = rec["amount"]
         if rec["state"] == "RESERVED":
             if res["reserved"] < amount:
                 return "INCONSISTENT_RESERVED_AMOUNT"
@@ -266,7 +264,7 @@ class _RaftStateMachine(SyncObj):
             {
                 "reservation_id": rid,
                 "key": rec["key"],
-                "amount": rec["amount"],
+                "amount": float(rec["amount"]),
                 "state": rec["state"],
             }
             for rid, rec in self._reservations.items()
@@ -274,10 +272,10 @@ class _RaftStateMachine(SyncObj):
         ]
 
         return {
-            "available": int(res["capacity"] - res["reserved"] - res["committed"]),
-            "reserved": int(res["reserved"]),
-            "committed": int(res["committed"]),
-            "capacity": int(res["capacity"]),
+            "available": float(res["capacity"] - res["reserved"] - res["committed"]),
+            "reserved": float(res["reserved"]),
+            "committed": float(res["committed"]),
+            "capacity": float(res["capacity"]),
             "reservations": reservations,
         }
 
