@@ -172,13 +172,21 @@ class TestLivenessTermination:
         with pytest.raises(self.SimulatedProcessCrash):
             backend.reserve("crash-reserve-key", Decimal("0.1"), "crash-reserve-budget")
 
+        # The journal completes the operation when the budget mutation is
+        # durable, then restores the matching registry record on restart.
         reopened = SingleHostLockBackend(str(tmp_path))
         state = reopened.get_state("crash-reserve-budget")
-        assert state.reserved == 0
-        assert state.available == 1
-        assert reopened.reserve(
+        registry = reopened._load_reservations()
+        assert state.reserved == pytest.approx(0.1)
+        assert state.available == pytest.approx(0.9)
+        assert len(registry) == 1
+        recovered_id, recovered_record = next(iter(registry.items()))
+        assert recovered_record["state"] == "RESERVED"
+        replay = reopened.reserve(
             "crash-reserve-key", Decimal("0.1"), "crash-reserve-budget"
-        ).status == "RESERVED"
+        )
+        assert replay.status == "RESERVED"
+        assert replay.reservation_id == recovered_id
 
     def test_crash_after_budget_commit_is_recoverable(self, tmp_path, monkeypatch):
         """A crash between budget commit and registry write must reconcile on restart."""
