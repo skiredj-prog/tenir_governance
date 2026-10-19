@@ -927,3 +927,22 @@ def test_confirm_from_reserved_does_not_commit_budget_before_rejected_transition
     assert latest.budget_committed is False
     assert after.reserved == before.reserved == Decimal("10.0")
     assert after.committed == before.committed == Decimal("0")
+
+
+def test_confirm_refuses_budgeted_operation_without_durable_resource_identity(tmp_path):
+    from tenir_governance.operations.registry import OperationRecord
+
+    gov, _state, _backend = _setup_durable_backend_governor(tmp_path)
+    key = "confirm-missing-resource"
+    assert gov.registry.register(OperationRecord(
+        idempotency_key=key,
+        passage_id="passage-missing-resource",
+        agent_id="alice",
+        action_type="payment",
+        amount=10.0,
+        resource_id="",
+        state=OperationState.DISPATCHING,
+    ))
+
+    assert gov.confirm(key) is False
+    assert gov.registry.get(key).state == OperationState.DISPATCHING
