@@ -303,6 +303,20 @@ class TestMerkleTree(unittest.TestCase):
 class TestConsensusBroadcast(unittest.TestCase):
     """Peer consensus transport must accept and send the configured API token."""
 
+    def test_plaintext_peer_url_is_rejected_before_sending_token(self):
+        from r5_distributed_crypto.merkle.distributed_ledger import (
+            ConsensusBroadcast, LedgerIntegrityError,
+        )
+
+        with patch("urllib.request.urlopen") as urlopen:
+            with self.assertRaisesRegex(LedgerIntegrityError, "must use HTTPS"):
+                ConsensusBroadcast._http_post(
+                    "http://peer.example/api/v1/ledger/validate_epoch",
+                    b'{"epoch_id": 1}',
+                    api_token="sensitive-token",
+                )
+            urlopen.assert_not_called()
+
     def test_constructor_and_peer_request_support_bearer_token(self):
         from r5_distributed_crypto.merkle.distributed_ledger import ConsensusBroadcast
 
