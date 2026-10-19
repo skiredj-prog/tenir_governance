@@ -85,7 +85,8 @@ export NEO4J_SEED=true          # Seed partner_a/partner_b ontology on first run
 export OLLAMA_MODEL=grammar     # Use "grammar" until fine-tune is done
 export LEDGER_PATH=ledger/tenir_ledger.jsonl
 # Generate a fresh secret for this deployment; do not commit or reuse it.
-export OATH_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+# Inject OATH_SECRET from your secret manager; keep it stable across restarts.
+# Rotate deliberately with a coordinated key-rotation procedure.
 export PEER_NODES=              # Leave empty for single-node mode
 ```
 
