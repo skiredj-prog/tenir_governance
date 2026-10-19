@@ -109,52 +109,8 @@ class ConsensusBackend(Protocol):
         ...
 
     def refund(self, reservation_id: str) -> RefundResult:
-        """Refund a committed reservation exactly once using the durable journal.
-
-        Call only after authoritative evidence establishes that no external
-        effect occurred. A replay never mutates budget counters twice.
-        """
-        with self._lock:
-            flock = self._lock_file()
-            try:
-                reservations = self._load_reservations()
-                if reservation_id not in reservations:
-                    return RefundResult(status="NOT_FOUND")
-
-                rec = reservations[reservation_id]
-                if rec["state"] == "REFUNDED":
-                    return RefundResult(status="ALREADY_REFUNDED")
-                if rec["state"] != "COMMITTED":
-                    return RefundResult(status="NOT_COMMITTED")
-
-                amount = Decimal(str(rec["amount"]))
-                before = self._snapshot(rec["resource_id"])
-                if Decimal(before["consumed"]) < amount:
-                    return RefundResult(status="ERROR")
-                after = dict(before)
-                after["consumed"] = str(
-                    _decimal_subtract(Decimal(before["consumed"]), amount)
-                )
-                updated = dict(rec)
-                updated["state"] = "REFUNDED"
-                updated["refunded_at"] = time.time()
-                self._persist_transaction({
-                    "operation": "refund",
-                    "reservation_id": reservation_id,
-                    "record": updated,
-                    "before": before,
-                    "after": after,
-                })
-                if not self._coordinator.refund(rec["resource_id"], amount):
-                    self._clear_transaction()
-                    return RefundResult(status="ERROR")
-                reservations[reservation_id] = updated
-                self._persist_reservations(reservations)
-                self._clear_transaction()
-                return RefundResult(status="REFUNDED")
-            finally:
-                if flock:
-                    flock.close()
+        """Refund a committed reservation after authoritative non-execution proof."""
+        ...
 
     def reconcile(self, key: str) -> ReconciliationResult:
         """Réconcilier une opération en état UNKNOWN."""
@@ -509,6 +465,54 @@ class SingleHostLockBackend:
                 self._clear_transaction()
 
                 return ReleaseResult(status="RELEASED")
+            finally:
+                if flock:
+                    flock.close()
+
+    def refund(self, reservation_id: str) -> RefundResult:
+        """Refund a committed reservation exactly once using the durable journal.
+
+        Call only after authoritative evidence establishes that no external
+        effect occurred. A replay never mutates budget counters twice.
+        """
+        with self._lock:
+            flock = self._lock_file()
+            try:
+                reservations = self._load_reservations()
+                if reservation_id not in reservations:
+                    return RefundResult(status="NOT_FOUND")
+
+                rec = reservations[reservation_id]
+                if rec["state"] == "REFUNDED":
+                    return RefundResult(status="ALREADY_REFUNDED")
+                if rec["state"] != "COMMITTED":
+                    return RefundResult(status="NOT_COMMITTED")
+
+                amount = Decimal(str(rec["amount"]))
+                before = self._snapshot(rec["resource_id"])
+                if Decimal(before["consumed"]) < amount:
+                    return RefundResult(status="ERROR")
+                after = dict(before)
+                after["consumed"] = str(
+                    _decimal_subtract(Decimal(before["consumed"]), amount)
+                )
+                updated = dict(rec)
+                updated["state"] = "REFUNDED"
+                updated["refunded_at"] = time.time()
+                self._persist_transaction({
+                    "operation": "refund",
+                    "reservation_id": reservation_id,
+                    "record": updated,
+                    "before": before,
+                    "after": after,
+                })
+                if not self._coordinator.refund(rec["resource_id"], amount):
+                    self._clear_transaction()
+                    return RefundResult(status="ERROR")
+                reservations[reservation_id] = updated
+                self._persist_reservations(reservations)
+                self._clear_transaction()
+                return RefundResult(status="REFUNDED")
             finally:
                 if flock:
                     flock.close()
