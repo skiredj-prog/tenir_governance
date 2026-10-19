@@ -735,6 +735,32 @@ class DualKernelGovernor:
                 "tau_k_expired": tau_status.get("expired", False),
             }
         elif state == OperationState.RESERVED:
+            if self.consensus_backend is not None and record.resource_id and record.amount > 0:
+                if not record.reservation_id:
+                    return {
+                        "idempotency_key": idempotency_key,
+                        "action": "reconcile",
+                        "reason": "Durable reservation identity missing; dispatch blocked pending reconciliation.",
+                        "operation_state": state.value,
+                        "passage_id": record.passage_id,
+                    }
+                try:
+                    backend_state = self.consensus_backend.get_state(record.resource_id)
+                    reservation = next(
+                        (item for item in backend_state.reservations
+                         if item.get("reservation_id") == record.reservation_id),
+                        None,
+                    )
+                except Exception:
+                    reservation = None
+                if reservation is None or reservation.get("state") != "RESERVED":
+                    return {
+                        "idempotency_key": idempotency_key,
+                        "action": "reconcile",
+                        "reason": "Durable reservation is missing or not RESERVED; dispatch blocked pending reconciliation.",
+                        "operation_state": state.value,
+                        "passage_id": record.passage_id,
+                    }
             return {
                 "idempotency_key": idempotency_key,
                 "action": "dispatch",
