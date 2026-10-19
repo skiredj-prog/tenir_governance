@@ -211,6 +211,10 @@ class TestLivenessTermination:
             "crash-release-key", Decimal("0.1"), "crash-release-budget"
         )
         assert reservation.status == "RESERVED"
+        other = backend.reserve(
+            "crash-release-other-key", Decimal("0.2"), "crash-release-budget"
+        )
+        assert other.status == "RESERVED"
 
         def crash_after_budget_release(_reservations):
             raise self.SimulatedProcessCrash("crash after budget release")
@@ -223,7 +227,10 @@ class TestLivenessTermination:
         state = reopened.get_state("crash-release-budget")
         registry = reopened._load_reservations()
         assert registry[reservation.reservation_id]["state"] == "RELEASED"
-        assert state.reserved == 0
+        assert registry[other.reservation_id]["state"] == "RESERVED"
+        # Recovery must not apply the release twice or consume another
+        # reservation's aggregate budget on the same resource.
+        assert Decimal(str(state.reserved)) == Decimal("0.2")
         assert state.committed == 0
 
     def test_reserve_persistence_failure_compensates_budget(self, tmp_path, monkeypatch):
