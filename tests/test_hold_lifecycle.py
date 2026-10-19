@@ -1091,3 +1091,25 @@ def test_agent_c_expiring_unowned_hold_does_not_release_another_operations_budge
         "HOLD expiry released budget owned by a different operation"
     )
     assert budget.consumed == 0.0
+
+
+def test_agent_c_expire_hold_before_tau_k_is_rejected():
+    """Expiry must not transition HOLD -> FAILED before its τ_K deadline."""
+    gov, _state = _setup_governor()
+    key = "agent-c-premature-hold-expiry"
+    rec = OperationRecord(
+        idempotency_key=key,
+        passage_id="p-agent-c-premature-hold-expiry",
+        agent_id="alice",
+        action_type="payment",
+    )
+    gov.registry.register(rec)
+    entered = gov.hold_manager.enter_hold(key, tau_k_seconds=3600)
+    assert entered["entered"] is True
+
+    result = gov.expire_hold(key)
+
+    assert result["expired"] is False, (
+        "HOLD expired before its configured τ_K deadline"
+    )
+    assert gov.registry.get(key).state == OperationState.HOLD
