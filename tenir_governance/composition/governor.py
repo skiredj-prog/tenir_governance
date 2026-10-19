@@ -1570,6 +1570,48 @@ class DualKernelGovernor:
         if not math.isfinite(supplied_amount) or supplied_amount != recorded_amount:
             return False
 
+        if (
+            self.consensus_backend is not None
+            and recorded_resource
+            and recorded_amount > 0
+            and not record.reservation_id
+        ):
+            # Recover the crash window where backend.reserve() persisted but
+            # the operation registry did not yet persist reservation_id/flags.
+            try:
+                backend_state = self.consensus_backend.get_state(recorded_resource)
+                orphan = next(
+                    (item for item in backend_state.reservations
+                     if item.get("key") == idempotency_key),
+                    None,
+                )
+            except Exception:
+                return False
+            if orphan is not None:
+                orphan_state = orphan.get("state")
+                if orphan_state in ("RESERVED", "UNKNOWN"):
+                    reserved_flag, committed_flag = True, False
+                elif orphan_state == "COMMITTED":
+                    reserved_flag, committed_flag = False, True
+                elif orphan_state in ("RELEASED", "REFUNDED"):
+                    reserved_flag, committed_flag = False, False
+                else:
+                    return False
+                try:
+                    repaired = self.registry.set_budget_flags(
+                        idempotency_key,
+                        budget_reserved=reserved_flag,
+                        budget_committed=committed_flag,
+                        reservation_id=orphan["reservation_id"],
+                    )
+                except Exception:
+                    repaired = False
+                if not repaired:
+                    return False
+                record = self.registry.get(idempotency_key)
+                if record is None:
+                    return False
+
         committed = record.budget_committed
         owns_budget = record.budget_reserved or record.budget_committed
         if self.consensus_backend is not None and owns_budget and not record.reservation_id:
