@@ -391,3 +391,91 @@ def test_recovery_rejects_unknown_journal_operation(tmp_path):
 
     with pytest.raises(RuntimeError, match="Corrupted transaction journal"):
         SingleHostLockBackend(str(store_dir))
+
+
+def _setup_durable_backend_governor(tmp_path, provider=None, budget_capacity=100.0):
+    gov, state = _setup_governor(budget_capacity=budget_capacity, provider=provider)
+    backend = SingleHostLockBackend(str(tmp_path))
+    backend.register_resource("budget", Decimal(str(budget_capacity)))
+    gov.consensus_backend = backend
+    return gov, state, backend
+
+
+def _adjudicate_durable_budget(gov):
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    result = gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        authority=0.9, context_fit=0.9, evidence_quality=0.9,
+        option_space=0.9, resource_id="budget", amount=10.0,
+    )
+    assert result["composed_decision"] in (Decision.PASS.value, Decision.FLAG.value)
+    return passage, result
+
+
+def test_governor_reservation_is_owned_by_durable_backend(tmp_path):
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path)
+    passage, result = _adjudicate_durable_budget(gov)
+
+    record = gov.registry.get(passage.idempotency_key)
+    state = backend.get_state("budget")
+    assert record is not None
+    assert record.budget_reserved is True
+    assert record.reservation_id
+    assert state.reserved == Decimal("10.0")
+    assert state.committed == Decimal("0")
+
+
+def test_governor_dispatch_commits_backend_reservation_once(tmp_path):
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path)
+    passage, _result = _adjudicate_durable_budget(gov)
+
+    dispatched = gov.dispatch(passage.idempotency_key, "budget", 10.0)
+    assert dispatched["dispatched"] is True
+    record = gov.registry.get(passage.idempotency_key)
+    state = backend.get_state("budget")
+    assert record.budget_reserved is False
+    assert record.budget_committed is True
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("10.0")
+
+    # Duplicate dispatch is rejected by the operation state machine and must
+    # not commit the same backend reservation a second time.
+    replay = gov.dispatch(passage.idempotency_key, "budget", 10.0)
+    assert replay["dispatched"] is False
+    assert backend.get_state("budget").committed == Decimal("10.0")
+
+
+def test_governor_pre_dispatch_failure_releases_backend_reservation(tmp_path):
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path)
+    passage, _result = _adjudicate_durable_budget(gov)
+
+    assert gov.fail(passage.idempotency_key, "budget", 10.0) is True
+    record = gov.registry.get(passage.idempotency_key)
+    state = backend.get_state("budget")
+    assert record.state == OperationState.FAILED
+    assert record.budget_reserved is False
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("0")
+
+
+def test_reconcile_failed_provider_refunds_durable_commit(tmp_path):
+    provider = MockProvider(
+        behavior="timeout",
+        reconcile_outcome=ProviderOutcome.FAILED,
+    )
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
+    passage, _result = _adjudicate_durable_budget(gov)
+
+    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    assert result["operation_state"] in (
+        OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
+    )
+    reconciled = gov.reconcile_unknown(passage.idempotency_key)
+    assert reconciled["reconciled"] is True
+    record = gov.registry.get(passage.idempotency_key)
+    state = backend.get_state("budget")
+    assert record.state == OperationState.FAILED
+    assert record.budget_reserved is False
+    assert record.budget_committed is False
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("0")
