@@ -476,19 +476,21 @@ class DualKernelGovernor:
         # for every outcome that keeps the operation alive (PASS/FLAG/HOLD).
         # A failed reservation at this point (concurrent consumption since
         # the membrane check) is fail-closed to HARD_VETO.
-        if budget_in_scope and composed_decision in (
+        if composed_decision in (
             Decision.PASS.value, Decision.FLAG.value, Decision.HOLD.value,
         ):
-            # Linearize the final admission/reservation check against
-            # QUARANTINE_LOCK. A lock activated after the membrane's first
-            # I6 check must still prevent this operation from being admitted.
+            # Linearize final admission against QUARANTINE_LOCK even when no
+            # budget is in scope. If a lock activates after I6's first check,
+            # no outcome that retains the operation may pass this point.
             with self.membrane.state._quarantine_lock:
                 if self.membrane.state.quarantine_active:
                     composed_decision = Decision.HARD_VETO.value
                     composed_rationale = (
                         "QUARANTINE_LOCK activated during adjudication; admission and reservation blocked."
                     )
-                elif not self._reserve_budget(idem_key, resource_id, amount):
+                elif budget_in_scope and not self._reserve_budget(
+                    idem_key, resource_id, amount,
+                ):
                     composed_decision = Decision.HARD_VETO.value
                     composed_rationale = (
                         "Budget reservation failed at commit point (concurrent consumption) "
