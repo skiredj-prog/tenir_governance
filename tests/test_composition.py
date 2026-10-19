@@ -1000,7 +1000,7 @@ class TestSchemaAdapter:
                 "degraded_inputs": [],
             },
             "schema_version": "1.2",
-            "degraded_mode": ["none"],
+            "degraded_mode": ["sparse_ingress"] if composed in ("HOLD", "HARD_VETO") else ["none"],
         }
         return {
             "canonical_context": canonical_context,
