@@ -914,11 +914,11 @@ class DualKernelGovernor:
                         None,
                     )
                     if not reservation or reservation.get("state") != "RESERVED":
-                        self.registry.transition_to(idempotency_key, OperationState.FAILED)
                         return {
                             "dispatched": False,
-                            "reason": "Durable reservation revalidation failed; provider execution blocked.",
-                            "operation_state": OperationState.FAILED.value,
+                            "reason": "Durable reservation revalidation failed; provider execution blocked and reconciliation required.",
+                            "operation_state": OperationState.DISPATCHING.value,
+                            "recommendation": "human_review",
                         }
                 commit_result = self.consensus_backend.commit(reservation_id)
             except Exception:
@@ -928,11 +928,11 @@ class DualKernelGovernor:
                     "operation_state": OperationState.DISPATCHING.value,
                 }
             if getattr(commit_result, "status", None) not in ("COMMITTED", "ALREADY_COMMITTED"):
-                self.registry.transition_to(idempotency_key, OperationState.FAILED)
                 return {
                     "dispatched": False,
-                    "reason": "Durable backend refused commit; provider execution blocked.",
-                    "operation_state": OperationState.FAILED.value,
+                    "reason": "Durable backend refused commit; provider execution blocked and reconciliation required.",
+                    "operation_state": OperationState.DISPATCHING.value,
+                    "recommendation": "human_review",
                 }
             try:
                 flags_ok = self.registry.set_budget_flags(
