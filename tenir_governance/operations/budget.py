@@ -144,6 +144,17 @@ class InProcessBudgetCoordinator:
         with self._locks[resource_id]:
             resource.reserved = max(0.0, resource.reserved - amount)
 
+    def refund(self, resource_id: str, amount: float) -> bool:
+        """Reverse committed accounting without clamping inconsistent state."""
+        resource = self._resources.get(resource_id)
+        if resource is None or amount <= 0:
+            return False
+        with self._locks[resource_id]:
+            if resource.consumed < amount:
+                return False
+            resource.consumed -= amount
+            return True
+
     def get_utilization(self, resource_id: str) -> float | None:
         resource = self._resources.get(resource_id)
         if resource is None:
