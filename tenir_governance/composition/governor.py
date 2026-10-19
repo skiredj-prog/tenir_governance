@@ -860,7 +860,63 @@ class DualKernelGovernor:
                 "operation_state": existing.state.value,
             }
 
-        if resource_id and amount > 0:
+        if resource_id and amount > 0 and self.consensus_backend is not None:
+            current = self.registry.get(idempotency_key)
+            reservation_id = current.reservation_id if current else ""
+            if not reservation_id:
+                return {
+                    "dispatched": False,
+                    "reason": "Durable reservation identity missing; provider execution blocked.",
+                    "operation_state": OperationState.DISPATCHING.value,
+                }
+            try:
+                backend_state = self.consensus_backend.get_state(resource_id)
+                if self.policy.revalidate_budget_at_dispatch:
+                    reservation = next(
+                        (item for item in backend_state.reservations
+                         if item.get("reservation_id") == reservation_id),
+                        None,
+                    )
+                    if not reservation or reservation.get("state") != "RESERVED":
+                        self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                        return {
+                            "dispatched": False,
+                            "reason": "Durable reservation revalidation failed; provider execution blocked.",
+                            "operation_state": OperationState.FAILED.value,
+                        }
+                commit_result = self.consensus_backend.commit(reservation_id)
+            except Exception:
+                return {
+                    "dispatched": False,
+                    "reason": "Durable backend commit failed or is uncertain; reconciliation required.",
+                    "operation_state": OperationState.DISPATCHING.value,
+                }
+            if getattr(commit_result, "status", None) not in ("COMMITTED", "ALREADY_COMMITTED"):
+                self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                return {
+                    "dispatched": False,
+                    "reason": "Durable backend refused commit; provider execution blocked.",
+                    "operation_state": OperationState.FAILED.value,
+                }
+            try:
+                flags_ok = self.registry.set_budget_flags(
+                    idempotency_key,
+                    budget_reserved=False,
+                    budget_committed=True,
+                    reservation_id=reservation_id,
+                )
+            except Exception:
+                flags_ok = False
+            if not flags_ok:
+                # Do not call the provider. Leave DISPATCHING and the durable
+                # COMMITTED reservation for explicit reconciliation/refund.
+                return {
+                    "dispatched": False,
+                    "reason": "Budget ownership persistence failed after durable commit; provider execution blocked, reconciliation required.",
+                    "operation_state": OperationState.DISPATCHING.value,
+                }
+
+        if resource_id and amount > 0 and self.consensus_backend is None:
             resource = self.membrane.state.resources.get(resource_id)
             if resource:
                 with self.membrane.state.get_lock(resource_id):
