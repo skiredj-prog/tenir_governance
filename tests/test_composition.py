@@ -331,7 +331,7 @@ class TestDualKernelGovernor:
             agent_id="alice", action_type="payment", amount=10.0,
             idempotency_key="quarantine-admission-race",
         )
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             passage, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -353,7 +353,7 @@ class TestDualKernelGovernor:
             agent_id="alice", action_type="read_only",
             idempotency_key="quarantine-unbudgeted-race",
         )
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             passage, pressure=0.2, velocity=0.3, capacity=1.0,
         )
         assert result["composed_decision"] == Decision.HARD_VETO.value
@@ -362,7 +362,7 @@ class TestDualKernelGovernor:
     def test_resource_reregistration_cannot_reset_budget_or_lock(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -402,7 +402,7 @@ class TestDualKernelGovernor:
             agent_id="alice", action_type="payment", amount=10.0,
             idempotency_key="active-provider-race",
         )
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             passage, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -442,7 +442,7 @@ class TestDualKernelGovernor:
             agent_id="alice", action_type="payment", amount=10.0,
             idempotency_key="dispatch-flag-write-failure",
         )
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             passage, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -539,7 +539,7 @@ class TestDualKernelGovernor:
     def test_safe_payment_both_pass(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -550,7 +550,7 @@ class TestDualKernelGovernor:
     def test_scoring_catches_stress_membrane_passes(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             p, pressure=0.95, velocity=0.95, capacity=0.3,
             resource_id="budget", amount=10.0,
         )
@@ -561,7 +561,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="delegation", recipient_id="eve")
         delegation = Delegation(delegating_agent_id="alice", delegatee_agent_id="eve")
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             delegation=delegation,
         )
@@ -573,7 +573,7 @@ class TestDualKernelGovernor:
     def test_membrane_catches_budget_scoring_passes(self):
         gov, state = self._setup(budget_capacity=50.0)
         p1 = Passage(agent_id="alice", action_type="payment", amount=30.0)
-        r1 = self._adjudicate(gov, 
+        r1 = self._adjudicate(gov,
             p1, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=30.0,
         )
@@ -581,7 +581,7 @@ class TestDualKernelGovernor:
         gov.membrane.commit_passage(p1, resource_id="budget", amount=30.0)
 
         p2 = Passage(agent_id="alice", action_type="payment", amount=30.0)
-        r2 = self._adjudicate(gov, 
+        r2 = self._adjudicate(gov,
             p2, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=30.0,
         )
@@ -592,7 +592,7 @@ class TestDualKernelGovernor:
     def test_both_kernel_flag_compose_to_flag(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             p, pressure=0.9, velocity=0.9, capacity=0.7,
             resource_id="budget", amount=10.0,
         )
@@ -602,7 +602,7 @@ class TestDualKernelGovernor:
     def test_ledger_records_both_kernels(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        self._adjudicate(gov, 
+        self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -618,7 +618,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="delegation", recipient_id="eve")
         delegation = Delegation(delegating_agent_id="alice", delegatee_agent_id="eve")
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             p, pressure=0.01, velocity=0.01, capacity=1.0,
             delegation=delegation,
         )
@@ -630,7 +630,7 @@ class TestDualKernelGovernor:
         """Per review §2: FLAG from scoring + near-limit budget → HOLD."""
         gov, state = self._setup(budget_capacity=100.0)
         p1 = Passage(agent_id="alice", action_type="payment", amount=80.0)
-        r1 = self._adjudicate(gov, 
+        r1 = self._adjudicate(gov,
             p1, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=80.0,
         )
@@ -638,7 +638,7 @@ class TestDualKernelGovernor:
         gov.membrane.commit_passage(p1, resource_id="budget", amount=80.0)
 
         p2 = Passage(agent_id="alice", action_type="payment", amount=5.0)
-        r2 = self._adjudicate(gov, 
+        r2 = self._adjudicate(gov,
             p2, pressure=0.9, velocity=0.9, capacity=0.7,
             resource_id="budget", amount=5.0,
         )
@@ -649,7 +649,7 @@ class TestDualKernelGovernor:
     def test_execution_status_separated_from_decision(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -667,7 +667,7 @@ class TestDualKernelGovernor:
         """Per review 2 §4: a confirmed effect cannot be dispatched again."""
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        r1 = self._adjudicate(gov, 
+        r1 = self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -676,7 +676,7 @@ class TestDualKernelGovernor:
         # Same idempotency key — should be blocked
         p2 = Passage(agent_id="alice", action_type="payment", amount=10.0,
                      idempotency_key=p.idempotency_key)
-        r2 = self._adjudicate(gov, 
+        r2 = self._adjudicate(gov,
             p2, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -694,7 +694,7 @@ class TestDualKernelGovernor:
 
         gov.scoring = BrokenScoring()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -706,7 +706,7 @@ class TestDualKernelGovernor:
         """Custom policy threshold affects escalation."""
         gov, state = self._setup(budget_capacity=100.0, policy=CompositionPolicy(budget_escalation_threshold=0.50))
         p1 = Passage(agent_id="alice", action_type="payment", amount=45.0)
-        r1 = self._adjudicate(gov, 
+        r1 = self._adjudicate(gov,
             p1, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=45.0,
         )
@@ -715,7 +715,7 @@ class TestDualKernelGovernor:
 
         # FLAG + 50% budget with 50% threshold → HOLD
         p2 = Passage(agent_id="alice", action_type="payment", amount=5.0)
-        r2 = self._adjudicate(gov, 
+        r2 = self._adjudicate(gov,
             p2, pressure=0.9, velocity=0.9, capacity=0.7,
             resource_id="budget", amount=5.0,
         )
@@ -726,7 +726,7 @@ class TestDualKernelGovernor:
         """Full dispatch lifecycle: adjudicate → dispatch → confirm."""
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        r1 = self._adjudicate(gov, 
+        r1 = self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -746,7 +746,7 @@ class TestDualKernelGovernor:
         """Fail after reserve releases the budget reservation."""
         gov, state = self._setup(budget_capacity=100.0)
         p = Passage(agent_id="alice", action_type="payment", amount=30.0)
-        r1 = self._adjudicate(gov, 
+        r1 = self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=30.0,
         )
@@ -767,7 +767,7 @@ class TestDualKernelGovernor:
         """resume_existing returns dispatch for RESERVED operations."""
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        self._adjudicate(gov, 
+        self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -779,7 +779,7 @@ class TestDualKernelGovernor:
         """recover() finds DISPATCHING and UNKNOWN operations."""
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        self._adjudicate(gov, 
+        self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -794,7 +794,7 @@ class TestDualKernelGovernor:
     def test_invalid_amount_fails_closed_before_reservation(self, amount):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=amount,
         )
@@ -822,7 +822,7 @@ class TestDualKernelGovernor:
     def test_dispatch_rejects_amount_mismatch_without_committing(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
@@ -837,7 +837,7 @@ class TestDualKernelGovernor:
     def test_quarantine_blocks_previously_reserved_dispatch(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        result = self._adjudicate(gov, 
+        result = self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
