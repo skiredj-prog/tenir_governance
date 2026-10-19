@@ -33,7 +33,7 @@ import os
 import threading
 import time
 import uuid
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -259,7 +259,7 @@ class SingleHostLockBackend:
                             raise ValueError(f"invalid {snapshot_name} snapshot amount")
                 resource_id = tx["record"]["resource_id"]
                 current = self._snapshot(resource_id)
-            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            except (OSError, ValueError, TypeError, KeyError, ArithmeticError, json.JSONDecodeError) as exc:
                 raise RuntimeError("Corrupted transaction journal; refusing recovery.") from exc
 
             if current == tx["after"]:
