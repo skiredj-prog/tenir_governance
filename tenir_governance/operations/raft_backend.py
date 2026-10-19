@@ -457,13 +457,10 @@ class RaftConsensusBackend:
             if rid is None or rec is None:
                 return ReconciliationResult(status="NOT_FOUND")
 
-            if rec["state"] in ("COMMITTED", "RELEASED"):
-                # Already resolved
-                if rec["state"] == "COMMITTED":
-                    return ReconciliationResult(status="CONFIRMED", effect_observed=True)
-                else:
-                    return ReconciliationResult(status="FAILED", effect_observed=False)
-
+            if rec["state"] == "COMMITTED":
+                return ReconciliationResult(status="CONFIRMED", effect_observed=True)
+            if rec["state"] == "RELEASED" and self._provider_reconcile is None:
+                return ReconciliationResult(status="FAILED", effect_observed=False)
             if self._provider_reconcile is None:
                 return ReconciliationResult(status="UNRESOLVED", effect_observed=None)
 
