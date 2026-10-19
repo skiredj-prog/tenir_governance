@@ -614,17 +614,49 @@ class DualKernelGovernor:
         if record is None:
             return False
         if record.budget_reserved:
+            # A backend-backed record must carry the reservation identity too.
+            return self.consensus_backend is None or bool(record.reservation_id)
+        if self.consensus_backend is not None:
+            # The backend's idempotency key closes the crash window between
+            # durable reservation and registry ownership persistence.
+            try:
+                result = self.consensus_backend.reserve(
+                    idempotency_key, amount, resource_id,
+                )
+            except Exception:
+                return False
+            if getattr(result, "status", None) != "RESERVED":
+                return False
+            reservation_id = getattr(result, "reservation_id", None)
+            if not reservation_id:
+                return False
+            try:
+                recorded = self.registry.set_budget_flags(
+                    idempotency_key,
+                    budget_reserved=True,
+                    budget_committed=False,
+                    reservation_id=reservation_id,
+                )
+            except Exception:
+                recorded = False
+            if not recorded:
+                # Compensation is idempotent. If the process dies before this
+                # call, replaying reserve(key, ...) returns the same reservation.
+                try:
+                    self.consensus_backend.release(reservation_id)
+                except Exception:
+                    pass
+                return False
             return True
+
         resource = self.membrane.state.resources.get(resource_id)
         if resource is None:
             return False
         with self.membrane.state.get_lock(resource_id):
             if not resource.reserve(amount):
                 return False
-        # The resource and operation registry are separate stores. If the
-        # ownership flag cannot be durably recorded, compensate the reservation
-        # and fail closed; otherwise a retry could reserve the same operation
-        # twice because the registry still says it owns no budget.
+        # Legacy in-process path: retain existing behavior when no durable
+        # consensus backend has been explicitly configured.
         try:
             recorded = self.registry.set_budget_flags(
                 idempotency_key, budget_reserved=True,
