@@ -877,3 +877,35 @@ def test_reconcile_confirmed_refuses_terminal_state_without_durable_reservation(
     assert result["reconciled"] is False
     assert latest.state == OperationState.DISPATCHING
     assert latest.budget_committed is False
+
+
+def test_reconcile_failed_recovers_missing_durable_reservation_identity(tmp_path):
+    provider = MockProvider(
+        behavior="timeout",
+        reconcile_outcome=ProviderOutcome.FAILED,
+    )
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
+    passage, _result = _adjudicate_durable_budget(gov)
+    record = gov.registry.get(passage.idempotency_key)
+    assert backend.commit(record.reservation_id).status in ("COMMITTED", "ALREADY_COMMITTED")
+    assert gov.registry.set_budget_flags(
+        passage.idempotency_key,
+        budget_reserved=False,
+        budget_committed=False,
+        reservation_id="",
+    )
+    assert gov.registry.transition_to(
+        passage.idempotency_key, OperationState.DISPATCHING,
+    )[0]
+
+    result = gov.reconcile_unknown(passage.idempotency_key)
+    latest = gov.registry.get(passage.idempotency_key)
+    state = backend.get_state("budget")
+
+    assert result["reconciled"] is True
+    assert latest.state == OperationState.FAILED
+    assert latest.reservation_id
+    assert latest.budget_reserved is False
+    assert latest.budget_committed is False
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("0")
