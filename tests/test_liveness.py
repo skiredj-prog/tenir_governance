@@ -24,7 +24,7 @@ import threading
 import time
 
 import pytest
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 from tenir_governance.operations.consensus_backend import (
     SingleHostLockBackend,
@@ -167,7 +167,12 @@ class TestLivenessTermination:
         state = backend.get_state("boundary-budget")
         assert state.capacity == capacity
         assert state.reserved == Decimal("1")
-        assert state.available == capacity - Decimal("1")
+        # The default Decimal context (precision 28) rounds this expected
+        # value; compute the oracle at sufficient precision for 1E+128 - 1.
+        with localcontext() as context:
+            context.prec = 130
+            expected_available = capacity - Decimal("1")
+        assert state.available == expected_available
 
 
     def test_zero_decimal_exponent_does_not_poison_internal_precision(self):
