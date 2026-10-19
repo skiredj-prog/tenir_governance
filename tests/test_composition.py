@@ -224,6 +224,22 @@ class TestDualKernelGovernor:
         governor = DualKernelGovernor(scoring, membrane, policy=policy)
         return governor, state
 
+    def test_resource_reregistration_cannot_reset_budget_or_lock(self):
+        gov, state = self._setup()
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        result = gov.adjudicate(
+            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            resource_id="budget", amount=10.0,
+        )
+        assert result["operation_state"] == OperationState.RESERVED.value
+        original = state.resources["budget"]
+        original_lock = state.get_lock("budget")
+        with pytest.raises(ValueError, match="replacement is prohibited"):
+            state.register_resource(Resource(resource_id="budget", capacity=1000.0))
+        assert state.resources["budget"] is original
+        assert state.get_lock("budget") is original_lock
+        assert original.reserved == 10.0
+
     def test_safe_payment_both_pass(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
