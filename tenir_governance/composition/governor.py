@@ -993,7 +993,10 @@ class DualKernelGovernor:
             }
         elif prov_result.outcome == ProviderOutcome.FAILED:
             try:
-                self.fail(idempotency_key, resource_id, amount)
+                self.fail(
+                    idempotency_key, resource_id, amount,
+                    _provider_confirmed_no_effect=True,
+                )
             finally:
                 with self._active_dispatches_lock:
                     self._active_dispatches.discard(idempotency_key)
@@ -1228,9 +1231,23 @@ class DualKernelGovernor:
         success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
         return success
 
-    def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0) -> bool:
-        """Transition to FAILED and mutate only this operation's budget."""
+    def fail(
+        self,
+        idempotency_key: str,
+        resource_id: str | None = None,
+        amount: float = 0.0,
+        *,
+        _provider_confirmed_no_effect: bool = False,
+    ) -> bool:
+        """Mark FAILED only when non-execution is established.
+
+        The provider execution path may set ``_provider_confirmed_no_effect``
+        only after receiving an explicit FAILED outcome. DISPATCHING by itself
+        is uncertain and must be reconciled, just like UNKNOWN.
+        """
         record = self.registry.get(idempotency_key)
+        if record.state == OperationState.DISPATCHING and not _provider_confirmed_no_effect:
+            return False
         if record is None or record.state == OperationState.UNKNOWN:
             # UNKNOWN is not proof of non-execution. Require reconciliation
             # before transitioning to FAILED or compensating committed spend.
@@ -1262,6 +1279,9 @@ class DualKernelGovernor:
                     OperationState.FAILED,
                     OperationState.CONFIRMED,
                     OperationState.UNKNOWN,
+                ) or (
+                    current.state == OperationState.DISPATCHING
+                    and not _provider_confirmed_no_effect
                 ):
                     return False
                 accounted = resource.consumed if committed else resource.reserved
