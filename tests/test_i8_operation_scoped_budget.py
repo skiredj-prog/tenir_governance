@@ -259,3 +259,22 @@ def test_commit_passage_fails_closed_on_coordinator_resource_identity_mismatch()
     assert passage.execution_status.value != "DISPATCHED"
     assert foreign_resource.reserved == 10.0
     assert foreign_resource.consumed == 0.0
+
+
+def test_fail_does_not_resolve_unknown_or_refund_uncertain_external_effect():
+    gov, state = _lifecycle_governor()
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    assert gov.dispatch(passage.idempotency_key)["dispatched"] is True
+    assert gov.mark_unknown(passage.idempotency_key)
+    before = state.resources["budget"].consumed
+
+    assert gov.fail(passage.idempotency_key) is False
+
+    record = gov.registry.get(passage.idempotency_key)
+    assert record.state == OperationState.UNKNOWN
+    assert state.resources["budget"].consumed == before == 10.0
+    assert state.resources["budget"].reserved == 0.0
