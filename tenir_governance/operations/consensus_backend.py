@@ -149,13 +149,9 @@ class SingleHostLockBackend:
         if not math.isfinite(normalized_capacity) or normalized_capacity < 0:
             raise ValueError("Resource capacity must be finite and non-negative.")
 
-        existing = self._coordinator.get_state(resource_id)
-        if existing is not None:
-            if float(existing["capacity"]) != normalized_capacity:
-                raise ValueError(
-                    f"Resource {resource_id!r} is already registered with a different capacity."
-                )
-            return
+        # Delegate both idempotent re-registration and corruption checks to
+        # the coordinator under its own durable lock; never short-circuit a
+        # potentially corrupt persisted state here.
         resource = type("Resource", (), {
             "resource_id": resource_id,
             "capacity": normalized_capacity,
