@@ -148,9 +148,16 @@ class LinearizabilityChecker:
             # Each candidate branch gets its own state snapshot. Sequential
             # specs commonly mutate state; a rejected candidate must not leak
             # mutations into sibling search branches.
-            working_state = deepcopy(state if state is not None else self._initial_state())
+            try:
+                working_state = deepcopy(state if state is not None else self._initial_state())
+            except Exception:
+                # A state that cannot be isolated cannot safely be used as a
+                # candidate branch; reject this candidate without aborting the
+                # whole history check.
+                continue
             args = op.invocation.args
-            if op.op in {"commit", "release", "reconcile", "reconcile_commit", "reconcile_release"} and args:
+            # reconcile() is keyed by idempotency key, not reservation ID.
+            if op.op in {"commit", "release", "reconcile_commit", "reconcile_release"} and args:
                 args = (reservation_aliases.get(args[0], args[0]), *args[1:])
             try:
                 new_state, expected_result = self._spec(op.op, working_state, args)
