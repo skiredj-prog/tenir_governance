@@ -1296,3 +1296,25 @@ def test_recovery_refuses_ambiguous_unknown_backend_reservation_state(tmp_path, 
     assert release_calls == []
     assert actual_backend_state.reserved == Decimal("10.0")
     assert actual_backend_state.committed == Decimal("0")
+
+
+
+def test_durable_backend_refuses_to_release_unknown_reservation_state(tmp_path):
+    """Backend must independently reject release when reservation state is ambiguous."""
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path)
+    passage, _result = _adjudicate_durable_budget(gov)
+    record = gov.registry.get(passage.idempotency_key)
+    assert record.reservation_id
+
+    reservations = backend._load_reservations()
+    reservations[record.reservation_id]["state"] = "UNKNOWN"
+    backend._persist_reservations(reservations)
+
+    result = backend.release(record.reservation_id)
+    durable_state = backend._load_reservations()[record.reservation_id]
+    budget = backend.get_state("budget")
+
+    assert result.status == "ERROR"
+    assert durable_state["state"] == "UNKNOWN"
+    assert budget.reserved == Decimal("10.0")
+    assert budget.committed == Decimal("0")
