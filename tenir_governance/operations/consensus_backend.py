@@ -238,6 +238,25 @@ class SingleHostLockBackend:
                 required = {"operation", "reservation_id", "record", "before", "after"}
                 if not isinstance(tx, dict) or not required.issubset(tx):
                     raise ValueError("incomplete transaction journal")
+                # Validate the journal's operation and structure before replay.
+                # Unknown/corrupted operations must fail closed, never be treated
+                # as a generic commit/release mutation.
+                if tx["operation"] not in {"reserve", "commit", "release"}:
+                    raise ValueError("unknown transaction operation")
+                if not isinstance(tx["reservation_id"], str) or not tx["reservation_id"]:
+                    raise ValueError("invalid transaction reservation_id")
+                if not isinstance(tx["record"], dict) or not isinstance(tx["record"].get("resource_id"), str):
+                    raise ValueError("invalid transaction record/resource_id")
+                for snapshot_name in ("before", "after"):
+                    snapshot = tx[snapshot_name]
+                    if not isinstance(snapshot, dict) or set(snapshot) != {"reserved", "consumed", "capacity"}:
+                        raise ValueError(f"invalid {snapshot_name} budget snapshot")
+                    for value in snapshot.values():
+                        if not isinstance(value, str):
+                            raise ValueError(f"invalid {snapshot_name} snapshot value")
+                        parsed = Decimal(value)
+                        if not parsed.is_finite() or parsed < 0:
+                            raise ValueError(f"invalid {snapshot_name} snapshot amount")
                 resource_id = tx["record"]["resource_id"]
                 current = self._snapshot(resource_id)
             except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
@@ -530,16 +549,17 @@ class SingleHostLockBackend:
 
     def get_state(self, resource_id: str) -> ConsensusState:
         """Return current state (pure, no mutation)."""
-        state = self._coordinator.get_state(resource_id)
+        state = self._coordinator.get_state_exact(resource_id)
         if state is None:
-            return ConsensusState(available=0, reserved=0, committed=0, capacity=0)
+            return ConsensusState(available=Decimal("0"), reserved=Decimal("0"),
+                                  committed=Decimal("0"), capacity=Decimal("0"))
 
         reservations = self._load_reservations()
         res_list = [
             {
                 "reservation_id": rid,
                 "key": rec["key"],
-                "amount": float(rec["amount"]),
+                "amount": Decimal(str(rec["amount"])),
                 "state": rec["state"],
             }
             for rid, rec in reservations.items()
