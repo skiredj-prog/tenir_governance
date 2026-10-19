@@ -155,6 +155,21 @@ class TestLivenessTermination:
             with pytest.raises(ValueError, match="finite and non-negative"):
                 backend.register_resource("invalid-capacity", capacity)
 
+    def test_decimal_capacity_at_adjusted_boundary_remains_usable(self, tmp_path):
+        """A bounded 1E+128 capacity can still serve a small exact reservation."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        capacity = Decimal("1e128")
+        backend.register_resource("boundary-budget", capacity)
+
+        result = backend.reserve("boundary-key", Decimal("1"), "boundary-budget")
+        assert result.status == "RESERVED"
+
+        state = backend.get_state("boundary-budget")
+        assert state.capacity == capacity
+        assert state.reserved == Decimal("1")
+        assert state.available == capacity - Decimal("1")
+
+
     @pytest.mark.parametrize("value", ["1e-129", "1e999999", "0e-999999", "1" + "2" * 128])
     def test_budget_rejects_pathological_decimal_precision(self, tmp_path, value):
         backend = SingleHostLockBackend(str(tmp_path))
