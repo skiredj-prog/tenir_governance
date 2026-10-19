@@ -502,12 +502,17 @@ class DurableOperationRegistry:
                 if flock:
                     flock.close()
 
-    def set_budget_flags(self, idempotency_key: str, **flags: bool) -> bool:
-        """Atomically update and persist budget ownership flags."""
-        allowed = {"budget_reserved", "budget_committed"}
+    def set_budget_flags(self, idempotency_key: str, **flags) -> bool:
+        """Atomically persist budget flags and the durable backend reservation identity."""
+        allowed = {"budget_reserved", "budget_committed", "reservation_id"}
         unknown = set(flags) - allowed
         if unknown:
             raise ValueError(f"unknown budget flag(s): {sorted(unknown)}")
+        if "reservation_id" in flags and not isinstance(flags["reservation_id"], str):
+            raise ValueError("reservation_id must be a string")
+        for name in ("budget_reserved", "budget_committed"):
+            if name in flags and not isinstance(flags[name], bool):
+                raise ValueError(f"{name} must be a bool")
 
         with self._lock:
             if self._corrupted:
