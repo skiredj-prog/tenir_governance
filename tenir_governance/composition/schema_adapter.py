@@ -100,6 +100,11 @@ def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
         "schema_version": "1.2",
         "engine_spec_version": "TENIR-2.0",
         "posture": posture,
+        # Profile-level execution fields remain additive; the canonical schema
+        # has no closed-root additionalProperties restriction.
+        "execution_mode": EXECUTION_MODE,
+        "execution_disposition": EXECUTION_DISPOSITION_MAP.get(composed, "hold"),
+        "execution_allowed": composed in (Decision.PASS.value, Decision.FLAG.value),
         "compliance_class": COMPLIANCE_CLASS,
         "degraded_mode": _degraded_modes(context, is_degraded),
         "active_profiles": list(context.get("active_profiles", [PROFILE_VERSION])),
