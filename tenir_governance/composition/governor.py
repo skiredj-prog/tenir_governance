@@ -1558,7 +1558,12 @@ class DualKernelGovernor:
     def confirm(self, idempotency_key: str) -> bool:
         """Confirm an external effect only after durable budget ownership agrees."""
         record = self.registry.get(idempotency_key)
-        if record is None:
+        if record is None or record.state not in (
+            OperationState.DISPATCHING, OperationState.UNKNOWN,
+        ):
+            # Validate the lifecycle transition before committing budget.
+            # Otherwise an illegal confirm from RESERVED could consume budget
+            # even though the registry correctly rejects CONFIRMED.
             return False
         if self.consensus_backend is not None and record.resource_id and record.amount > 0:
             if not record.reservation_id:
