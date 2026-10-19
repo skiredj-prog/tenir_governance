@@ -39,6 +39,7 @@ over TENIR doctrine.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -336,6 +337,37 @@ class DualKernelGovernor:
         through dispatch.
         """
         idem_key = passage.idempotency_key or f"op-{passage.passage_id}"
+
+        # Validate the economic parameter before it can bypass the budget
+        # gate (NaN compares false to > 0, and negative values also skip it).
+        try:
+            invalid_amount = isinstance(amount, bool) or not math.isfinite(float(amount)) or float(amount) < 0
+            normalized_amount = float(amount)
+            if resource_id is not None and normalized_amount <= 0:
+                invalid_amount = True
+        except (TypeError, ValueError, OverflowError):
+            invalid_amount = True
+            normalized_amount = 0.0
+        if invalid_amount:
+            rationale = "Invalid execution amount: must be finite and non-negative, and strictly positive when a resource is specified."
+            self.ledger.append(
+                kernel="composed", decision=Decision.HARD_VETO.value,
+                rationale=rationale, passage_id=passage.passage_id,
+                idempotency_key=idem_key,
+            )
+            return {
+                "passage_id": passage.passage_id,
+                "idempotency_key": idem_key,
+                "scoring_decision": None,
+                "membrane_decision": None,
+                "composed_decision": Decision.HARD_VETO.value,
+                "composed_rationale": rationale,
+                "execution_status": "blocked",
+                "operation_state": "not_registered",
+                "ledger_entries": self.ledger.entry_count,
+                "ledger_valid": self.ledger.verify_chain(),
+            }
+        amount = normalized_amount
 
         # ── DURABLE CLAIM: register the operation BEFORE evaluation ──────
         record = OperationRecord(
@@ -695,6 +727,35 @@ class DualKernelGovernor:
         if record is None:
             return {"dispatched": False, "reason": "Operation not registered."}
 
+        # Bind dispatch to the immutable identity adjudicated and reserved.
+        # Defaults mean "use the recorded values", never "skip budget checks".
+        recorded_resource = record.resource_id or None
+        if resource_id is None:
+            resource_id = recorded_resource
+        elif resource_id != recorded_resource:
+            return {"dispatched": False, "reason": "Dispatch resource_id does not match the adjudicated operation."}
+        try:
+            supplied_amount = float(amount)
+            recorded_amount = float(record.amount)
+        except (TypeError, ValueError, OverflowError):
+            return {"dispatched": False, "reason": "Dispatch amount is invalid."}
+        if not math.isfinite(supplied_amount) or supplied_amount < 0:
+            return {"dispatched": False, "reason": "Dispatch amount must be finite and non-negative."}
+        if supplied_amount == 0 and recorded_amount > 0:
+            supplied_amount = recorded_amount
+        if supplied_amount != recorded_amount:
+            return {"dispatched": False, "reason": "Dispatch amount does not match the adjudicated operation."}
+        amount = supplied_amount
+
+        # QUARANTINE_LOCK blocks dispatch, including operations reserved before
+        # the lock was activated. Check before the durable dispatch transition.
+        if self.membrane.state.quarantine_active():
+            return {
+                "dispatched": False,
+                "reason": "QUARANTINE_LOCK is active; dispatch is blocked.",
+                "operation_state": record.state.value,
+            }
+
         success, _prev = self.registry.transition_to(
             idempotency_key, OperationState.DISPATCHING,
             claimed_by=self._worker_id,
@@ -783,6 +844,10 @@ class DualKernelGovernor:
         record = self.registry.get(idempotency_key)
         if record is None:
             return dispatch_result
+        # The provider receives the exact amount bound to the durable record,
+        # not an omitted/default or caller-substituted amount.
+        amount = float(record.amount)
+        resource_id = record.resource_id or None
 
         # 4. Call the provider
         from ..operations.provider import ProviderOutcome
