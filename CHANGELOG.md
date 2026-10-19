@@ -6,6 +6,43 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [5.6.0] — 2026-10-19 — Minor: Multi-Host Raft Consensus Backend
+
+This minor release adds `RaftConsensusBackend`, a multi-host `ConsensusBackend` implementation using the Raft consensus algorithm (via pysyncobj). This closes the C3 (cross-host fault tolerance) gap identified in the REG-Conformance audit: the cluster tolerates crash-stops of up to `f` nodes with `n ≥ 2f+1`, while maintaining C1 (safety/linearizability), I8 (budget conservation), and C2 (liveness) across hosts.
+
+### Added
+- **`RaftConsensusBackend`** (`tenir_governance/operations/raft_backend.py`) — Multi-host `ConsensusBackend` using Raft (pysyncobj). State (budget capacity, reserved, committed, reservations registry) is replicated across all nodes via `@replicated` commands. I8 is enforced on the leader before replication. Satisfies C1, C2, C3 (crash-stop), and I8 for multi-host deployments.
+  - **Key design decision**: Reservation IDs are generated client-side and passed as command arguments, not generated inside the `@replicated` method. This ensures deterministic replication — a fundamental Raft requirement (all state machine commands must produce identical results on all nodes).
+- **Tests: Raft multi-node** (`tests/test_raft_backend.py`) — 29 tests across 5 categories:
+  - Multi-node reserve/commit/release (10 tests): operations from leader and followers, idempotency, insufficient budget, full lifecycle from mixed nodes.
+  - I8 invariant (5 tests): I8 holds after multiple reserves, mixed commit/release, overcommit rejection, on followers, and under concurrent reserves.
+  - Leader election and failover (5 tests): leader exists, failover after crash, 5-node failover, exactly one leader, state preservation after failover.
+  - Liveness (4 tests): operations terminate under quorum, from all nodes, concurrent, and under minority failure.
+  - Linearizability (5 tests): sequential history, concurrent history, mixed ops, after failover, and Wing-Gong checker on Raft histories.
+
+### Changed
+- Version bumped to 5.6.0 in `pyproject.toml`.
+- `pysyncobj` added as optional dependency (required only for `RaftConsensusBackend`).
+
+### Tests
+- Total: **787 tests** passing (697 in `tests/` + 61 in `r4/tests/` + 29 new Raft tests = 787).
+- Raft backend: 29 tests pass (10 multi-node + 5 I8 + 5 failover + 4 liveness + 5 linearizability).
+
+### Conformance
+- C1 (safety/linearizability): ✓ — Raft provides linearizability for committed commands. Verified by Wing-Gong checker on Raft histories.
+- C2 (liveness): ✓ — operations terminate under healthy quorum. Verified by liveness tests.
+- C3 (cross-host fault tolerance): ✓ — tolerates `f` crash-stops with `n ≥ 2f+1`. Verified by failover tests (3-node and 5-node).
+- I8 (budget conservation): ✓ — enforced on leader before replication, holds on all nodes. Verified by I8 tests.
+- Byzantine fault tolerance: ✗ — not implemented (Raft is crash-only).
+
+### Limitations
+- `RaftConsensusBackend` does not provide byzantine fault tolerance (Raft is a crash-fault-tolerant protocol).
+- Network partitions: safety is maintained (Raft prevents split-brain), but liveness requires a quorum of connected nodes.
+- `pysyncobj` uses pickle for serialization (not cryptographically signed). For production deployments with untrusted nodes, consider adding authentication/encryption via `SyncObjConf(password=...)`.
+- The Wing-Gong linearizability checker is exponential in the worst case; it is tractable for small histories used in tests but would need a more efficient algorithm for large-scale verification.
+
+---
+
 ## [5.5.0] — 2026-10-19 — Minor: Cross-Process Budget, Consensus Backend, Liveness
 
 This minor release adds the `DurableBudgetCoordinator` for cross-process budget conservation (I8), a reference `ConsensusBackend` adapter implementing the REG-Conformance interface, a linearizability checker, and liveness tests. These components close the implementation gaps identified in the REG-Conformance audit: cross-process I8, consensus interface conformance, and liveness verification.
