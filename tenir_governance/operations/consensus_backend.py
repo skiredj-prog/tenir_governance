@@ -37,7 +37,9 @@ from decimal import Decimal
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from tenir_governance.operations.budget import DurableBudgetCoordinator
+from tenir_governance.operations.budget import (
+    DurableBudgetCoordinator, _decimal_add, _decimal_subtract,
+)
 
 try:
     import fcntl
@@ -324,7 +326,7 @@ class SingleHostLockBackend:
                 }
                 before = self._snapshot(resource_id)
                 after = dict(before)
-                after["reserved"] = str(Decimal(before["reserved"]) + amount)
+                after["reserved"] = str(_decimal_add(Decimal(before["reserved"]), amount))
                 self._persist_transaction({
                     "operation": "reserve", "reservation_id": reservation_id,
                     "record": record, "before": before, "after": after,
@@ -375,8 +377,8 @@ class SingleHostLockBackend:
                 if Decimal(before["reserved"]) < amount:
                     return CommitResult(status="ERROR")
                 after = dict(before)
-                after["reserved"] = str(Decimal(before["reserved"]) - amount)
-                after["consumed"] = str(Decimal(before["consumed"]) + amount)
+                after["reserved"] = str(_decimal_subtract(Decimal(before["reserved"]), amount))
+                after["consumed"] = str(_decimal_add(Decimal(before["consumed"]), amount))
                 updated = dict(rec)
                 updated["state"] = "COMMITTED"
                 updated["committed_at"] = time.time()
@@ -417,7 +419,7 @@ class SingleHostLockBackend:
                 if Decimal(before["reserved"]) < amount:
                     return ReleaseResult(status="ERROR")
                 after = dict(before)
-                after["reserved"] = str(Decimal(before["reserved"]) - amount)
+                after["reserved"] = str(_decimal_subtract(Decimal(before["reserved"]), amount))
                 updated = dict(rec)
                 updated["state"] = "RELEASED"
                 updated["released_at"] = time.time()
@@ -479,8 +481,8 @@ class SingleHostLockBackend:
                     if Decimal(before["reserved"]) < amount:
                         return ReconciliationResult(status="ERROR", effect_observed=True)
                     after = dict(before)
-                    after["reserved"] = str(Decimal(before["reserved"]) - amount)
-                    after["consumed"] = str(Decimal(before["consumed"]) + amount)
+                    after["reserved"] = str(_decimal_subtract(Decimal(before["reserved"]), amount))
+                    after["consumed"] = str(_decimal_add(Decimal(before["consumed"]), amount))
                     updated = dict(rec)
                     updated["state"] = "COMMITTED"
                     updated["committed_at"] = time.time()
@@ -503,7 +505,7 @@ class SingleHostLockBackend:
                     if Decimal(before["reserved"]) < amount:
                         return ReconciliationResult(status="ERROR", effect_observed=False)
                     after = dict(before)
-                    after["reserved"] = str(Decimal(before["reserved"]) - amount)
+                    after["reserved"] = str(_decimal_subtract(Decimal(before["reserved"]), amount))
                     updated = dict(rec)
                     updated["state"] = "RELEASED"
                     updated["released_at"] = time.time()
