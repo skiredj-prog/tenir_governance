@@ -12,6 +12,7 @@ Covers:
 import pytest
 import tempfile
 import os
+import threading
 from types import SimpleNamespace
 
 from tenir_governance.operations.provider import (
@@ -28,6 +29,43 @@ from tenir_governance.operations.registry import (
 )
 from tenir_governance.objects import Passage
 from tenir_kernel.kernel import TenirKernel
+
+
+def test_concurrent_failed_reconciliation_refunds_only_once():
+    initial_provider = MockProvider(behavior="timeout")
+    gov, state = _setup_governor(provider=initial_provider)
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(
+        p, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    dispatched = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+    assert dispatched["operation_state"] == OperationState.UNKNOWN.value
+    assert state.resources["budget"].consumed == 10.0
+
+    barrier = threading.Barrier(2)
+
+    class ConcurrentFailedProvider:
+        def reconcile(self, **kwargs):
+            barrier.wait(timeout=3.0)
+            return ReconciliationResult(resolved=True, outcome=ProviderOutcome.FAILED)
+
+    gov.provider = ConcurrentFailedProvider()
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(gov.reconcile_unknown(p.idempotency_key)))
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5.0)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sum(result["reconciled"] for result in results) == 1
+    assert gov.registry.get(p.idempotency_key).state == OperationState.FAILED
+    assert state.resources["budget"].consumed == 0.0
+    assert state.resources["budget"].reserved == 0.0
 
 
 def test_stripe_reconciliation_empty_search_remains_unknown(monkeypatch):
