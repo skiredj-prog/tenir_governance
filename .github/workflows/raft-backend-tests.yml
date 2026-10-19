@@ -3,8 +3,7 @@ name: Raft backend regression tests
 on:
   pull_request:
     paths:
-      - "tenir_governance/operations/raft_backend.py"
-      - "tenir_governance/operations/consensus_backend.py"
+      - "tenir_governance/operations/**"
       - "tests/test_raft_backend.py"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
