@@ -33,6 +33,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+import hashlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Optional
@@ -423,6 +425,36 @@ class DurableOperationRegistry:
             finally:
                 if flock:
                     flock.close()
+
+    @contextmanager
+    def settlement_lock(self, idempotency_key: str):
+        """Serialize a full budget-settlement decision across local processes.
+
+        The lock spans the registry read, backend mutation, ownership-flag
+        persistence, and terminal transition. Per-method file locks alone are
+        insufficient because those steps otherwise form a cross-store TOCTOU.
+        This lock is single-host only, matching the file-backed registry model.
+        """
+        if not self._store_path:
+            # In-memory registries cannot be shared durably across instances.
+            yield
+            return
+        if fcntl is None:
+            raise RuntimeError(
+                "Cross-process settlement requires fcntl; refusing unsafe settlement."
+            )
+        digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+        lock_path = f"{self._store_path}.{digest}.settlement.lock"
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        lock_file = os.fdopen(fd, "r+")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
 
     def get(self, idempotency_key: str) -> OperationRecord | None:
         with self._lock:
