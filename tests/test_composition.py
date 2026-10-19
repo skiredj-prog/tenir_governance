@@ -787,9 +787,20 @@ class TestScoringKernelAdapter:
 
     def test_safe_inputs_pass(self):
         adapter = self._setup()
-        result = adapter.adjudicate(pressure=0.2, velocity=0.3, capacity=1.0)
+        result = adapter.adjudicate(
+            pressure=0.2, velocity=0.3, capacity=1.0,
+            authority=1.0, context_fit=1.0, evidence_quality=1.0,
+        )
         assert result["decision"] in (Decision.PASS.value, Decision.FLAG.value)
         assert result["s_score"] is not None
+
+    def test_missing_mandatory_epistemic_inputs_fail_closed(self):
+        adapter = self._setup()
+        result = adapter.adjudicate(pressure=0.2, velocity=0.3, capacity=1.0)
+        assert result["decision"] == Decision.HARD_VETO.value
+        assert "authority missing" in result["rationale"]
+        assert "context_fit missing" in result["rationale"]
+        assert "evidence_quality missing" in result["rationale"]
 
     def test_high_stress_hard_veto(self):
         adapter = self._setup()
@@ -798,13 +809,17 @@ class TestScoringKernelAdapter:
 
     def test_moderate_stress_flag(self):
         adapter = self._setup()
-        result = adapter.adjudicate(pressure=0.9, velocity=0.9, capacity=0.7)
+        result = adapter.adjudicate(
+            pressure=0.9, velocity=0.9, capacity=0.7,
+            authority=1.0, context_fit=1.0, evidence_quality=1.0,
+        )
         assert result["decision"] == Decision.FLAG.value
 
     def test_low_evidence_quality_flag(self):
         adapter = self._setup()
         result = adapter.adjudicate(
-            pressure=0.2, velocity=0.3, capacity=1.0, evidence_quality=0.3
+            pressure=0.2, velocity=0.3, capacity=1.0,
+            authority=1.0, context_fit=1.0, evidence_quality=0.3
         )
         assert result["decision"] == Decision.FLAG.value
 
@@ -812,20 +827,27 @@ class TestScoringKernelAdapter:
         adapter = self._setup()
         result = adapter.adjudicate(
             pressure=0.2, velocity=0.3, capacity=1.0,
-            irreversibility_materiality=0.8, authority=0.5
+            irreversibility_materiality=0.8, authority=0.5,
+            context_fit=1.0, evidence_quality=1.0
         )
         assert result["decision"] == Decision.HARD_VETO.value
 
     def test_constraint_geometry_returned(self):
         adapter = self._setup()
-        result = adapter.adjudicate(pressure=0.2, velocity=0.3, capacity=1.0)
+        result = adapter.adjudicate(
+            pressure=0.2, velocity=0.3, capacity=1.0,
+            authority=1.0, context_fit=1.0, evidence_quality=1.0,
+        )
         assert "constraint_geometry" in result
         assert result["constraint_geometry"] is not None
         assert result["constraint_geometry"]["geometry_id"] == "tenir-2.0-reference"
 
     def test_returns_kernel_identifier(self):
         adapter = self._setup()
-        result = adapter.adjudicate(pressure=0.2, velocity=0.3, capacity=1.0)
+        result = adapter.adjudicate(
+            pressure=0.2, velocity=0.3, capacity=1.0,
+            authority=1.0, context_fit=1.0, evidence_quality=1.0,
+        )
         assert result["kernel"] == "scoring"
 
 
