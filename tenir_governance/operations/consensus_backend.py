@@ -65,7 +65,7 @@ class ReleaseResult:
 
 @dataclass
 class ReconciliationResult:
-    status: str  # CONFIRMED | FAILED | UNRESOLVED | NOT_FOUND | ERROR
+    status: str  # CONFIRMED | FAILED | UNRESOLVED | NOT_FOUND | RECONCILE_CONFLICT | ERROR
     effect_observed: bool | None = None
 
 
