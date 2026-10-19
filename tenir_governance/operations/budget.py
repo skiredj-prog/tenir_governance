@@ -455,10 +455,13 @@ class DurableBudgetCoordinator:
                 if r is None:
                     return None
                 return {
-                    "available": float(_decimal_subtract(_decimal_subtract(r["capacity"], r["reserved"]), r["consumed"])),
-                    "reserved": float(r["reserved"]),
-                    "consumed": float(r["consumed"]),
-                    "capacity": float(r["capacity"]),
+                    # Preserve exact Decimal values at the state boundary. Callers
+                    # that need display floats should convert explicitly; accounting
+                    # and invariant checks must not silently round here.
+                    "available": _decimal_subtract(_decimal_subtract(r["capacity"], r["reserved"]), r["consumed"]),
+                    "reserved": r["reserved"],
+                    "consumed": r["consumed"],
+                    "capacity": r["capacity"],
                 }
             finally:
                 if flock:
