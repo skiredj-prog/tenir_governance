@@ -391,3 +391,33 @@ def test_recovery_rejects_unknown_journal_operation(tmp_path):
 
     with pytest.raises(RuntimeError, match="Corrupted transaction journal"):
         SingleHostLockBackend(str(store_dir))
+
+
+def test_fail_rejects_unknown_outcome_without_releasing_or_refunding_budget():
+    """UNKNOWN must be reconciled; fail() cannot infer non-execution."""
+    gov, state = _setup_governor(budget_capacity=100.0)
+    budget = state.resources["budget"]
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    result = gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    assert result["operation_state"] == OperationState.RESERVED.value
+    assert budget.reserved == 10.0
+    assert gov.dispatch(passage.idempotency_key, "budget", 10.0)["dispatched"] is True
+    assert budget.reserved == 0.0
+    assert budget.consumed == 10.0
+    assert gov.mark_unknown(passage.idempotency_key) is True
+
+    before_reserved = budget.reserved
+    before_consumed = budget.consumed
+    before_record = gov.registry.get(passage.idempotency_key)
+
+    assert gov.fail(passage.idempotency_key) is False
+
+    after_record = gov.registry.get(passage.idempotency_key)
+    assert after_record.state == OperationState.UNKNOWN
+    assert after_record.budget_committed == before_record.budget_committed
+    assert after_record.budget_reserved == before_record.budget_reserved
+    assert budget.reserved == before_reserved == 0.0
+    assert budget.consumed == before_consumed == 10.0
