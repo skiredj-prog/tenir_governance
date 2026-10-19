@@ -38,3 +38,5 @@ jobs:
         run: pytest -q tests/test_raft_backend.py
       - name: Run governor and membrane regression suite
         run: pytest -q tests/test_composition.py
+      - name: Run provider reconciliation regressions
+        run: pytest -q tests/test_provider.py
