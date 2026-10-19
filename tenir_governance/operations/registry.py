@@ -289,6 +289,10 @@ class DurableOperationRegistry:
         self._lock = threading.Lock()
         self._records: dict[str, OperationRecord] = {}
         self._store_path = store_path
+        # In-memory registries need only process-local serialization. Durable
+        # backend settlement explicitly requires the file-backed lock below.
+        self._local_settlement_locks: dict[str, threading.Lock] = {}
+        self._local_settlement_locks_guard = threading.Lock()
         self._corrupted = False
         if store_path and os.path.exists(store_path):
             self._load()
@@ -427,22 +431,28 @@ class DurableOperationRegistry:
                     flock.close()
 
     @contextmanager
-    def settlement_lock(self, idempotency_key: str):
-        """Serialize a full budget-settlement decision across local processes.
+    def settlement_lock(
+        self, idempotency_key: str, *, require_persistent: bool = True,
+    ):
+        """Serialize settlement; require cross-process durability when requested.
 
-        The lock spans the registry read, backend mutation, ownership-flag
-        persistence, and terminal transition. Per-method file locks alone are
-        insufficient because those steps otherwise form a cross-store TOCTOU.
-        This lock is single-host only, matching the file-backed registry model.
+        File-backed registries use a per-operation OS lock spanning the full
+        read/mutate/persist/transition sequence. An in-memory registry may use
+        a per-key process-local lock only for legacy in-memory budget mode;
+        callers settling a durable backend must set require_persistent=True.
         """
         if not self._store_path:
-            # Budget settlement spans registry state and a separate durable
-            # backend. Without a persistent registry, another governor/process
-            # cannot observe this operation's terminal state, so a local lock
-            # would create a false impression of cross-instance safety.
-            raise RuntimeError(
-                "Durable budget settlement requires a persistent operation registry."
-            )
+            if require_persistent:
+                raise RuntimeError(
+                    "Durable budget settlement requires a persistent operation registry."
+                )
+            with self._local_settlement_locks_guard:
+                lock = self._local_settlement_locks.setdefault(
+                    idempotency_key, threading.Lock(),
+                )
+            with lock:
+                yield
+            return
         if fcntl is None:
             raise RuntimeError(
                 "Cross-process settlement requires fcntl; refusing unsafe settlement."
