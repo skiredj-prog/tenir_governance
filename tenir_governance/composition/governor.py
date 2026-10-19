@@ -114,15 +114,26 @@ class ScoringKernelAdapter:
         # Track which axes are unmeasured so the caller can add gate reasons
         self._unmeasured_axes: list[str] = []
 
+        # Mandatory epistemic inputs must never acquire favorable defaults.
+        # A neutral placeholder keeps the geometry structurally complete; the
+        # missing measurement is separately converted into a hard gate below.
+        mandatory = {
+            "authority": authority,
+            "context_fit": context_fit,
+            "evidence_quality": evidence_quality,
+        }
         coords: dict[str, float] = {
             "pressure": pressure,
             "velocity": velocity,
             "capacity": capacity,
             "irreversible_pathway_materiality": irreversibility_materiality,
-            "authority": authority,
-            "context_fit": context_fit,
-            "evidence_quality": evidence_quality,
         }
+        for axis, value in mandatory.items():
+            if value is None:
+                coords[axis] = 0.5
+                self._unmeasured_axes.append(axis)
+            else:
+                coords[axis] = value
 
         # option_space: if not provided, do NOT default to 1.0 (favorable).
         # Use a neutral 0.5 and flag as unmeasured. The caller will add a
@@ -156,9 +167,9 @@ class ScoringKernelAdapter:
         velocity: float,
         capacity: float,
         option_space: float | None = None,
-        authority: float = 1.0,
-        context_fit: float = 1.0,
-        evidence_quality: float = 1.0,
+        authority: float | None = None,
+        context_fit: float | None = None,
+        evidence_quality: float | None = None,
         irreversibility_materiality: float = 0.0,
     ) -> dict[str, Any]:
         """Delegate to TenirKernel with injected gate reasons.
@@ -214,16 +225,15 @@ class ScoringKernelAdapter:
         for axis in unmeasured:
             soft_reasons.append(f"unmeasured axis: {axis} (neutral default, not favorable)")
 
-        # If mandatory data is missing (authority, context_fit, evidence_quality
-        # at their default sentinel values), escalate to a hard gate reason.
-        # These are required for a trustworthy adjudication — their absence
-        # means the score cannot be relied upon.
-        if authority <= 0.0:
-            hard_reasons.append("authority missing (≤0.0): cannot adjudicate without authority assessment")
-        if context_fit <= 0.0:
-            hard_reasons.append("context_fit missing (≤0.0): cannot adjudicate without context assessment")
-        if evidence_quality <= 0.0:
-            hard_reasons.append("evidence_quality missing (≤0.0): cannot adjudicate without evidence")
+        # Missing mandatory epistemic inputs are a hard gate. A measured
+        # value of zero is not "missing": it is real evidence for the geometry
+        # to evaluate. Only None denotes absence.
+        if authority is None:
+            hard_reasons.append("authority missing: cannot adjudicate without authority assessment")
+        if context_fit is None:
+            hard_reasons.append("context_fit missing: cannot adjudicate without context assessment")
+        if evidence_quality is None:
+            hard_reasons.append("evidence_quality missing: cannot adjudicate without evidence")
 
         # Delegate core scoring to TenirKernel
         tk_result = self._kernel.adjudicate(
