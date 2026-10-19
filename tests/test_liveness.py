@@ -52,6 +52,35 @@ class TestLivenessTermination:
         assert state.reserved == 0.1
         assert state.available == 0.9
 
+    def test_reserve_persistence_failure_compensates_budget(self, tmp_path, monkeypatch):
+        """A failed reservation-registry write must not leak reserved capacity."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("persist-failure-budget", 1)
+
+        def fail_persist(_reservations):
+            raise OSError("simulated disk write failure")
+
+        monkeypatch.setattr(backend, "_persist_reservations", fail_persist)
+        failed = backend.reserve(
+            "persist-failure-key", Decimal("0.1"), "persist-failure-budget"
+        )
+        assert failed.status == "ERROR"
+
+        state = backend.get_state("persist-failure-budget")
+        assert state.reserved == 0
+        assert state.committed == 0
+        assert state.available == 1
+
+        # Once persistence recovers, the same key can reserve exactly once.
+        monkeypatch.undo()
+        retried = backend.reserve(
+            "persist-failure-key", Decimal("0.1"), "persist-failure-budget"
+        )
+        assert retried.status == "RESERVED"
+        state = backend.get_state("persist-failure-budget")
+        assert state.reserved == 0.1
+        assert state.reserved + state.committed <= state.capacity
+
     def test_reserve_terminates_within_T_max(self, tmp_path):
         """reserve() must complete within T_max."""
         backend = SingleHostLockBackend(str(tmp_path))
