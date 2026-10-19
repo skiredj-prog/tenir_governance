@@ -470,6 +470,57 @@ class TestDualKernelGovernor:
         assert current.budget_reserved is True
         assert current.budget_committed is False
 
+    def test_resolve_hold_missing_fresh_epistemic_inputs_fails_closed(self):
+        """HOLD re-adjudication must not inherit favorable epistemic defaults."""
+        gov, _state = self._setup()
+        key = "hold-missing-epistemic-evidence"
+        record = OperationRecord(
+            idempotency_key=key,
+            passage_id=f"passage-{key}",
+            agent_id="alice",
+            action_type="read_only",
+            amount=0.0,
+            resource_id="",
+            state=OperationState.HOLD,
+        )
+        assert gov.registry.register(record)
+        passage = Passage(
+            agent_id="alice",
+            action_type="read_only",
+            idempotency_key=key,
+        )
+
+        result = gov.resolve_hold(key, passage=passage)
+
+        assert result["scoring_decision"] == Decision.HARD_VETO.value
+        assert result["composed_decision"] == Decision.HARD_VETO.value
+        assert result["hold_resolved"] is False
+        assert "authority missing" in result["scoring_rationale"]
+        assert "context_fit missing" in result["scoring_rationale"]
+        assert "evidence_quality missing" in result["scoring_rationale"]
+
+    def test_resolve_hold_without_passage_does_not_re_adjudicate(self):
+        """Omitting the passage must leave the operation in HOLD."""
+        gov, _state = self._setup()
+        key = "hold-no-passage"
+        record = OperationRecord(
+            idempotency_key=key,
+            passage_id=f"passage-{key}",
+            agent_id="alice",
+            action_type="read_only",
+            amount=0.0,
+            resource_id="",
+            state=OperationState.HOLD,
+        )
+        assert gov.registry.register(record)
+
+        result = gov.resolve_hold(key)
+
+        assert result["hold_resolved"] is False
+        assert result["operation_state"] == OperationState.HOLD.value
+        assert "Re-adjudication required" in result["reason"]
+        assert gov.registry.get(key).state == OperationState.HOLD
+
     def test_governor_missing_epistemic_inputs_fail_closed(self):
         gov, _state = self._setup()
         passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
