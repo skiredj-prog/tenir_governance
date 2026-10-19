@@ -1153,6 +1153,26 @@ class TestListOneRegressions:
         assert state.reserved == Decimal("0.4")
         assert state.committed == Decimal("0.2")
 
+    @pytest.mark.parametrize("operation", ["release", "reconcile_release"])
+    def test_unknown_reservation_release_updates_budget_accounting(self, cluster, operation):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-UNKNOWN-RELEASE", 100) == "REGISTERED"
+        result = leader.reserve("unknown-release-key", 10, "budget-UNKNOWN-RELEASE")
+        assert result.status == "RESERVED"
+        reservation_id = result.reservation_id
+
+        # Model recovery restoring an unresolved operation whose budget remains reserved.
+        for node in cluster:
+            node._raft._reservations[reservation_id]["state"] = "UNKNOWN"
+
+        raw_result = getattr(leader._raft, operation)(
+            reservation_id, sync=True, timeout=10.0,
+        )
+        assert raw_result == "RELEASED"
+        state = leader.get_state("budget-UNKNOWN-RELEASE")
+        assert state.reserved == Decimal("0")
+        assert state.committed == Decimal("0")
+
     def test_legacy_float_reservation_can_be_committed_after_upgrade(self, cluster):
         leader = _get_leader(cluster)
         assert leader.register_resource("budget-LEGACY-COMMIT", 100) == "REGISTERED"
