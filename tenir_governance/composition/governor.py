@@ -324,6 +324,9 @@ class DualKernelGovernor:
         # Durable DISPATCHING recovery remains available after process restart.
         self._active_dispatches: set[str] = set()
         self._active_dispatches_lock = threading.RLock()
+        # Serialize terminal budget settlement paths within this governor instance.
+        # The registry transition remains the durable terminal-state authority.
+        self._settlement_lock = threading.RLock()
         self.hold_manager = HoldManager(self.registry)
         # Post-execution assessor (optional). When set, the governor can
         # run τ⁻¹ and EVP assessments after terminal states. The assessor
@@ -1556,6 +1559,11 @@ class DualKernelGovernor:
             }
 
     def confirm(self, idempotency_key: str) -> bool:
+        """Serialize confirmation with failure compensation for one governor instance."""
+        with self._settlement_lock:
+            return self._confirm_under_settlement_lock(idempotency_key)
+
+    def _confirm_under_settlement_lock(self, idempotency_key: str) -> bool:
         """Confirm an external effect only after durable budget ownership agrees."""
         record = self.registry.get(idempotency_key)
         if record is None or record.state not in (
@@ -1600,6 +1608,14 @@ class DualKernelGovernor:
         return success
 
     def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, authoritative_non_execution: bool = False) -> bool:
+        """Serialize failure compensation with confirmation for this governor instance."""
+        with self._settlement_lock:
+            return self._fail_under_settlement_lock(
+                idempotency_key, resource_id, amount,
+                authoritative_non_execution=authoritative_non_execution,
+            )
+
+    def _fail_under_settlement_lock(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, authoritative_non_execution: bool = False) -> bool:
         """Transition to FAILED and mutate only this operation's budget.
 
         authoritative_non_execution must be true only when the provider or
