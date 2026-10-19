@@ -804,9 +804,10 @@ class ConsensusBroadcast:
     sovereign over mode transitions; consensus only validates ledger roots.
     """
 
-    def __init__(self, peers: List[PeerNode], timeout: float = 5.0):
+    def __init__(self, peers: List[PeerNode], timeout: float = 5.0, api_token: str = ""):
         self.peers = peers
         self.timeout = timeout
+        self.api_token = api_token
 
     async def broadcast_epoch_root(
         self, epoch_id: int, merkle_root: str, entry_count: int
@@ -858,7 +859,10 @@ class ConsensusBroadcast:
         try:
             result = await loop.run_in_executor(
                 None,
-                lambda: self._http_post(peer.url + "/api/v1/ledger/validate_epoch", payload)
+                lambda: self._http_post(
+                    peer.url + "/api/v1/ledger/validate_epoch", payload,
+                    api_token=self.api_token,
+                )
             )
             peer.last_seen = time.time()
             peer.is_healthy = True
@@ -870,10 +874,13 @@ class ConsensusBroadcast:
             return Exception(str(e))
 
     @staticmethod
-    def _http_post(url: str, payload: bytes) -> Dict:
+    def _http_post(url: str, payload: bytes, api_token: str = "") -> Dict:
+        headers = {"Content-Type": "application/json"}
+        if api_token:
+            headers["Authorization"] = f"Bearer {api_token}"
         req = urllib.request.Request(
             url, data=payload,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5.0) as resp:
