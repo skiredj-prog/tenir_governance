@@ -557,13 +557,19 @@ class DualKernelCompositionClient:
         **kwargs,
     ) -> dict:
         """
-        Adjudicate and return TENIR 2.0 schema 1.2 conformant output.
+        Adjudicate and validate a TENIR 2.0 schema 1.2 runtime object.
 
-        This calls adjudicate() then maps the result through the schema
-        conformance adapter.
+        Callers must pass canonical_context explicitly. It contains the
+        identity, TAU, epistemic, score, profile, and assessment fields that
+        cannot be inferred from an execution adjudication alone. Missing
+        context fails closed in the schema adapter.
         """
         from .composition.schema_adapter import conform_to_schema
+
+        canonical_context = kwargs.pop("canonical_context", None)
         result = self.adjudicate(passage, **kwargs)
+        if canonical_context is not None:
+            result["canonical_context"] = canonical_context
         return conform_to_schema(result)
 
     def dispatch(self, idempotency_key: str, resource_id: str | None = None,
