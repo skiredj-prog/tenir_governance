@@ -204,17 +204,17 @@ class SingleHostLockBackend:
     def reserve(self, key: str, amount: int | float | Decimal, resource_id: str) -> ReservationResult:
         """Reserve budget for an idempotency key.
 
-        This reference backend uses float accounting internally. Normalize
-        Decimal inputs before mutating the coordinator so the durable JSON
-        reservation record remains serializable.
+        Amounts remain Decimal internally and are stored as decimal strings
+        in JSON so neither persistence nor idempotency checks round through
+        binary floating-point.
         """
         if isinstance(amount, bool):
             return ReservationResult(status="INVALID_AMOUNT")
         try:
-            amount = float(amount)
-        except (TypeError, ValueError, OverflowError):
+            amount = amount if isinstance(amount, Decimal) else Decimal(str(amount))
+        except (TypeError, ValueError, ArithmeticError):
             return ReservationResult(status="INVALID_AMOUNT")
-        if not math.isfinite(amount) or amount <= 0:
+        if not amount.is_finite() or amount <= 0:
             return ReservationResult(status="INVALID_AMOUNT")
         with self._lock:
             flock = self._lock_file()
@@ -228,7 +228,7 @@ class SingleHostLockBackend:
                         # reservation identity and returns its actual lifecycle
                         # state; replay must never revive a terminal reservation.
                         if (
-                            rec.get("amount") == amount
+                            Decimal(str(rec.get("amount"))) == amount
                             and rec.get("resource_id") == resource_id
                         ):
                             return ReservationResult(
@@ -239,14 +239,14 @@ class SingleHostLockBackend:
                         return ReservationResult(status="DUPLICATE_KEY")
 
                 # Attempt budget reservation
-                if not self._coordinator.reserve(resource_id, float(amount)):
+                if not self._coordinator.reserve(resource_id, amount):
                     return ReservationResult(status="INSUFFICIENT_BUDGET")
 
                 # Create reservation record
                 reservation_id = str(uuid.uuid4())
                 reservations[reservation_id] = {
                     "key": key,
-                    "amount": amount,
+                    "amount": str(amount),
                     "resource_id": resource_id,
                     "state": "RESERVED",
                     "created_at": time.time(),
@@ -291,7 +291,7 @@ class SingleHostLockBackend:
                     return CommitResult(status="ERROR")
 
                 # Commit budget
-                if not self._coordinator.commit(rec["resource_id"], float(rec["amount"])):
+                if not self._coordinator.commit(rec["resource_id"], Decimal(str(rec["amount"]))):
                     return CommitResult(status="ERROR")
 
                 rec["state"] = "COMMITTED"
@@ -320,7 +320,7 @@ class SingleHostLockBackend:
                     return ReleaseResult(status="ERROR")
 
                 # Release budget
-                self._coordinator.release(rec["resource_id"], float(rec["amount"]))
+                self._coordinator.release(rec["resource_id"], Decimal(str(rec["amount"])))
 
                 rec["state"] = "RELEASED"
                 rec["released_at"] = time.time()
@@ -369,7 +369,7 @@ class SingleHostLockBackend:
 
                 if effect_observed is True:
                     # Effect confirmed — commit
-                    if self._coordinator.commit(rec["resource_id"], float(rec["amount"])):
+                    if self._coordinator.commit(rec["resource_id"], Decimal(str(rec["amount"]))):
                         rec["state"] = "COMMITTED"
                         rec["committed_at"] = time.time()
                         self._persist_reservations(reservations)
@@ -379,7 +379,7 @@ class SingleHostLockBackend:
 
                 elif effect_observed is False:
                     # No effect — release
-                    self._coordinator.release(rec["resource_id"], float(rec["amount"]))
+                    self._coordinator.release(rec["resource_id"], Decimal(str(rec["amount"])))
                     rec["state"] = "RELEASED"
                     rec["released_at"] = time.time()
                     self._persist_reservations(reservations)
@@ -405,7 +405,7 @@ class SingleHostLockBackend:
             {
                 "reservation_id": rid,
                 "key": rec["key"],
-                "amount": rec["amount"],
+                "amount": float(rec["amount"]),
                 "state": rec["state"],
             }
             for rid, rec in reservations.items()
