@@ -408,7 +408,7 @@ class TestReconciliation:
         # Operation is in RESERVED, not UNKNOWN
         result = gov.reconcile_unknown(p.idempotency_key)
         assert result["reconciled"] is False
-        assert "not UNKNOWN" in result["reason"]
+        assert "not DISPATCHING or UNKNOWN" in result["reason"]
 
     def test_reconcile_not_found(self):
         """Reconciling a non-existent operation returns error."""
