@@ -103,16 +103,23 @@ def test_concurrent_failed_reconciliation_refunds_only_once():
 
     gov.provider = ConcurrentFailedProvider()
     results = []
-    threads = [
-        threading.Thread(target=lambda: results.append(gov.reconcile_unknown(p.idempotency_key)))
-        for _ in range(2)
-    ]
+    worker_errors = []
+
+    def reconcile_worker():
+        try:
+            results.append(gov.reconcile_unknown(p.idempotency_key))
+        except BaseException as exc:
+            worker_errors.append(exc)
+
+    threads = [threading.Thread(target=reconcile_worker) for _ in range(2)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join(timeout=5.0)
 
     assert all(not thread.is_alive() for thread in threads)
+    assert not worker_errors, f"reconciliation worker raised: {worker_errors!r}"
+    assert len(results) == 2
     assert sum(result["reconciled"] for result in results) == 1
     assert gov.registry.get(p.idempotency_key).state == OperationState.FAILED
     assert state.resources["budget"].consumed == 0.0
