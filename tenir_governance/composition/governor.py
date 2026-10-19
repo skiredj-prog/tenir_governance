@@ -1117,7 +1117,8 @@ class DualKernelGovernor:
             return False
 
         committed = record.budget_committed
-        if recorded_resource and recorded_amount > 0:
+        owns_budget = record.budget_reserved or record.budget_committed
+        if recorded_resource and recorded_amount > 0 and owns_budget:
             resource = self.membrane.state.resources.get(recorded_resource)
             if resource is None:
                 return False
