@@ -303,6 +303,7 @@ class DualKernelGovernor:
         registry: DurableOperationRegistry | None = None,
         budget_coordinator: BudgetCoordinator | None = None,
         provider: Any = None,
+        consensus_backend: Any = None,
         assessor: PostExecutionAssessor | None = None,
     ):
         # scoring_kernel is a ScoringKernelAdapter wrapping TenirKernel,
@@ -314,6 +315,9 @@ class DualKernelGovernor:
         self.policy.validate()
         self.registry = registry or DurableOperationRegistry()
         self.budget_coordinator = budget_coordinator
+        # Optional durable reservation backend. When supplied, this becomes
+        # the budget source of truth for this governor instance.
+        self.consensus_backend = consensus_backend
         self.provider = provider
         self._worker_id = str(uuid4())
         # Process-local guard for the window where provider.execute() is active.
