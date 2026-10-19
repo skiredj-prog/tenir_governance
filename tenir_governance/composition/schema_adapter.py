@@ -268,12 +268,16 @@ def _principal_failure_mode(governor_result: Mapping[str, Any]) -> str | None:
     a causal failure mode. The canonical context may provide the field directly,
     or the governor result may provide an explicit principal_failure_mode.
     """
-    supplied = governor_result.get("principal_failure_mode")
-    if supplied is None:
+    if "principal_failure_mode" in governor_result:
+        supplied = governor_result["principal_failure_mode"]
+    else:
         context = governor_result.get("canonical_context")
         synthesis = context.get("synthesis") if isinstance(context, Mapping) else None
-        if isinstance(synthesis, Mapping):
-            supplied = synthesis.get("principal_failure_mode")
+        supplied = (
+            synthesis["principal_failure_mode"]
+            if isinstance(synthesis, Mapping) and "principal_failure_mode" in synthesis
+            else None
+        )
 
     if supplied is not None and (
         not isinstance(supplied, str) or not supplied.strip()
