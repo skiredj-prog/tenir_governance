@@ -71,10 +71,10 @@ class ReconciliationResult:
 
 @dataclass
 class ConsensusState:
-    available: int
-    reserved: int
-    committed: int
-    capacity: int
+    available: int | float
+    reserved: int | float
+    committed: int | float
+    capacity: int | float
     reservations: list = field(default_factory=list)
 
 
