@@ -49,23 +49,26 @@ class MembraneState:
     invariants: list[MissionInvariant] = field(default_factory=list)
     # Per-resource locks for atomic budget reservations
     _locks: dict[str, threading.Lock] = field(default_factory=dict)
-    _quarantine_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+    _quarantine_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
 
     def register_agent(self, agent: Agent) -> None:
         self.agents[agent.agent_id] = agent
 
     def register_resource(self, resource: Resource) -> None:
         """Register once; replacing a live resource would orphan its budget and lock."""
-        existing = self.resources.get(resource.resource_id)
-        if existing is not None:
-            if existing is resource:
-                return
-            raise ValueError(
-                f"Resource {resource.resource_id!r} is already registered; "
-                "resource replacement is prohibited because it can reset accounting."
-            )
-        self.resources[resource.resource_id] = resource
-        self._locks.setdefault(resource.resource_id, threading.Lock())
+        # Serialize check-and-insert so concurrent first registrations cannot
+        # replace the resource object or the lock protecting its accounting.
+        with self._quarantine_lock:
+            existing = self.resources.get(resource.resource_id)
+            if existing is not None:
+                if existing is resource:
+                    return
+                raise ValueError(
+                    f"Resource {resource.resource_id!r} is already registered; "
+                    "resource replacement is prohibited because it can reset accounting."
+                )
+            self.resources[resource.resource_id] = resource
+            self._locks.setdefault(resource.resource_id, threading.Lock())
 
     def register_trajectory(self, trajectory: Trajectory) -> None:
         self.trajectories[trajectory.trajectory_id] = trajectory
