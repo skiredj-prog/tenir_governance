@@ -52,10 +52,6 @@ class BudgetCoordinator(Protocol):
         """Release a reservation (passage blocked, failed, or cancelled)."""
         ...
 
-    def refund(self, resource_id: str, amount: float) -> bool:
-        """Reverse committed accounting after authoritative non-execution proof."""
-        ...
-
     def get_utilization(self, resource_id: str) -> float | None:
         """Get current utilization fraction (0.0–1.0), or None if unavailable.
 
@@ -143,17 +139,6 @@ class InProcessBudgetCoordinator:
             return
         with self._locks[resource_id]:
             resource.reserved = max(0.0, resource.reserved - amount)
-
-    def refund(self, resource_id: str, amount: float) -> bool:
-        """Reverse committed accounting without clamping inconsistent state."""
-        resource = self._resources.get(resource_id)
-        if resource is None or amount <= 0:
-            return False
-        with self._locks[resource_id]:
-            if resource.consumed < amount:
-                return False
-            resource.consumed -= amount
-            return True
 
     def get_utilization(self, resource_id: str) -> float | None:
         resource = self._resources.get(resource_id)
@@ -479,7 +464,7 @@ class DurableBudgetCoordinator:
                 if flock:
                     flock.close()
 
-    def refund(self, resource_id: str, amount: float) -> bool:
+    def _refund_committed(self, resource_id: str, amount: float) -> bool:
         """Reverse committed accounting after authoritative non-execution proof.
 
         Refuse underflow rather than silently clamping inconsistent state.
