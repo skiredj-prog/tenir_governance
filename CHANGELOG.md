@@ -1,6 +1,6 @@
 # Changelog
 
-## [5.6.1] — Pending verification — Patch: Budget safety and deterministic Raft state
+## [5.6.1] — Pending release — Patch: Budget safety and deterministic Raft state
 
 ### Corrected in this branch
 - Reject `reconcile_commit()` unless the reservation is `RESERVED`; repeated commits remain idempotent, while a late effect after `RELEASED` returns `RECONCILE_CONFLICT` and records a deterministic incident.
