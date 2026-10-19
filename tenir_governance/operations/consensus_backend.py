@@ -166,9 +166,19 @@ class SingleHostLockBackend:
             return {}
         try:
             with open(self._reservations_store, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, ValueError):
-            return {}
+                reservations = json.load(f)
+            if not isinstance(reservations, dict):
+                raise ValueError("reservation registry root must be an object")
+            for reservation_id, record in reservations.items():
+                if not isinstance(record, dict):
+                    raise ValueError(f"invalid reservation record {reservation_id!r}")
+                if not {"key", "amount", "resource_id", "state"}.issubset(record):
+                    raise ValueError(f"incomplete reservation record {reservation_id!r}")
+            return reservations
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            # A damaged idempotency registry cannot safely be treated as empty:
+            # doing so could duplicate an existing reservation after restart.
+            raise RuntimeError("Corrupted durable reservation registry; refusing operation.") from exc
 
     def _persist_reservations(self, reservations: dict):
         """Persist reservation registry atomically."""
