@@ -1001,8 +1001,10 @@ class TestListOneRegressions:
         b = leader.reserve("active-B", 100, "budget-I8-L1")
         assert b.status == "RESERVED"
 
-        result = leader._raft.reconcile_commit(a.reservation_id, sync=True, timeout=10.0)
-        assert result == "RECONCILE_CONFLICT"
+        leader._provider_reconcile = lambda key: True
+        result = leader.reconcile("late-effect-A")
+        assert result.status == "RECONCILE_CONFLICT"
+        assert result.effect_observed is True
         time.sleep(0.4)
         for node in cluster:
             state = node.get_state("budget-I8-L1")
