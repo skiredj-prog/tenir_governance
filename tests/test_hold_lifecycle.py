@@ -459,6 +459,30 @@ class TestGovernorHoldLifecycle:
         assert r2["hold_resolved"] is True
         assert r2["operation_state"] == OperationState.RESERVED.value
 
+    def test_governor_resolve_hold_rejects_changed_amount(self):
+        gov, state = _setup_governor()
+        from tenir_governance.operations import OperationRecord
+        rec = OperationRecord(
+            idempotency_key="op-hold-identity", passage_id="p-hold-identity",
+            agent_id="alice", action_type="payment", amount=10.0,
+            resource_id="budget",
+        )
+        gov.registry.register(rec)
+        gov.hold_manager.enter_hold("op-hold-identity", tau_k_seconds=300)
+        passage = Passage(
+            agent_id="alice", action_type="payment", amount=5.0,
+            idempotency_key="op-hold-identity",
+        )
+        result = gov.resolve_hold(
+            "op-hold-identity", passage=passage,
+            pressure=0.1, velocity=0.1, capacity=0.9,
+            resource_id="budget", amount=5.0,
+        )
+        assert result["hold_resolved"] is False
+        assert "Amount differs" in result["reason"]
+        assert gov.registry.get("op-hold-identity").state == OperationState.HOLD
+        assert state.resources["budget"].reserved == 0.0
+
     def test_governor_resolve_hold_without_passage_is_rejected(self):
         """Omitting passage must not bypass fresh adjudication."""
         gov, _state = _setup_governor()
