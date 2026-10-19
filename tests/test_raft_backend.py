@@ -1071,16 +1071,16 @@ class TestListOneRegressions:
             assert not calls, f"non-deterministic calls in replicated {method.name}: {sorted(calls)}"
     def test_fractional_amounts_are_preserved_in_budget_state(self, cluster):
         leader = _get_leader(cluster)
-        assert leader.register_resource("budget-DECIMAL-L1", "1.00") == "REGISTERED"
-        first = leader.reserve("fraction-a", "0.01", "budget-DECIMAL-L1")
+        assert leader.register_resource("budget-DECIMAL-L1", "0.30") == "REGISTERED"
+        first = leader.reserve("fraction-a", "0.1", "budget-DECIMAL-L1")
         assert first.status == "RESERVED"
         state = leader.get_state("budget-DECIMAL-L1")
-        assert state.reserved == 0.01
-        assert state.available == 0.99
-        second = leader.reserve("fraction-b", "0.99", "budget-DECIMAL-L1")
+        assert state.reserved == 0.1
+        assert state.available == 0.2
+        second = leader.reserve("fraction-b", "0.2", "budget-DECIMAL-L1")
         assert second.status == "RESERVED"
         state = leader.get_state("budget-DECIMAL-L1")
-        assert state.reserved == 1.0
+        assert state.reserved == 0.3
         assert state.committed == 0
         assert state.reserved + state.committed <= state.capacity
     def test_logical_clock_and_transition_metadata_replicate_identically(self, cluster):
