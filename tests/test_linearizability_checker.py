@@ -47,6 +47,32 @@ def test_checker_does_not_leak_mutations_from_failed_search_branch():
     ]
 
 
+def test_checker_binds_backend_reservation_id_to_later_commit():
+    reserve = _op(
+        "reserve", ("key-A", 10, "budget"), 1, 1, 2,
+        {"status": "RESERVED", "reservation_id": "backend-reservation-1"},
+    )
+    commit = _op(
+        "commit", ("backend-reservation-1",), 1, 3, 4,
+        {"status": "COMMITTED"},
+    )
+    result = LinearizabilityChecker(consensus_sequential_spec).check([reserve, commit])
+    assert result.linearizable
+
+
+def test_checker_rejects_changed_id_for_idempotent_reservation_replay():
+    first = _op(
+        "reserve", ("key-A", 10, "budget"), 1, 1, 2,
+        {"status": "RESERVED", "reservation_id": "backend-reservation-1"},
+    )
+    replay = _op(
+        "reserve", ("key-A", 10, "budget"), 1, 3, 4,
+        {"status": "RESERVED", "reservation_id": "backend-reservation-2"},
+    )
+    result = LinearizabilityChecker(consensus_sequential_spec).check([first, replay])
+    assert not result.linearizable
+
+
 def test_sequential_spec_rejects_commit_after_release():
     state = {"capacity": 100, "reserved": 0, "consumed": 0, "reservations": {}}
     state, reserved = consensus_sequential_spec(
