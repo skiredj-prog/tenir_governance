@@ -16,6 +16,12 @@ the governor's compensation logic is fixed:
      leaves the reservation in place.
 """
 import threading
+import json
+import pytest
+from decimal import Decimal
+
+from tenir_governance.operations.budget import DurableBudgetCoordinator
+from tenir_governance.operations.consensus_backend import SingleHostLockBackend
 
 from tenir_governance.composition import DualKernelGovernor, ScoringKernelAdapter
 from tenir_governance.composition.decisions import Decision
@@ -324,3 +330,64 @@ def test_concurrent_adjudication_fails_without_lock():
     # That would leave reserved=2000 > capacity=1500, violating I8.
     # The lock ensures the second _reserve_budget sees reserved=1000 and
     # resource.reserve(1000) fails (1000+1000 > 1500), returning HARD_VETO.
+
+
+
+def test_durable_budget_state_preserves_decimal_precision(tmp_path):
+    coordinator = DurableBudgetCoordinator(str(tmp_path / "budget.json"))
+    resource = type("Resource", (), {
+        "resource_id": "budget",
+        "capacity": Decimal("0.3000000000000000000001"),
+        "reserved": Decimal("0"),
+        "consumed": Decimal("0"),
+    })()
+    coordinator.register(resource)
+    assert coordinator.reserve("budget", Decimal("0.1000000000000000000001"))
+    state = coordinator.get_state("budget")
+    assert state["capacity"] == Decimal("0.3000000000000000000001")
+    assert state["reserved"] == Decimal("0.1000000000000000000001")
+    assert state["available"] == Decimal("0.2000000000000000000000")
+
+
+def test_consensus_state_preserves_fractional_reservations(tmp_path):
+    backend = SingleHostLockBackend(str(tmp_path))
+    backend.register_resource("budget", Decimal("0.3"))
+
+    first = backend.reserve("first", Decimal("0.1"), "budget")
+    second = backend.reserve("second", Decimal("0.2"), "budget")
+    assert first.status == "RESERVED"
+    assert second.status == "RESERVED"
+    assert backend.commit(first.reservation_id).status == "COMMITTED"
+
+    state = backend.get_state("budget")
+    assert state.capacity == Decimal("0.3")
+    assert state.reserved == Decimal("0.2")
+    assert state.committed == Decimal("0.1")
+    assert state.available == Decimal("0.0")
+    assert next(
+        r for r in state.reservations
+        if r["reservation_id"] == second.reservation_id
+    )["amount"] == Decimal("0.2")
+
+
+def test_recovery_rejects_unknown_journal_operation(tmp_path):
+    store_dir = tmp_path / "store"
+    backend = SingleHostLockBackend(str(store_dir))
+    backend.register_resource("budget", Decimal("10"))
+    snapshot = backend._snapshot("budget")
+    transaction = {
+        "operation": "unexpected-operation",
+        "reservation_id": "reservation-1",
+        "record": {
+            "key": "key-1",
+            "amount": "1",
+            "resource_id": "budget",
+            "state": "COMMITTED",
+        },
+        "before": snapshot,
+        "after": snapshot,
+    }
+    (store_dir / "transaction.json").write_text(json.dumps(transaction))
+
+    with pytest.raises(RuntimeError, match="Corrupted transaction journal"):
+        SingleHostLockBackend(str(store_dir))
