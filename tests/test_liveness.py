@@ -160,10 +160,6 @@ class TestLivenessTermination:
     class SimulatedProcessCrash(BaseException):
         """Bypass ordinary exception compensation to model abrupt process death."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Known crash window: budget and reservation registry are separate durable stores",
-    )
     def test_crash_after_budget_reserve_is_recoverable(self, tmp_path, monkeypatch):
         """A process crash after budget mutation must not orphan reserved capacity."""
         backend = SingleHostLockBackend(str(tmp_path))
@@ -184,10 +180,6 @@ class TestLivenessTermination:
             "crash-reserve-key", Decimal("0.1"), "crash-reserve-budget"
         ).status == "RESERVED"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Known crash window: commit persists budget before reservation lifecycle state",
-    )
     def test_crash_after_budget_commit_is_recoverable(self, tmp_path, monkeypatch):
         """A crash between budget commit and registry write must reconcile on restart."""
         backend = SingleHostLockBackend(str(tmp_path))
@@ -211,10 +203,6 @@ class TestLivenessTermination:
         assert state.reserved == 0
         assert state.committed == Decimal("0.1")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Known crash window: release persists budget before reservation lifecycle state",
-    )
     def test_crash_after_budget_release_is_recoverable(self, tmp_path, monkeypatch):
         """A crash between budget release and registry write must be idempotently recoverable."""
         backend = SingleHostLockBackend(str(tmp_path))
