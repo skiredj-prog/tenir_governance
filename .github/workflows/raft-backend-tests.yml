@@ -1,5 +1,5 @@
 name: Raft backend regression tests
-# Covers Raft state, governor dispatch, provider reconciliation, and checker correctness.
+# Covers Raft state, governor dispatch, provider reconciliation, checker correctness, and crash-recovery paths.
 
 on:
   pull_request:
