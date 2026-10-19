@@ -305,6 +305,10 @@ class DualKernelGovernor:
         self.budget_coordinator = budget_coordinator
         self.provider = provider
         self._worker_id = str(uuid4())
+        # Process-local guard for the window where provider.execute() is active.
+        # Durable DISPATCHING recovery remains available after process restart.
+        self._active_dispatches: set[str] = set()
+        self._active_dispatches_lock = __import__("threading").RLock()
         self.hold_manager = HoldManager(self.registry)
         # Post-execution assessor (optional). When set, the governor can
         # run τ⁻¹ and EVP assessments after terminal states. The assessor
@@ -729,10 +733,16 @@ class DualKernelGovernor:
         idempotency_key: str,
         resource_id: str | None = None,
         amount: float = 0.0,
+        *,
+        _active_provider_call: bool = False,
     ) -> dict[str, Any]:
         # Linearize the quarantine check and dispatch claim against lock/unlock.
         with self.membrane.state._quarantine_lock:
-            return self._dispatch_under_quarantine_lock(idempotency_key, resource_id, amount)
+            result = self._dispatch_under_quarantine_lock(idempotency_key, resource_id, amount)
+            if result.get("dispatched") and _active_provider_call:
+                with self._active_dispatches_lock:
+                    self._active_dispatches.add(idempotency_key)
+            return result
 
     def _dispatch_under_quarantine_lock(
         self,
@@ -841,12 +851,12 @@ class DualKernelGovernor:
         amount: float = 0.0,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        # Hold the same lock through the provider call: quarantine and dispatch
-        # are ordered atomically, so a late lock cannot race an unstarted effect.
-        with self.membrane.state._quarantine_lock:
-            return self._dispatch_and_execute_under_quarantine_lock(
-                idempotency_key, resource_id, amount, metadata,
-            )
+        # dispatch() linearizes the claim against QUARANTINE_LOCK. Do not hold
+        # the global quarantine lock while performing external I/O: a hung
+        # provider must not prevent quarantine activation or unrelated dispatches.
+        return self._dispatch_and_execute_under_quarantine_lock(
+            idempotency_key, resource_id, amount, metadata,
+        )
 
     def _dispatch_and_execute_under_quarantine_lock(
         self,
@@ -869,7 +879,10 @@ class DualKernelGovernor:
         method (state transition only, no external call).
         """
         # 1. Atomic claim
-        dispatch_result = self.dispatch(idempotency_key, resource_id, amount)
+        dispatch_result = self.dispatch(
+            idempotency_key, resource_id, amount,
+            _active_provider_call=self.provider is not None,
+        )
         if not dispatch_result.get("dispatched"):
             return dispatch_result
 
@@ -877,6 +890,8 @@ class DualKernelGovernor:
         if self.provider is None:
             return dispatch_result
 
+        # If reconciliation was already requested, the durable state claim
+        # still governs; active marker only prevents a concurrent live execute.
         # 3. Get the operation record for metadata
         record = self.registry.get(idempotency_key)
         if record is None:
@@ -899,6 +914,8 @@ class DualKernelGovernor:
         except Exception as e:
             # Provider call threw an exception — fail closed to UNKNOWN
             self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+            with self._active_dispatches_lock:
+                self._active_dispatches.discard(idempotency_key)
             return {
                 "dispatched": True,
                 "executed": False,
@@ -911,6 +928,8 @@ class DualKernelGovernor:
         # 5. Transition based on provider outcome
         if prov_result.outcome == ProviderOutcome.CONFIRMED:
             self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+            with self._active_dispatches_lock:
+                self._active_dispatches.discard(idempotency_key)
             return {
                 "dispatched": True,
                 "executed": True,
@@ -921,6 +940,8 @@ class DualKernelGovernor:
             }
         elif prov_result.outcome == ProviderOutcome.FAILED:
             self.fail(idempotency_key, resource_id, amount)
+            with self._active_dispatches_lock:
+                self._active_dispatches.discard(idempotency_key)
             return {
                 "dispatched": True,
                 "executed": False,
@@ -931,6 +952,8 @@ class DualKernelGovernor:
             }
         elif prov_result.outcome == ProviderOutcome.PENDING:
             # Pending — stay in DISPATCHING, caller should poll/reconcile
+            with self._active_dispatches_lock:
+                self._active_dispatches.discard(idempotency_key)
             return {
                 "dispatched": True,
                 "executed": False,
@@ -943,6 +966,8 @@ class DualKernelGovernor:
         else:
             # UNKNOWN — timeout or ambiguous response
             self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+            with self._active_dispatches_lock:
+                self._active_dispatches.discard(idempotency_key)
             return {
                 "dispatched": True,
                 "executed": False,
@@ -975,6 +1000,16 @@ class DualKernelGovernor:
         record = self.registry.get(idempotency_key)
         if record is None:
             return {"reconciled": False, "reason": "Operation not registered."}
+
+        with self._active_dispatches_lock:
+            if idempotency_key in self._active_dispatches:
+                return {
+                    "reconciled": False,
+                    "idempotency_key": idempotency_key,
+                    "operation_state": record.state.value,
+                    "reason": "Provider execution is still active; reconciliation deferred to avoid racing the external effect.",
+                    "recommendation": "retry_reconciliation",
+                }
 
         if record.state not in (OperationState.UNKNOWN, OperationState.DISPATCHING):
             return {
