@@ -1160,6 +1160,9 @@ class TestListOneRegressions:
         result = leader.reserve("unknown-release-key", 10, "budget-UNKNOWN-RELEASE")
         assert result.status == "RESERVED"
         reservation_id = result.reservation_id
+        assert _wait_until(lambda: all(
+            reservation_id in node._raft._reservations for node in cluster
+        )), "reservation did not converge to every replica"
 
         # Model recovery restoring an unresolved operation whose budget remains reserved.
         for node in cluster:
