@@ -8,7 +8,7 @@ These tests do not change production code. On 32c3b7a they are expected to fail:
 """
 from types import SimpleNamespace
 
-from tenir_governance.operations import OperationRecord
+from tenir_governance.operations import OperationRecord, OperationState
 from tests.test_hold_lifecycle import _setup_governor
 
 
@@ -86,5 +86,5 @@ def test_pr13_expire_hold_rejects_unelapsed_tau_k():
 
     assert result["expired"] is False
     record = gov.registry.get("op-pr13-premature")
-    assert record.state.value == "HOLD"
+    assert record.state == OperationState.HOLD
     assert record.hold_record.exit_reason != "expired"

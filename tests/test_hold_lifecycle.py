@@ -220,6 +220,7 @@ class TestHoldLifecycle:
         reg.register(rec)
         hm = HoldManager(reg)
         hm.enter_hold("op-hold-6", tau_k_seconds=300)
+        reg.get("op-hold-6").hold_record.hold_start = "2000-01-01T00:00:00+00:00"
         result = hm.expire_hold("op-hold-6")
         assert result["expired"] is True
         assert result["operation_state"] == OperationState.FAILED.value
@@ -578,6 +579,7 @@ class TestGovernorHoldLifecycle:
         )
         gov.registry.register(rec)
         gov.hold_manager.enter_hold("op-hold-test-4", tau_k_seconds=300)
+        gov.registry.get("op-hold-test-4").hold_record.hold_start = "2000-01-01T00:00:00+00:00"
         result = gov.expire_hold("op-hold-test-4")
         assert result["expired"] is True
         assert result["operation_state"] == OperationState.FAILED.value
