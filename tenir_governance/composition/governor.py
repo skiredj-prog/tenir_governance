@@ -304,6 +304,7 @@ class DualKernelGovernor:
         budget_coordinator: BudgetCoordinator | None = None,
         provider: Any = None,
         assessor: PostExecutionAssessor | None = None,
+        consensus_backend: Any = None,
     ):
         # scoring_kernel is a ScoringKernelAdapter wrapping TenirKernel,
         # or any object with a compatible adjudicate() interface.
@@ -314,12 +315,18 @@ class DualKernelGovernor:
         self.policy.validate()
         self.registry = registry or DurableOperationRegistry()
         self.budget_coordinator = budget_coordinator
+        # Optional durable reservation backend. When supplied, this becomes
+        # the budget source of truth for this governor instance.
+        self.consensus_backend = consensus_backend
         self.provider = provider
         self._worker_id = str(uuid4())
         # Process-local guard for the window where provider.execute() is active.
         # Durable DISPATCHING recovery remains available after process restart.
         self._active_dispatches: set[str] = set()
         self._active_dispatches_lock = threading.RLock()
+        # Serialize terminal budget settlement paths within this governor instance.
+        # The registry transition remains the durable terminal-state authority.
+        self._settlement_lock = threading.RLock()
         self.hold_manager = HoldManager(self.registry)
         # Post-execution assessor (optional). When set, the governor can
         # run τ⁻¹ and EVP assessments after terminal states. The assessor
@@ -595,6 +602,16 @@ class DualKernelGovernor:
         """
         record = self.registry.get(idempotency_key)
         own = 0.0 if (record is not None and record.budget_reserved) else amount
+        if self.consensus_backend is not None and record is not None and record.resource_id:
+            try:
+                state = self.consensus_backend.get_state(record.resource_id)
+                capacity = float(state.capacity)
+                if not math.isfinite(capacity) or capacity <= 0:
+                    return float("inf")
+                return (float(state.committed) + float(state.reserved) + own) / capacity
+            except Exception:
+                # Missing/stale durable utilization is indeterminate: fail closed.
+                return float("inf")
         return (resource.consumed + resource.reserved + own) / resource.capacity
 
     def _reserve_budget(self, idempotency_key: str, resource_id: str | None, amount: float) -> bool:
@@ -610,17 +627,49 @@ class DualKernelGovernor:
         if record is None:
             return False
         if record.budget_reserved:
+            # A backend-backed record must carry the reservation identity too.
+            return self.consensus_backend is None or bool(record.reservation_id)
+        if self.consensus_backend is not None:
+            # The backend's idempotency key closes the crash window between
+            # durable reservation and registry ownership persistence.
+            try:
+                result = self.consensus_backend.reserve(
+                    idempotency_key, amount, resource_id,
+                )
+            except Exception:
+                return False
+            if getattr(result, "status", None) != "RESERVED":
+                return False
+            reservation_id = getattr(result, "reservation_id", None)
+            if not reservation_id:
+                return False
+            try:
+                recorded = self.registry.set_budget_flags(
+                    idempotency_key,
+                    budget_reserved=True,
+                    budget_committed=False,
+                    reservation_id=reservation_id,
+                )
+            except Exception:
+                recorded = False
+            if not recorded:
+                # Compensation is idempotent. If the process dies before this
+                # call, replaying reserve(key, ...) returns the same reservation.
+                try:
+                    self.consensus_backend.release(reservation_id)
+                except Exception:
+                    pass
+                return False
             return True
+
         resource = self.membrane.state.resources.get(resource_id)
         if resource is None:
             return False
         with self.membrane.state.get_lock(resource_id):
             if not resource.reserve(amount):
                 return False
-        # The resource and operation registry are separate stores. If the
-        # ownership flag cannot be durably recorded, compensate the reservation
-        # and fail closed; otherwise a retry could reserve the same operation
-        # twice because the registry still says it owns no budget.
+        # Legacy in-process path: retain existing behavior when no durable
+        # consensus backend has been explicitly configured.
         try:
             recorded = self.registry.set_budget_flags(
                 idempotency_key, budget_reserved=True,
@@ -689,6 +738,32 @@ class DualKernelGovernor:
                 "tau_k_expired": tau_status.get("expired", False),
             }
         elif state == OperationState.RESERVED:
+            if self.consensus_backend is not None and record.resource_id and record.amount > 0:
+                if not record.reservation_id:
+                    return {
+                        "idempotency_key": idempotency_key,
+                        "action": "reconcile",
+                        "reason": "Durable reservation identity missing; dispatch blocked pending reconciliation.",
+                        "operation_state": state.value,
+                        "passage_id": record.passage_id,
+                    }
+                try:
+                    backend_state = self.consensus_backend.get_state(record.resource_id)
+                    reservation = next(
+                        (item for item in backend_state.reservations
+                         if item.get("reservation_id") == record.reservation_id),
+                        None,
+                    )
+                except Exception:
+                    reservation = None
+                if reservation is None or reservation.get("state") != "RESERVED":
+                    return {
+                        "idempotency_key": idempotency_key,
+                        "action": "reconcile",
+                        "reason": "Durable reservation is missing or not RESERVED; dispatch blocked pending reconciliation.",
+                        "operation_state": state.value,
+                        "passage_id": record.passage_id,
+                    }
             return {
                 "idempotency_key": idempotency_key,
                 "action": "dispatch",
@@ -824,7 +899,63 @@ class DualKernelGovernor:
                 "operation_state": existing.state.value,
             }
 
-        if resource_id and amount > 0:
+        if resource_id and amount > 0 and self.consensus_backend is not None:
+            current = self.registry.get(idempotency_key)
+            reservation_id = current.reservation_id if current else ""
+            if not reservation_id:
+                return {
+                    "dispatched": False,
+                    "reason": "Durable reservation identity missing; provider execution blocked.",
+                    "operation_state": OperationState.DISPATCHING.value,
+                }
+            try:
+                backend_state = self.consensus_backend.get_state(resource_id)
+                if self.policy.revalidate_budget_at_dispatch:
+                    reservation = next(
+                        (item for item in backend_state.reservations
+                         if item.get("reservation_id") == reservation_id),
+                        None,
+                    )
+                    if not reservation or reservation.get("state") != "RESERVED":
+                        return {
+                            "dispatched": False,
+                            "reason": "Durable reservation revalidation failed; provider execution blocked and reconciliation required.",
+                            "operation_state": OperationState.DISPATCHING.value,
+                            "recommendation": "human_review",
+                        }
+                commit_result = self.consensus_backend.commit(reservation_id)
+            except Exception:
+                return {
+                    "dispatched": False,
+                    "reason": "Durable backend commit failed or is uncertain; reconciliation required.",
+                    "operation_state": OperationState.DISPATCHING.value,
+                }
+            if getattr(commit_result, "status", None) not in ("COMMITTED", "ALREADY_COMMITTED"):
+                return {
+                    "dispatched": False,
+                    "reason": "Durable backend refused commit; provider execution blocked and reconciliation required.",
+                    "operation_state": OperationState.DISPATCHING.value,
+                    "recommendation": "human_review",
+                }
+            try:
+                flags_ok = self.registry.set_budget_flags(
+                    idempotency_key,
+                    budget_reserved=False,
+                    budget_committed=True,
+                    reservation_id=reservation_id,
+                )
+            except Exception:
+                flags_ok = False
+            if not flags_ok:
+                # Do not call the provider. Leave DISPATCHING and the durable
+                # COMMITTED reservation for explicit reconciliation/refund.
+                return {
+                    "dispatched": False,
+                    "reason": "Budget ownership persistence failed after durable commit; provider execution blocked, reconciliation required.",
+                    "operation_state": OperationState.DISPATCHING.value,
+                }
+
+        if resource_id and amount > 0 and self.consensus_backend is None:
             resource = self.membrane.state.resources.get(resource_id)
             if resource:
                 with self.membrane.state.get_lock(resource_id):
@@ -979,10 +1110,22 @@ class DualKernelGovernor:
         # 5. Transition based on provider outcome
         if prov_result.outcome == ProviderOutcome.CONFIRMED:
             try:
-                self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+                confirmed = self.confirm(idempotency_key)
             finally:
                 with self._active_dispatches_lock:
                     self._active_dispatches.discard(idempotency_key)
+            if not confirmed:
+                latest = self.registry.get(idempotency_key)
+                return {
+                    "dispatched": True,
+                    "executed": True,
+                    "idempotency_key": idempotency_key,
+                    "operation_state": latest.state.value if latest else "not_found",
+                    "provider_reference": prov_result.provider_reference,
+                    "provider_latency_ms": prov_result.latency_ms,
+                    "recommendation": "human_review",
+                    "reason": "Provider confirmed the external effect, but durable budget ownership or terminal state could not be confirmed.",
+                }
             return {
                 "dispatched": True,
                 "executed": True,
@@ -993,10 +1136,25 @@ class DualKernelGovernor:
             }
         elif prov_result.outcome == ProviderOutcome.FAILED:
             try:
-                self.fail(idempotency_key, resource_id, amount)
+                failed = self.fail(
+                    idempotency_key, resource_id, amount,
+                    authoritative_non_execution=True,
+                )
             finally:
                 with self._active_dispatches_lock:
                     self._active_dispatches.discard(idempotency_key)
+            if not failed:
+                latest = self.registry.get(idempotency_key)
+                return {
+                    "dispatched": True,
+                    "executed": False,
+                    "idempotency_key": idempotency_key,
+                    "operation_state": latest.state.value if latest else "not_found",
+                    "provider_error": prov_result.error,
+                    "provider_latency_ms": prov_result.latency_ms,
+                    "recommendation": "human_review",
+                    "reason": "Provider confirmed failure, but durable budget compensation or registry transition remains unresolved.",
+                }
             return {
                 "dispatched": True,
                 "executed": False,
@@ -1100,136 +1258,403 @@ class DualKernelGovernor:
                 "recommendation": "human_review",
             }
 
-        if recon.resolved and recon.outcome == ProviderOutcome.CONFIRMED:
-            success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
-            if not success:
+        # Provider calls may run concurrently (some providers require that for
+        # bounded reconciliation); serialize only the settlement phase.
+        with self._settlement_lock:
+            with self.registry.settlement_lock(
+                    idempotency_key,
+                    require_persistent=self.consensus_backend is not None,
+                ):
                 current = self.registry.get(idempotency_key)
-                return {
-                    "reconciled": False,
-                    "idempotency_key": idempotency_key,
-                    "operation_state": current.state.value if current else "not_found",
-                    "reason": "Confirmation lost the terminal-state race.",
-                }
-            return {
-                "reconciled": True,
-                "idempotency_key": idempotency_key,
-                "operation_state": OperationState.CONFIRMED.value,
-                "provider_reference": recon.provider_reference,
-            }
-        elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
-            committed = record.budget_committed
-            if record.resource_id and record.amount > 0:
-                resource = self.membrane.state.resources.get(record.resource_id)
-                if resource is None:
+                if current is None or current.state not in (
+                    OperationState.UNKNOWN, OperationState.DISPATCHING,
+                ):
                     return {
-                        "reconciled": False, "idempotency_key": idempotency_key,
-                        "operation_state": OperationState.UNKNOWN.value,
-                        "recommendation": "human_review",
-                        "reason": "Budget resource is missing; cannot safely release or refund.",
+                        "reconciled": False,
+                        "idempotency_key": idempotency_key,
+                        "operation_state": current.state.value if current else "not_found",
+                        "reason": "Reconciliation lost the terminal-state race; budget unchanged.",
                     }
-                # Serialize competing reconciliation attempts with the budget
-                # mutation. Only the worker that wins UNKNOWN -> FAILED may
-                # release/refund, and accounting must cover the exact amount.
-                with self.membrane.state.get_lock(record.resource_id):
-                    current = self.registry.get(idempotency_key)
-                    if current is None or current.state not in (OperationState.UNKNOWN, OperationState.DISPATCHING):
+                if recon.resolved and recon.outcome == ProviderOutcome.CONFIRMED:
+                    if self.consensus_backend is not None and record.amount > 0:
+                        try:
+                            if not record.resource_id:
+                                raise RuntimeError("Budgeted operation has no durable resource identity")
+                            backend_state = self.consensus_backend.get_state(record.resource_id)
+                            durable_reservation = next(
+                                (item for item in backend_state.reservations
+                                 if record.reservation_id
+                                 and item.get("reservation_id") == record.reservation_id),
+                                None,
+                            )
+                            if durable_reservation is None and not record.reservation_id:
+                                # Recover the crash window between backend reservation
+                                # and persistence of reservation_id in the operation registry.
+                                durable_reservation = next(
+                                    (item for item in backend_state.reservations
+                                     if item.get("key") == idempotency_key),
+                                    None,
+                                )
+                            if durable_reservation is None:
+                                raise RuntimeError("Durable reservation identity cannot be recovered or verified")
+                            if float(durable_reservation.get("amount", -1)) != float(record.amount):
+                                raise RuntimeError("Durable reservation amount does not match the operation record")
+                            reservation_id = durable_reservation.get("reservation_id")
+                            if not reservation_id:
+                                raise RuntimeError("Recovered durable reservation has no reservation ID")
+                            # Persist recovered identity before changing reservation state.
+                            if record.reservation_id != reservation_id:
+                                identity_ok = self.registry.set_budget_flags(
+                                    idempotency_key,
+                                    reservation_id=reservation_id,
+                                )
+                                if not identity_ok:
+                                    raise RuntimeError("Could not persist recovered durable reservation identity")
+                            if durable_reservation.get("state") == "RESERVED":
+                                committed_result = self.consensus_backend.commit(reservation_id)
+                                if getattr(committed_result, "status", None) not in ("COMMITTED", "ALREADY_COMMITTED"):
+                                    raise RuntimeError("Could not commit reservation for confirmed external effect")
+                            elif durable_reservation.get("state") != "COMMITTED":
+                                raise RuntimeError(
+                                    f"External effect confirmed but durable reservation is {durable_reservation.get('state')}"
+                                )
+                            flags_ok = self.registry.set_budget_flags(
+                                idempotency_key,
+                                budget_reserved=False,
+                                budget_committed=True,
+                                reservation_id=reservation_id,
+                            )
+                            if not flags_ok:
+                                raise RuntimeError("Could not persist committed budget ownership")
+                        except Exception as exc:
+                            return {
+                                "reconciled": False, "idempotency_key": idempotency_key,
+                                "operation_state": record.state.value,
+                                "recommendation": "human_review",
+                                "reason": f"External effect confirmed but budget ownership needs reconciliation: {exc}",
+                            }
+                    success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+                    if not success:
+                        current = self.registry.get(idempotency_key)
                         return {
-                            "reconciled": False, "idempotency_key": idempotency_key,
+                            "reconciled": False,
+                            "idempotency_key": idempotency_key,
                             "operation_state": current.state.value if current else "not_found",
-                            "reason": "Reconciliation lost the terminal-state race; budget unchanged.",
+                            "reason": "Confirmation lost the terminal-state race.",
                         }
-                    available_accounting = resource.consumed if committed else resource.reserved
-                    if available_accounting < record.amount:
-                        return {
-                            "reconciled": False, "idempotency_key": idempotency_key,
-                            "operation_state": OperationState.UNKNOWN.value,
-                            "recommendation": "human_review",
-                            "reason": "Budget accounting is inconsistent; refusing automatic refund/release.",
-                        }
-                    # Persist ownership release before mutating accounting.
-                    # If this write fails, leave both the unresolved state and
-                    # the budget untouched; never release capacity while the
-                    # durable record still claims to own it.
-                    flags_changed = committed or record.budget_reserved
-                    if flags_changed:
+                    return {
+                        "reconciled": True,
+                        "idempotency_key": idempotency_key,
+                        "operation_state": OperationState.CONFIRMED.value,
+                        "provider_reference": recon.provider_reference,
+                    }
+                elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
+                    committed = record.budget_committed
+                    if self.consensus_backend is not None and record.amount > 0:
+                        # The backend is authoritative when a crash occurred between
+                        # reservation/commit and registry ownership persistence.
+                        try:
+                            if not record.resource_id:
+                                raise RuntimeError("Budgeted operation has no durable resource identity")
+                            backend_state = self.consensus_backend.get_state(record.resource_id)
+                            durable_reservation = next(
+                                (item for item in backend_state.reservations
+                                 if record.reservation_id
+                                 and item.get("reservation_id") == record.reservation_id),
+                                None,
+                            )
+                            if durable_reservation is None and not record.reservation_id:
+                                durable_reservation = next(
+                                    (item for item in backend_state.reservations
+                                     if item.get("key") == idempotency_key),
+                                    None,
+                                )
+                            if durable_reservation is None:
+                                raise RuntimeError("Durable reservation identity cannot be recovered or verified")
+                            if float(durable_reservation.get("amount", -1)) != float(record.amount):
+                                raise RuntimeError("Durable reservation amount does not match the operation record")
+                            reservation_id = durable_reservation.get("reservation_id")
+                            if not reservation_id:
+                                raise RuntimeError("Recovered durable reservation has no reservation ID")
+                            if record.reservation_id != reservation_id:
+                                identity_ok = self.registry.set_budget_flags(
+                                    idempotency_key,
+                                    reservation_id=reservation_id,
+                                )
+                                if not identity_ok:
+                                    raise RuntimeError("Could not persist recovered durable reservation identity")
+                        except Exception:
+                            durable_reservation = None
+                            reservation_id = None
+                        if durable_reservation is None:
+                            return {
+                                "reconciled": False, "idempotency_key": idempotency_key,
+                                "operation_state": record.state.value,
+                                "recommendation": "human_review",
+                                "reason": "Durable reservation identity cannot be verified.",
+                            }
+                        if durable_reservation.get("state") == "COMMITTED":
+                            committed = True
+                        elif durable_reservation.get("state") == "RESERVED":
+                            committed = False
+                        elif durable_reservation.get("state") in ("REFUNDED", "RELEASED"):
+                            # A prior attempt may have compensated before crashing.
+                            committed = durable_reservation.get("state") == "REFUNDED"
+                        else:
+                            return {
+                                "reconciled": False, "idempotency_key": idempotency_key,
+                                "operation_state": record.state.value,
+                                "recommendation": "human_review",
+                                "reason": "Durable reservation is in a non-compensable state.",
+                            }
+                        # Provider reconciliation is authoritative non-execution proof:
+                        # compensate the durable reservation before terminalizing the registry.
+                        try:
+                            compensation = (
+                                self.consensus_backend.refund(reservation_id)
+                                if committed
+                                else self.consensus_backend.release(reservation_id)
+                            )
+                        except Exception as exc:
+                            return {
+                                "reconciled": False, "idempotency_key": idempotency_key,
+                                "operation_state": record.state.value,
+                                "recommendation": "human_review",
+                                "reason": f"Durable budget compensation failed: {exc}",
+                            }
+                        accepted = (
+                            ("REFUNDED", "ALREADY_REFUNDED")
+                            if committed else ("RELEASED", "ALREADY_RELEASED")
+                        )
+                        if getattr(compensation, "status", None) not in accepted:
+                            return {
+                                "reconciled": False, "idempotency_key": idempotency_key,
+                                "operation_state": record.state.value,
+                                "recommendation": "human_review",
+                                "reason": "Durable budget compensation was not confirmed; registry remains unresolved.",
+                            }
                         try:
                             flags_ok = self.registry.set_budget_flags(
                                 idempotency_key,
                                 budget_reserved=False,
                                 budget_committed=False,
+                                reservation_id=reservation_id,
                             )
                         except Exception:
                             flags_ok = False
                         if not flags_ok:
                             return {
                                 "reconciled": False, "idempotency_key": idempotency_key,
-                                "operation_state": current.state.value,
+                                "operation_state": record.state.value,
                                 "recommendation": "human_review",
-                                "reason": "Could not persist budget ownership release; budget unchanged.",
+                                "reason": "Compensation durable but registry ownership update failed; replay reconciliation.",
                             }
-                    success, _ = self.registry.transition_to(idempotency_key, OperationState.FAILED)
-                    if not success:
-                        # Restore the ownership flags if the terminal transition
-                        # lost a race. No accounting mutation has happened yet.
-                        if flags_changed:
-                            try:
-                                self.registry.set_budget_flags(
-                                    idempotency_key,
-                                    budget_reserved=not committed,
-                                    budget_committed=committed,
-                                )
-                            except Exception:
-                                pass
-                        latest = self.registry.get(idempotency_key)
+                        success, _prev = self.registry.transition_to(
+                            idempotency_key, OperationState.FAILED,
+                        )
+                        if not success:
+                            latest = self.registry.get(idempotency_key)
+                            if latest and latest.state == OperationState.FAILED:
+                                return {
+                                    "reconciled": True, "idempotency_key": idempotency_key,
+                                    "operation_state": OperationState.FAILED.value,
+                                    "budget_compensation": getattr(compensation, "status", None),
+                                }
+                            return {
+                                "reconciled": False, "idempotency_key": idempotency_key,
+                                "operation_state": latest.state.value if latest else "not_found",
+                                "reason": "Compensation completed but terminal transition needs replay.",
+                            }
                         return {
-                            "reconciled": False, "idempotency_key": idempotency_key,
-                            "operation_state": latest.state.value if latest else "not_found",
-                            "reason": "Reconciliation transition lost; budget unchanged.",
+                            "reconciled": True, "idempotency_key": idempotency_key,
+                            "operation_state": OperationState.FAILED.value,
+                            "budget_compensation": getattr(compensation, "status", None),
                         }
-                    if committed:
-                        resource.refund(record.amount)
+                    if record.resource_id and record.amount > 0:
+                        resource = self.membrane.state.resources.get(record.resource_id)
+                        if resource is None:
+                            return {
+                                "reconciled": False, "idempotency_key": idempotency_key,
+                                "operation_state": OperationState.UNKNOWN.value,
+                                "recommendation": "human_review",
+                                "reason": "Budget resource is missing; cannot safely release or refund.",
+                            }
+                        # Serialize competing reconciliation attempts with the budget
+                        # mutation. Only the worker that wins UNKNOWN -> FAILED may
+                        # release/refund, and accounting must cover the exact amount.
+                        with self.membrane.state.get_lock(record.resource_id):
+                            current = self.registry.get(idempotency_key)
+                            if current is None or current.state not in (OperationState.UNKNOWN, OperationState.DISPATCHING):
+                                return {
+                                    "reconciled": False, "idempotency_key": idempotency_key,
+                                    "operation_state": current.state.value if current else "not_found",
+                                    "reason": "Reconciliation lost the terminal-state race; budget unchanged.",
+                                }
+                            available_accounting = resource.consumed if committed else resource.reserved
+                            if available_accounting < record.amount:
+                                return {
+                                    "reconciled": False, "idempotency_key": idempotency_key,
+                                    "operation_state": OperationState.UNKNOWN.value,
+                                    "recommendation": "human_review",
+                                    "reason": "Budget accounting is inconsistent; refusing automatic refund/release.",
+                                }
+                            # Persist ownership release before mutating accounting.
+                            # If this write fails, leave both the unresolved state and
+                            # the budget untouched; never release capacity while the
+                            # durable record still claims to own it.
+                            flags_changed = committed or record.budget_reserved
+                            if flags_changed:
+                                try:
+                                    flags_ok = self.registry.set_budget_flags(
+                                        idempotency_key,
+                                        budget_reserved=False,
+                                        budget_committed=False,
+                                    )
+                                except Exception:
+                                    flags_ok = False
+                                if not flags_ok:
+                                    return {
+                                        "reconciled": False, "idempotency_key": idempotency_key,
+                                        "operation_state": current.state.value,
+                                        "recommendation": "human_review",
+                                        "reason": "Could not persist budget ownership release; budget unchanged.",
+                                    }
+                            success, _ = self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                            if not success:
+                                # Restore the ownership flags if the terminal transition
+                                # lost a race. No accounting mutation has happened yet.
+                                if flags_changed:
+                                    try:
+                                        self.registry.set_budget_flags(
+                                            idempotency_key,
+                                            budget_reserved=not committed,
+                                            budget_committed=committed,
+                                        )
+                                    except Exception:
+                                        pass
+                                latest = self.registry.get(idempotency_key)
+                                return {
+                                    "reconciled": False, "idempotency_key": idempotency_key,
+                                    "operation_state": latest.state.value if latest else "not_found",
+                                    "reason": "Reconciliation transition lost; budget unchanged.",
+                                }
+                            if committed:
+                                resource.refund(record.amount)
+                            else:
+                                resource.release(record.amount)
                     else:
-                        resource.release(record.amount)
-            else:
-                success, _ = self.registry.transition_to(idempotency_key, OperationState.FAILED)
-                if not success:
-                    current = self.registry.get(idempotency_key)
+                        success, _ = self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                        if not success:
+                            current = self.registry.get(idempotency_key)
+                            return {
+                                "reconciled": False, "idempotency_key": idempotency_key,
+                                "operation_state": current.state.value if current else "not_found",
+                                "reason": "Reconciliation transition lost; no budget mutation performed.",
+                            }
                     return {
-                        "reconciled": False, "idempotency_key": idempotency_key,
-                        "operation_state": current.state.value if current else "not_found",
-                        "reason": "Reconciliation transition lost; no budget mutation performed.",
+                        "reconciled": True,
+                        "idempotency_key": idempotency_key,
+                        "operation_state": OperationState.FAILED.value,
+                        "provider_reference": recon.provider_reference,
+                        "reason": "Provider confirmed no effect occurred.",
                     }
-            return {
-                "reconciled": True,
-                "idempotency_key": idempotency_key,
-                "operation_state": OperationState.FAILED.value,
-                "provider_reference": recon.provider_reference,
-                "reason": "Provider confirmed no effect occurred.",
-            }
-        else:
-            # An interrupted dispatch that remains indeterminate becomes UNKNOWN;
-            # it must not remain mislabeled DISPATCHING after reconciliation.
-            current = self.registry.get(idempotency_key)
-            if current is not None and current.state == OperationState.DISPATCHING:
-                self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
-                current = self.registry.get(idempotency_key)
-            return {
-                "reconciled": False,
-                "idempotency_key": idempotency_key,
-                "operation_state": current.state.value if current else "not_found",
-                "provider_reference": recon.provider_reference,
-                "provider_error": recon.error,
-                "recommendation": "human_review",
-                "reason": "Provider could not determine outcome.",
-            }
-
+                else:
+                    # An interrupted dispatch that remains indeterminate becomes UNKNOWN;
+                    # it must not remain mislabeled DISPATCHING after reconciliation.
+                    current = self.registry.get(idempotency_key)
+                    if current is not None and current.state == OperationState.DISPATCHING:
+                        self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+                        current = self.registry.get(idempotency_key)
+                    return {
+                        "reconciled": False,
+                        "idempotency_key": idempotency_key,
+                        "operation_state": current.state.value if current else "not_found",
+                        "provider_reference": recon.provider_reference,
+                        "provider_error": recon.error,
+                        "recommendation": "human_review",
+                        "reason": "Provider could not determine outcome.",
+                    }
+        
     def confirm(self, idempotency_key: str) -> bool:
-        """Transition DISPATCHING → CONFIRMED. The external effect occurred."""
+        """Serialize confirmation with failure compensation across local processes."""
+        with self._settlement_lock:
+            try:
+                with self.registry.settlement_lock(
+                    idempotency_key,
+                    require_persistent=self.consensus_backend is not None,
+                ):
+                    return self._confirm_under_settlement_lock(idempotency_key)
+            except Exception:
+                # An unavailable durable coordination lock is an indeterminate
+                # settlement: fail closed without touching budget ownership.
+                return False
+
+    def _confirm_under_settlement_lock(self, idempotency_key: str) -> bool:
+        """Confirm an external effect only after durable budget ownership agrees."""
+        record = self.registry.get(idempotency_key)
+        if record is None or record.state not in (
+            OperationState.DISPATCHING, OperationState.UNKNOWN,
+        ):
+            # Validate the lifecycle transition before committing budget.
+            # Otherwise an illegal confirm from RESERVED could consume budget
+            # even though the registry correctly rejects CONFIRMED.
+            return False
+        if self.consensus_backend is not None and record.amount > 0:
+            if not record.resource_id or not record.reservation_id:
+                return False
+            try:
+                state = self.consensus_backend.get_state(record.resource_id)
+                reservation = next(
+                    (item for item in state.reservations
+                     if item.get("reservation_id") == record.reservation_id),
+                    None,
+                )
+                if reservation is None:
+                    return False
+                reservation_state = reservation.get("state")
+                if reservation_state == "RESERVED":
+                    committed = self.consensus_backend.commit(record.reservation_id)
+                    if getattr(committed, "status", None) not in ("COMMITTED", "ALREADY_COMMITTED"):
+                        return False
+                elif reservation_state != "COMMITTED":
+                    # A released/refunded reservation cannot back a newly
+                    # confirmed external effect.
+                    return False
+                flags_ok = self.registry.set_budget_flags(
+                    idempotency_key,
+                    budget_reserved=False,
+                    budget_committed=True,
+                    reservation_id=record.reservation_id,
+                )
+                if not flags_ok:
+                    return False
+            except Exception:
+                return False
         success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
         return success
 
-    def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0) -> bool:
-        """Transition to FAILED and mutate only this operation's budget."""
+    def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, authoritative_non_execution: bool = False) -> bool:
+        """Serialize failure compensation with confirmation for this governor instance."""
+        with self._settlement_lock:
+            try:
+                with self.registry.settlement_lock(
+                    idempotency_key,
+                    require_persistent=self.consensus_backend is not None,
+                ):
+                    return self._fail_under_settlement_lock(
+                        idempotency_key, resource_id, amount,
+                        authoritative_non_execution=authoritative_non_execution,
+                    )
+            except Exception:
+                # Do not mutate budget if cross-process coordination is uncertain.
+                return False
+
+    def _fail_under_settlement_lock(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, authoritative_non_execution: bool = False) -> bool:
+        """Transition to FAILED and mutate only this operation's budget.
+
+        authoritative_non_execution must be true only when the provider or
+        reconciliation protocol explicitly confirms that no external effect occurred.
+        """
         record = self.registry.get(idempotency_key)
         if record is None:
             return False
@@ -1248,8 +1673,95 @@ class DualKernelGovernor:
         if not math.isfinite(supplied_amount) or supplied_amount != recorded_amount:
             return False
 
+        if (
+            self.consensus_backend is not None
+            and recorded_resource
+            and recorded_amount > 0
+            and not record.reservation_id
+        ):
+            # Recover the crash window where backend.reserve() persisted but
+            # the operation registry did not yet persist reservation_id/flags.
+            try:
+                backend_state = self.consensus_backend.get_state(recorded_resource)
+                orphan = next(
+                    (item for item in backend_state.reservations
+                     if item.get("key") == idempotency_key),
+                    None,
+                )
+            except Exception:
+                return False
+            if orphan is not None:
+                orphan_state = orphan.get("state")
+                if orphan_state in ("RESERVED", "UNKNOWN"):
+                    reserved_flag, committed_flag = True, False
+                elif orphan_state == "COMMITTED":
+                    reserved_flag, committed_flag = False, True
+                elif orphan_state in ("RELEASED", "REFUNDED"):
+                    reserved_flag, committed_flag = False, False
+                else:
+                    return False
+                try:
+                    repaired = self.registry.set_budget_flags(
+                        idempotency_key,
+                        budget_reserved=reserved_flag,
+                        budget_committed=committed_flag,
+                        reservation_id=orphan["reservation_id"],
+                    )
+                except Exception:
+                    repaired = False
+                if not repaired:
+                    return False
+                record = self.registry.get(idempotency_key)
+                if record is None:
+                    return False
+
         committed = record.budget_committed
         owns_budget = record.budget_reserved or record.budget_committed
+        if self.consensus_backend is not None and owns_budget and not record.reservation_id:
+            # Never fall back to the membrane's in-memory counters when the
+            # durable backend is configured but reservation ownership is unknown.
+            return False
+        if self.consensus_backend is not None and record.reservation_id and owns_budget:
+            if committed:
+                # A committed budget can be refunded only when this call is
+                # backed by explicit provider/reconciliation non-execution proof.
+                if not authoritative_non_execution or record.state not in (
+                    OperationState.DISPATCHING, OperationState.UNKNOWN,
+                ):
+                    return False
+                try:
+                    compensated = self.consensus_backend.refund(record.reservation_id)
+                except Exception:
+                    return False
+                if getattr(compensated, "status", None) not in ("REFUNDED", "ALREADY_REFUNDED"):
+                    return False
+            else:
+                if record.state not in (
+                    OperationState.CREATED, OperationState.HOLD,
+                    OperationState.RESERVED, OperationState.ESCALATED,
+                ):
+                    return False
+                try:
+                    compensated = self.consensus_backend.release(record.reservation_id)
+                except Exception:
+                    return False
+                if getattr(compensated, "status", None) not in ("RELEASED", "ALREADY_RELEASED"):
+                    return False
+            try:
+                flags_ok = self.registry.set_budget_flags(
+                    idempotency_key,
+                    budget_reserved=False,
+                    budget_committed=False,
+                    reservation_id=record.reservation_id,
+                )
+            except Exception:
+                flags_ok = False
+            if not flags_ok:
+                return False
+            success, _prev_state = self.registry.transition_to(
+                idempotency_key, OperationState.FAILED,
+            )
+            return success
         if recorded_resource and recorded_amount > 0 and owns_budget:
             resource = self.membrane.state.resources.get(recorded_resource)
             if resource is None:
@@ -1558,40 +2070,70 @@ class DualKernelGovernor:
             # Only release a reservation that this durable operation actually owns.
             should_release_budget = bool(held_record and held_record.budget_reserved)
             if resource_id and amount > 0 and should_release_budget:
-                resource = self.membrane.state.resources.get(resource_id)
-                if resource is None:
+                if self.consensus_backend is not None and not (held_record and held_record.reservation_id):
                     composed_decision = Decision.HOLD.value
-                    composed_rationale = "HOLD resource missing; budget release requires reconciliation."
-                else:
-                    with self.membrane.state.get_lock(resource_id):
-                        if resource.reserved < amount:
-                            composed_decision = Decision.HOLD.value
-                            composed_rationale = "HOLD reservation accounting inconsistent; refusing release."
-                        else:
+                    composed_rationale = "Durable reservation identity missing; budget release blocked pending reconciliation."
+                elif self.consensus_backend is not None and held_record and held_record.reservation_id:
+                    try:
+                        released = self.consensus_backend.release(held_record.reservation_id)
+                    except Exception:
+                        released = None
+                    if getattr(released, "status", None) not in ("RELEASED", "ALREADY_RELEASED"):
+                        composed_decision = Decision.HOLD.value
+                        composed_rationale = "Durable reservation release unresolved; HOLD retained for reconciliation."
+                    else:
+                        try:
+                            flags_ok = self.registry.set_budget_flags(
+                                idem_key, budget_reserved=False,
+                                budget_committed=False,
+                                reservation_id=held_record.reservation_id,
+                            )
+                        except Exception:
+                            flags_ok = False
+                        if flags_ok:
                             success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
-                            if success:
-                                resource.release(amount)
-                                try:
-                                    self.registry.set_budget_flags(
-                                        idem_key,
-                                        budget_reserved=False,
-                                        budget_committed=False,
-                                    )
-                                except Exception:
-                                    # The operation is terminal, but ownership
-                                    # persistence failed. Preserve a visible
-                                    # reconciliation signal instead of claiming
-                                    # a fully resolved HOLD.
-                                    composed_decision = Decision.HOLD.value
-                                    composed_rationale = (
-                                        "HOLD veto applied, but budget ownership flags could not be persisted; reconciliation required."
-                                    )
-                                    hold_resolved = False
-                                else:
-                                    hold_resolved = True
-                            else:
+                            hold_resolved = bool(success)
+                            if not success:
                                 composed_decision = Decision.HOLD.value
-                                composed_rationale = "HARD_VETO re-adjudication lost the terminal transition race; budget unchanged."
+                                composed_rationale = "Durable release completed but terminal transition lost; replay reconciliation."
+                        else:
+                            composed_decision = Decision.HOLD.value
+                            composed_rationale = "Durable release completed but ownership update failed; reconciliation required."
+                else:
+                    resource = self.membrane.state.resources.get(resource_id)
+                    if resource is None:
+                        composed_decision = Decision.HOLD.value
+                        composed_rationale = "HOLD resource missing; budget release requires reconciliation."
+                    else:
+                        with self.membrane.state.get_lock(resource_id):
+                            if resource.reserved < amount:
+                                composed_decision = Decision.HOLD.value
+                                composed_rationale = "HOLD reservation accounting inconsistent; refusing release."
+                            else:
+                                success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
+                                if success:
+                                    resource.release(amount)
+                                    try:
+                                        self.registry.set_budget_flags(
+                                            idem_key,
+                                            budget_reserved=False,
+                                            budget_committed=False,
+                                        )
+                                    except Exception:
+                                        # The operation is terminal, but ownership
+                                        # persistence failed. Preserve a visible
+                                        # reconciliation signal instead of claiming
+                                        # a fully resolved HOLD.
+                                        composed_decision = Decision.HOLD.value
+                                        composed_rationale = (
+                                            "HOLD veto applied, but budget ownership flags could not be persisted; reconciliation required."
+                                        )
+                                        hold_resolved = False
+                                    else:
+                                        hold_resolved = True
+                                else:
+                                    composed_decision = Decision.HOLD.value
+                                    composed_rationale = "HARD_VETO re-adjudication lost the terminal transition race; budget unchanged."
             else:
                 success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
                 if success:
@@ -1675,11 +2217,29 @@ class DualKernelGovernor:
         if result.get("exited") and not approve:
             record = self.registry.get(idempotency_key)
             if record and record.budget_reserved and record.resource_id and record.amount > 0:
-                resource = self.membrane.state.resources.get(record.resource_id)
-                if resource:
-                    with self.membrane.state.get_lock(record.resource_id):
-                        resource.release(record.amount)
-                self.registry.set_budget_flags(idempotency_key, budget_reserved=False)
+                if self.consensus_backend is not None and not record.reservation_id:
+                    result["budget_reconciliation_required"] = True
+                    result["reason"] = "Durable reservation identity missing; budget release blocked."
+                    return result
+                if self.consensus_backend is not None and record.reservation_id:
+                    try:
+                        released = self.consensus_backend.release(record.reservation_id)
+                    except Exception:
+                        released = None
+                    if getattr(released, "status", None) not in ("RELEASED", "ALREADY_RELEASED"):
+                        result["budget_reconciliation_required"] = True
+                        result["reason"] = "Exit recorded, but durable budget release is unresolved."
+                        return result
+                    self.registry.set_budget_flags(
+                        idempotency_key, budget_reserved=False,
+                        budget_committed=False, reservation_id=record.reservation_id,
+                    )
+                else:
+                    resource = self.membrane.state.resources.get(record.resource_id)
+                    if resource:
+                        with self.membrane.state.get_lock(record.resource_id):
+                            resource.release(record.amount)
+                    self.registry.set_budget_flags(idempotency_key, budget_reserved=False)
         return result
 
     def expire_hold(self, idempotency_key: str) -> dict[str, Any]:
@@ -1699,14 +2259,37 @@ class DualKernelGovernor:
 
         # Release any reserved budget
         if result.get("expired") and record.resource_id and record.amount > 0:
-            resource = self.membrane.state.resources.get(record.resource_id)
-            if resource:
-                with self.membrane.state.get_lock(record.resource_id):
-                    resource.release(record.amount)
-            if record.budget_reserved or record.budget_committed:
-                self.registry.set_budget_flags(
-                    idempotency_key, budget_reserved=False, budget_committed=False,
-                )
+            if self.consensus_backend is not None and not record.reservation_id and (record.budget_reserved or record.budget_committed):
+                result["budget_reconciliation_required"] = True
+                result["reason"] = "Durable reservation identity missing; budget release blocked."
+                return result
+            if self.consensus_backend is not None and record.reservation_id:
+                if record.budget_committed:
+                    result["budget_reconciliation_required"] = True
+                    result["reason"] = "HOLD expiry found a committed reservation; refusing release without reconciliation."
+                    return result
+                try:
+                    released = self.consensus_backend.release(record.reservation_id)
+                except Exception:
+                    released = None
+                if getattr(released, "status", None) not in ("RELEASED", "ALREADY_RELEASED"):
+                    result["budget_reconciliation_required"] = True
+                    result["reason"] = "HOLD expired, but durable budget release is unresolved."
+                    return result
+                if record.budget_reserved or record.budget_committed:
+                    self.registry.set_budget_flags(
+                        idempotency_key, budget_reserved=False,
+                        budget_committed=False, reservation_id=record.reservation_id,
+                    )
+            else:
+                resource = self.membrane.state.resources.get(record.resource_id)
+                if resource:
+                    with self.membrane.state.get_lock(record.resource_id):
+                        resource.release(record.amount)
+                if record.budget_reserved or record.budget_committed:
+                    self.registry.set_budget_flags(
+                        idempotency_key, budget_reserved=False, budget_committed=False,
+                    )
 
         return result
 

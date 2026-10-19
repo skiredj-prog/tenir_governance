@@ -184,6 +184,42 @@ class TestMultiNodeReserveCommitRelease:
             assert state.reserved == 0, f"Node {i} reserved={state.reserved}"
             assert state.committed == 40, f"Node {i} committed={state.committed}"
 
+
+    def test_release_refuses_unknown_reservation_state(self, cluster):
+        """Ambiguous reservation state must not be guessed to be releasable."""
+        leader = _get_leader(cluster)
+        assert leader is not None
+        leader.register_resource("budget-unknown-release", 100)
+        assert _wait_until(
+            lambda: all(
+                node.get_state("budget-unknown-release").capacity == 100
+                for node in cluster
+            ),
+            timeout=5.0,
+        )
+        reservation = leader.reserve("unknown-release-key", 25, "budget-unknown-release")
+        assert reservation.status == "RESERVED"
+        assert _wait_until(
+            lambda: all(
+                any(item.get("reservation_id") == reservation.reservation_id
+                    for item in node.get_state("budget-unknown-release").reservations)
+                for node in cluster
+            ),
+            timeout=5.0,
+        )
+
+        # Inject an ambiguous reservation record on each replica to exercise
+        # the state-machine guard without changing the reserved accounting.
+        for node in cluster:
+            node._raft._reservations[reservation.reservation_id]["state"] = "UNKNOWN"
+
+        result = leader.release(reservation.reservation_id)
+        assert result.status == "INVALID_STATE"
+        for node in cluster:
+            state = node.get_state("budget-unknown-release")
+            assert state.reserved == 25
+            assert state.committed == 0
+
     def test_release_from_leader(self, cluster):
         """Release from the leader and verify state on all nodes."""
         leader = _get_leader(cluster)
@@ -1194,8 +1230,18 @@ class TestListOneRegressions:
         assert state.reserved == Decimal("0.4")
         assert state.committed == Decimal("0.2")
 
-    @pytest.mark.parametrize("operation", ["release", "reconcile_release"])
-    def test_unknown_reservation_release_updates_budget_accounting(self, cluster, operation):
+    @pytest.mark.parametrize(
+        ("operation", "expected_status", "expected_reserved"),
+        [
+            # Ordinary release must not resolve an ambiguous UNKNOWN reservation.
+            ("release", "INVALID_STATE", Decimal("10")),
+            # Explicit reconciliation is the only path allowed to release UNKNOWN.
+            ("reconcile_release", "RELEASED", Decimal("0")),
+        ],
+    )
+    def test_unknown_reservation_release_requires_reconciliation(
+        self, cluster, operation, expected_status, expected_reserved
+    ):
         leader = _get_leader(cluster)
         assert leader.register_resource("budget-UNKNOWN-RELEASE", 100) == "REGISTERED"
         result = leader.reserve("unknown-release-key", 10, "budget-UNKNOWN-RELEASE")
@@ -1212,10 +1258,12 @@ class TestListOneRegressions:
         raw_result = getattr(leader._raft, operation)(
             reservation_id, sync=True, timeout=10.0,
         )
-        assert raw_result == "RELEASED"
+        assert raw_result == expected_status
         state = leader.get_state("budget-UNKNOWN-RELEASE")
-        assert state.reserved == Decimal("0")
+        assert state.reserved == expected_reserved
         assert state.committed == Decimal("0")
+        expected_state = "UNKNOWN" if operation == "release" else "RELEASED"
+        assert state.reservations[0]["state"] == expected_state
 
     @pytest.mark.parametrize(
         ("operation", "expected_status", "expected_reserved", "expected_committed"),

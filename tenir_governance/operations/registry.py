@@ -33,6 +33,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+import hashlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Optional
@@ -222,6 +224,10 @@ class OperationRecord:
     budget_committed: bool = False
     # HOLD lifecycle metadata (None unless operation has been in HOLD)
     hold_record: HoldRecord | None = None
+    # Appended to preserve positional-constructor compatibility for legacy fields.
+    # Durable SingleHostLockBackend reservation owning this operation budget.
+    # Empty only for legacy records or operations without a budget reservation.
+    reservation_id: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -283,6 +289,10 @@ class DurableOperationRegistry:
         self._lock = threading.Lock()
         self._records: dict[str, OperationRecord] = {}
         self._store_path = store_path
+        # In-memory registries need only process-local serialization. Durable
+        # backend settlement explicitly requires the file-backed lock below.
+        self._local_settlement_locks: dict[str, threading.Lock] = {}
+        self._local_settlement_locks_guard = threading.Lock()
         self._corrupted = False
         if store_path and os.path.exists(store_path):
             self._load()
@@ -420,6 +430,46 @@ class DurableOperationRegistry:
                 if flock:
                     flock.close()
 
+    @contextmanager
+    def settlement_lock(
+        self, idempotency_key: str, *, require_persistent: bool = True,
+    ):
+        """Serialize settlement; require cross-process durability when requested.
+
+        File-backed registries use a per-operation OS lock spanning the full
+        read/mutate/persist/transition sequence. An in-memory registry may use
+        a per-key process-local lock only for legacy in-memory budget mode;
+        callers settling a durable backend must set require_persistent=True.
+        """
+        if not self._store_path:
+            if require_persistent:
+                raise RuntimeError(
+                    "Durable budget settlement requires a persistent operation registry."
+                )
+            with self._local_settlement_locks_guard:
+                lock = self._local_settlement_locks.setdefault(
+                    idempotency_key, threading.Lock(),
+                )
+            with lock:
+                yield
+            return
+        if fcntl is None:
+            raise RuntimeError(
+                "Cross-process settlement requires fcntl; refusing unsafe settlement."
+            )
+        digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+        lock_path = f"{self._store_path}.{digest}.settlement.lock"
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        lock_file = os.fdopen(fd, "r+")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
+
     def get(self, idempotency_key: str) -> OperationRecord | None:
         with self._lock:
             # Reload from disk to see the latest state from other processes
@@ -499,12 +549,17 @@ class DurableOperationRegistry:
                 if flock:
                     flock.close()
 
-    def set_budget_flags(self, idempotency_key: str, **flags: bool) -> bool:
-        """Atomically update and persist budget ownership flags."""
-        allowed = {"budget_reserved", "budget_committed"}
+    def set_budget_flags(self, idempotency_key: str, **flags) -> bool:
+        """Atomically persist budget flags and the durable backend reservation identity."""
+        allowed = {"budget_reserved", "budget_committed", "reservation_id"}
         unknown = set(flags) - allowed
         if unknown:
             raise ValueError(f"unknown budget flag(s): {sorted(unknown)}")
+        if "reservation_id" in flags and not isinstance(flags["reservation_id"], str):
+            raise ValueError("reservation_id must be a string")
+        for name in ("budget_reserved", "budget_committed"):
+            if name in flags and not isinstance(flags[name], bool):
+                raise ValueError(f"{name} must be a bool")
 
         with self._lock:
             if self._corrupted:
@@ -525,7 +580,7 @@ class DurableOperationRegistry:
 
                 previous = {name: getattr(record, name) for name in flags}
                 for name, value in flags.items():
-                    setattr(record, name, bool(value))
+                    setattr(record, name, bool(value) if name in ("budget_reserved", "budget_committed") else value)
                 desired = {name: getattr(record, name) for name in flags}
                 try:
                     self._persist()

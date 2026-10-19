@@ -239,7 +239,8 @@ class _RaftStateMachine(SyncObj):
             return "CORRUPT_RESERVATION_STATE"
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
-        if rec["state"] not in ("RESERVED", "UNKNOWN"):
+        if rec["state"] != "RESERVED":
+            # UNKNOWN is ambiguous; release requires verified RESERVED state.
             return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
         if res is None:
