@@ -32,6 +32,7 @@ import logging
 import time
 import asyncio
 import urllib.request
+from urllib.parse import urlparse
 import urllib.error
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -875,6 +876,14 @@ class ConsensusBroadcast:
 
     @staticmethod
     def _http_post(url: str, payload: bytes, api_token: str = "") -> Dict:
+        # A bearer token must never traverse plaintext transport. Peer URLs
+        # are deployment trust boundaries; require HTTPS (with certificate
+        # validation) before attaching credentials or making a request.
+        parsed = urlparse(url)
+        if parsed.scheme.lower() != "https" or not parsed.hostname:
+            raise LedgerIntegrityError(
+                "Peer transport must use HTTPS; plaintext HTTP URLs are refused."
+            )
         headers = {"Content-Type": "application/json"}
         if api_token:
             headers["Authorization"] = f"Bearer {api_token}"
