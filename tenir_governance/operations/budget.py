@@ -82,6 +82,7 @@ class InProcessBudgetCoordinator:
     def __init__(self):
         self._resources: dict[str, any] = {}
         self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
 
     def register(self, resource) -> None:
         """Register once without replacing live accounting or synchronization."""
@@ -104,9 +105,12 @@ class InProcessBudgetCoordinator:
         return self._resources.get(resource_id)
 
     def get_lock(self, resource_id: str) -> threading.Lock:
-        if resource_id not in self._locks:
-            self._locks[resource_id] = threading.Lock()
-        return self._locks[resource_id]
+        # Protect the check-and-create sequence; concurrent first access must
+        # never hand out distinct locks for the same resource.
+        with self._locks_guard:
+            if resource_id not in self._locks:
+                self._locks[resource_id] = threading.Lock()
+            return self._locks[resource_id]
 
     def reserve(self, resource_id: str, amount: float) -> bool:
         resource = self._resources.get(resource_id)
