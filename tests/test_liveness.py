@@ -4,7 +4,7 @@ These tests verify that operations on the ConsensusBackend adapter terminate
 within a bounded time T_max when the system is healthy (single-host, no
 partition, quorum always available).
 
-For the FileLockConsensusBackend (single-host), the quorum is always available
+For the SingleHostLockBackend (single-host), the quorum is always available
 since there is no network partition possible within a single host. The tests
 verify that:
 
@@ -26,7 +26,7 @@ import time
 import pytest
 
 from tenir_governance.operations.consensus_backend import (
-    FileLockConsensusBackend,
+    SingleHostLockBackend,
     ReservationResult,
     CommitResult,
     ReleaseResult,
@@ -42,7 +42,7 @@ class TestLivenessTermination:
 
     def test_reserve_terminates_within_T_max(self, tmp_path):
         """reserve() must complete within T_max."""
-        backend = FileLockConsensusBackend(str(tmp_path))
+        backend = SingleHostLockBackend(str(tmp_path))
         backend.register_resource("res1", 100)
 
         start = time.monotonic()
@@ -54,7 +54,7 @@ class TestLivenessTermination:
 
     def test_commit_terminates_within_T_max(self, tmp_path):
         """commit() must complete within T_max."""
-        backend = FileLockConsensusBackend(str(tmp_path))
+        backend = SingleHostLockBackend(str(tmp_path))
         backend.register_resource("res1", 100)
         r = backend.reserve("key1", 30, "res1")
 
@@ -67,7 +67,7 @@ class TestLivenessTermination:
 
     def test_release_terminates_within_T_max(self, tmp_path):
         """release() must complete within T_max."""
-        backend = FileLockConsensusBackend(str(tmp_path))
+        backend = SingleHostLockBackend(str(tmp_path))
         backend.register_resource("res1", 100)
         r = backend.reserve("key1", 30, "res1")
 
@@ -80,7 +80,7 @@ class TestLivenessTermination:
 
     def test_get_state_terminates_within_T_max(self, tmp_path):
         """get_state() must complete within T_max (it's a pure read)."""
-        backend = FileLockConsensusBackend(str(tmp_path))
+        backend = SingleHostLockBackend(str(tmp_path))
         backend.register_resource("res1", 100)
 
         start = time.monotonic()
@@ -96,7 +96,7 @@ class TestLivenessTermination:
         This is the core liveness test: under quorum (single-host, always
         available), no operation should hang indefinitely.
         """
-        backend = FileLockConsensusBackend(str(tmp_path))
+        backend = SingleHostLockBackend(str(tmp_path))
         backend.register_resource("res1", 1000)
 
         results = []
@@ -134,7 +134,7 @@ class TestLivenessTermination:
 
     def test_max_latency_under_load(self, tmp_path):
         """Under concurrent load, max latency must stay under T_max."""
-        backend = FileLockConsensusBackend(str(tmp_path))
+        backend = SingleHostLockBackend(str(tmp_path))
         backend.register_resource("res1", 10000)
 
         latencies = []
@@ -165,7 +165,7 @@ class TestReconciliationLiveness:
         def provider(key):
             return True
 
-        backend = FileLockConsensusBackend(str(tmp_path), provider_reconcile=provider)
+        backend = SingleHostLockBackend(str(tmp_path), provider_reconcile=provider)
         backend.register_resource("res1", 100)
         backend.reserve("key1", 30, "res1")
 
@@ -181,7 +181,7 @@ class TestReconciliationLiveness:
         def provider(key):
             return False
 
-        backend = FileLockConsensusBackend(str(tmp_path), provider_reconcile=provider)
+        backend = SingleHostLockBackend(str(tmp_path), provider_reconcile=provider)
         backend.register_resource("res1", 100)
         backend.reserve("key1", 30, "res1")
 
@@ -194,7 +194,7 @@ class TestReconciliationLiveness:
 
     def test_reconcile_unresolved_terminates(self, tmp_path):
         """reconcile() with no provider must terminate (returns UNRESOLVED)."""
-        backend = FileLockConsensusBackend(str(tmp_path))
+        backend = SingleHostLockBackend(str(tmp_path))
         backend.register_resource("res1", 100)
         backend.reserve("key1", 30, "res1")
 
@@ -207,7 +207,7 @@ class TestReconciliationLiveness:
 
     def test_reconcile_not_found_terminates(self, tmp_path):
         """reconcile() for non-existent key must terminate immediately."""
-        backend = FileLockConsensusBackend(str(tmp_path))
+        backend = SingleHostLockBackend(str(tmp_path))
         backend.register_resource("res1", 100)
 
         start = time.monotonic()
@@ -228,7 +228,7 @@ class TestReconciliationLiveness:
             time.sleep(0.1)  # Simulate slow provider
             return None  # Indeterminate
 
-        backend = FileLockConsensusBackend(str(tmp_path), provider_reconcile=slow_provider)
+        backend = SingleHostLockBackend(str(tmp_path), provider_reconcile=slow_provider)
         backend.register_resource("res1", 100)
         backend.reserve("key1", 30, "res1")
 
@@ -249,7 +249,7 @@ class TestLivenessConditional:
         This is safety, not liveness violation: the operation terminates
         with INSUFFICIENT_BUDGET, it doesn't block.
         """
-        backend = FileLockConsensusBackend(str(tmp_path))
+        backend = SingleHostLockBackend(str(tmp_path))
         backend.register_resource("res1", 100)
         backend.reserve("key1", 100, "res1")  # Exhaust budget
 
@@ -262,7 +262,7 @@ class TestLivenessConditional:
 
     def test_commit_nonexistent_returns_immediately(self, tmp_path):
         """commit() on non-existent reservation returns immediately."""
-        backend = FileLockConsensusBackend(str(tmp_path))
+        backend = SingleHostLockBackend(str(tmp_path))
         backend.register_resource("res1", 100)
 
         start = time.monotonic()
@@ -274,7 +274,7 @@ class TestLivenessConditional:
 
     def test_double_commit_returns_immediately(self, tmp_path):
         """Already-committed reservation returns ALREADY_COMMITTED immediately."""
-        backend = FileLockConsensusBackend(str(tmp_path))
+        backend = SingleHostLockBackend(str(tmp_path))
         backend.register_resource("res1", 100)
         r = backend.reserve("key1", 30, "res1")
         backend.commit(r.reservation_id)
@@ -296,7 +296,7 @@ class TestLinearizabilityWithLiveness:
         All operations should terminate (liveness) and the final state
         should be consistent (safety/linearizability).
         """
-        backend = FileLockConsensusBackend(str(tmp_path))
+        backend = SingleHostLockBackend(str(tmp_path))
         backend.register_resource("res1", 100)
 
         num_ops = 20

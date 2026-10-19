@@ -108,9 +108,9 @@ class ConsensusBackend(Protocol):
         ...
 
 
-# --- Reference adapter: FileLockConsensusBackend ---
+# --- Reference adapter: SingleHostLockBackend ---
 
-class FileLockConsensusBackend:
+class SingleHostLockBackend:
     """Reference ConsensusBackend using file-lock coordination.
 
     Wraps DurableBudgetCoordinator for reserve/commit/release and adds
@@ -369,3 +369,12 @@ class FileLockConsensusBackend:
             capacity=int(state["capacity"]),
             reservations=res_list,
         )
+
+# --- Backward-compatible alias (deprecated) ---
+# FileLockConsensusBackend is the old name. It is kept for backward
+# compatibility but is deprecated. Use SingleHostLockBackend instead.
+# The name was changed because 'Consensus' in the class name could be
+# confused with distributed consensus algorithms (Raft, Paxos, PBFT).
+# This backend is a single-host file-lock coordination point, not a
+# distributed consensus implementation.
+FileLockConsensusBackend = SingleHostLockBackend
