@@ -982,3 +982,83 @@ class TestLinearizability:
         assert state.committed == 30
         assert state.reserved == 20
         assert state.reserved + state.committed <= state.capacity
+
+# ---------------------------------------------------------------------------
+# List-1 regressions: I8, deterministic state, validation and idempotency
+# ---------------------------------------------------------------------------
+
+class TestListOneRegressions:
+    def test_reconcile_commit_after_release_cannot_overconsume_budget(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader is not None
+        assert leader.register_resource("budget-I8-L1", 100) == "REGISTERED"
+
+        a = leader.reserve("late-effect-A", 100, "budget-I8-L1")
+        assert a.status == "RESERVED"
+        assert leader.release(a.reservation_id).status == "RELEASED"
+        b = leader.reserve("active-B", 100, "budget-I8-L1")
+        assert b.status == "RESERVED"
+
+        result = leader._raft.reconcile_commit(a.reservation_id, sync=True, timeout=10.0)
+        assert result == "RECONCILE_CONFLICT"
+        time.sleep(0.4)
+        for node in cluster:
+            state = node.get_state("budget-I8-L1")
+            assert state.reserved == 100
+            assert state.committed == 0
+            assert state.reserved + state.committed <= state.capacity
+            by_id = {r["reservation_id"]: r for r in state.reservations}
+            assert by_id[a.reservation_id]["state"] == "RELEASED"
+            assert by_id[b.reservation_id]["state"] == "RESERVED"
+
+    def test_idempotent_reserve_returns_actual_terminal_state(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-IDEM-L1", 100) == "REGISTERED"
+        first = leader.reserve("same-key", 25, "budget-IDEM-L1")
+        assert first.status == "RESERVED"
+        assert leader.commit(first.reservation_id).status == "COMMITTED"
+
+        replay = leader.reserve("same-key", 25, "budget-IDEM-L1")
+        assert replay.status == "COMMITTED"
+        assert replay.reservation_id == first.reservation_id
+        state = leader.get_state("budget-IDEM-L1")
+        assert state.reserved == 0
+        assert state.committed == 25
+        assert state.reserved + state.committed <= state.capacity
+
+    @pytest.mark.parametrize("amount", [0, -1, -0.01, float("nan"), float("inf"), float("-inf"), "abc", None, True, False, "1e10000"])
+    def test_invalid_amount_rejected_without_mutation(self, cluster, amount):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-AMOUNT-L1", 100) == "REGISTERED"
+        result = leader.reserve("invalid-amount", amount, "budget-AMOUNT-L1")
+        assert result.status == "INVALID_AMOUNT"
+        state = leader.get_state("budget-AMOUNT-L1")
+        assert state.reserved == 0
+        assert state.committed == 0
+
+    def test_resource_reregistration_preserves_accounting_and_capacity(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-REG-L1", 100) == "REGISTERED"
+        reservation = leader.reserve("held", 40, "budget-REG-L1")
+        assert reservation.status == "RESERVED"
+        assert leader.register_resource("budget-REG-L1", 100) == "ALREADY_REGISTERED"
+        assert leader.register_resource("budget-REG-L1", 50) == "RESOURCE_CONFLICT"
+        state = leader.get_state("budget-REG-L1")
+        assert state.capacity == 100
+        assert state.reserved == 40
+        assert state.committed == 0
+
+    def test_logical_clock_and_transition_metadata_replicate_identically(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-CLOCK-L1", 100) == "REGISTERED"
+        reservation = leader.reserve("clock-key", 20, "budget-CLOCK-L1")
+        assert reservation.status == "RESERVED"
+        assert leader.commit(reservation.reservation_id).status == "COMMITTED"
+        time.sleep(0.4)
+        states = [node._raft for node in cluster]
+        clocks = [sm._logical_clock for sm in states]
+        assert len(set(clocks)) == 1
+        records = [sm._reservations[reservation.reservation_id] for sm in states]
+        assert len({r["created_at_logical"] for r in records}) == 1
+        assert len({r["committed_at_logical"] for r in records}) == 1
+        assert all(r["committed_at_logical"] > r["created_at_logical"] for r in records)
