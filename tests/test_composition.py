@@ -507,6 +507,22 @@ class TestDualKernelGovernor:
         assert gov.registry.get(p.idempotency_key) is None
         assert state.resources["budget"].reserved == 0.0
 
+    def test_fail_does_not_release_unowned_budget(self):
+        gov, state = self._setup()
+        assert state.resources["budget"].reserve(10.0)
+        from tenir_governance.operations import OperationRecord
+        key = "fail-without-budget-ownership"
+        record = OperationRecord(
+            idempotency_key=key, passage_id="p-fail-unowned",
+            agent_id="alice", action_type="payment", amount=10.0,
+            resource_id="budget",
+        )
+        assert gov.registry.register(record)
+        assert gov.fail(key, resource_id="budget", amount=10.0)
+        assert gov.registry.get(key).state == OperationState.FAILED
+        assert state.resources["budget"].reserved == 10.0
+        assert state.resources["budget"].consumed == 0.0
+
     def test_dispatch_rejects_amount_mismatch_without_committing(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
