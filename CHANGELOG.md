@@ -15,7 +15,9 @@
 - Validate governor amounts before budget gating; bind dispatch resource and amount to the adjudicated durable record; block dispatch under QUARANTINE_LOCK and serialize quarantine transitions against dispatch/provider execution.
 - Add regression tests for legacy state/journal compatibility, large-capacity decimal precision, invalid amounts, dispatch identity mismatch, pre-reserved operations under quarantine, empty Stripe search, concurrent reconciliation, and linearizability-checker branch isolation.
 - Keep Stripe reconciliation UNKNOWN when search returns no result; an empty search is not proof of non-execution. Serialize reconciliation state transitions with budget release/refund to prevent duplicate refunds.
-- Prevent live resource replacement from orphaning reservations or swapping the resource lock; correct the sequential oracle so COMMITTED cannot follow RELEASED.
+- Prevent live resource replacement from orphaning reservations or swapping the resource lock; correct the sequential oracle so COMMITTED cannot follow RELEASED, bind concrete reservation IDs across replay/commit, and exercise the actual concurrent Raft history.
+- Normalize Decimal input before the single-host backend persists reservation JSON; add regressions for Decimal idempotency, HOLD identity preservation, and preventing a HOLD veto from releasing another operation’s reservation.
+- Replace fixed leader-failover sleeps with bounded polling across the three- and five-node tests.
 
 ### Test perimeter
 - Reproduction: `python -m pip install -e ".[test]" "pysyncobj==0.3.17" && pytest -q tests/test_raft_backend.py`
