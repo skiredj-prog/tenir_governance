@@ -297,6 +297,67 @@ class TestDualKernelGovernor:
         assert state.get_lock("budget") is original_lock
         assert original.reserved == 10.0
 
+    def test_active_provider_call_does_not_block_quarantine_or_reconciliation(self):
+        from types import SimpleNamespace
+        from tenir_governance.operations.provider import ProviderOutcome
+
+        started = threading.Event()
+        finish = threading.Event()
+
+        class BlockingProvider:
+            def execute(self, **_kwargs):
+                started.set()
+                assert finish.wait(3), "test provider was not released"
+                return SimpleNamespace(
+                    outcome=ProviderOutcome.CONFIRMED,
+                    provider_reference="provider-1",
+                    latency_ms=1,
+                    error=None,
+                )
+
+            def reconcile(self, **_kwargs):
+                raise AssertionError("reconcile must not race active execute")
+
+        gov, state = self._setup()
+        gov.provider = BlockingProvider()
+        passage = Passage(
+            agent_id="alice", action_type="payment", amount=10.0,
+            idempotency_key="active-provider-race",
+        )
+        result = gov.adjudicate(
+            passage, pressure=0.2, velocity=0.3, capacity=1.0,
+            resource_id="budget", amount=10.0,
+        )
+        assert result["operation_state"] == OperationState.RESERVED.value
+
+        worker = threading.Thread(
+            target=lambda: gov.dispatch_and_execute(
+                "active-provider-race", "budget", 10.0,
+            ),
+            daemon=True,
+        )
+        worker.start()
+        assert started.wait(2), "provider.execute did not start"
+
+        quarantine_done = threading.Event()
+        locker = threading.Thread(
+            target=lambda: (state.lock_quarantine("test"), quarantine_done.set()),
+            daemon=True,
+        )
+        locker.start()
+        assert quarantine_done.wait(1), (
+            "provider I/O must not hold the global quarantine lock"
+        )
+        assert state.quarantine_active is True
+
+        reconciliation = gov.reconcile_unknown("active-provider-race")
+        assert reconciliation["reconciled"] is False
+        assert "still active" in reconciliation["reason"]
+
+        finish.set()
+        worker.join(2)
+        assert not worker.is_alive()
+
     def test_safe_payment_both_pass(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
