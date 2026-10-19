@@ -11,6 +11,7 @@ on:
       - "tests/test_composition.py"
       - "tests/test_provider.py"
       - "tests/test_linearizability_checker.py"
+      - "tests/test_liveness.py"
       - "r5_hardened/IRON_OMEGA_R5/r5_server.py"
       - "r5_hardened/IRON_OMEGA_R5/r5_distributed_crypto/merkle/distributed_ledger.py"
       - "r5_hardened/IRON_OMEGA_R5/test_r5_all.py"
@@ -50,3 +51,5 @@ jobs:
         run: pytest -q tests/test_provider.py
       - name: Run linearizability checker regressions
         run: pytest -q tests/test_linearizability_checker.py
+      - name: Run single-host budget regressions
+        run: pytest -q tests/test_liveness.py
