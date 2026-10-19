@@ -1081,3 +1081,76 @@ def test_cross_instance_confirm_and_proven_fail_cannot_diverge_durable_budget(tm
         assert final_state.reserved == Decimal("0")
     else:
         raise AssertionError(f"Unexpected terminal race result: {final_record.state}")
+
+
+
+def test_subprocess_confirm_and_proven_fail_serialize_durable_budget(tmp_path):
+    """Separate OS processes must not settle one reservation in conflicting ways."""
+    import multiprocessing
+    import queue
+    from tenir_governance.operations.registry import DurableOperationRegistry
+
+    try:
+        ctx = multiprocessing.get_context("fork")
+    except ValueError:
+        pytest.skip("fork-based process isolation is unavailable on this platform")
+
+    registry_path = str(tmp_path / "subprocess-operations.json")
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path)
+    gov.registry = DurableOperationRegistry(registry_path)
+    gov.hold_manager.registry = gov.registry
+    passage, _result = _adjudicate_durable_budget(gov)
+    key = passage.idempotency_key
+    assert gov.dispatch(key, "budget", 10.0)["dispatched"] is True
+
+    start = ctx.Barrier(3)
+    results = ctx.Queue()
+
+    def settle(kind):
+        try:
+            start.wait(timeout=10)
+            if kind == "confirm":
+                value = gov.confirm(key)
+            else:
+                value = gov.fail(
+                    key, "budget", 10.0, authoritative_non_execution=True,
+                )
+            results.put((kind, value, None))
+        except BaseException as exc:
+            results.put((kind, None, repr(exc)))
+
+    processes = [
+        ctx.Process(target=settle, args=("confirm",)),
+        ctx.Process(target=settle, args=("fail",)),
+    ]
+    for process in processes:
+        process.start()
+    start.wait(timeout=10)
+    for process in processes:
+        process.join(timeout=15)
+        assert not process.is_alive(), "settlement process hung"
+        assert process.exitcode == 0
+
+    outcomes = {}
+    for _ in processes:
+        try:
+            kind, value, error = results.get(timeout=5)
+        except queue.Empty:
+            pytest.fail("settlement process returned no result")
+        assert error is None, error
+        outcomes[kind] = value
+
+    final_record = DurableOperationRegistry(registry_path).get(key)
+    final_state = SingleHostLockBackend(str(tmp_path)).get_state("budget")
+    if final_record.state == OperationState.CONFIRMED:
+        assert outcomes == {"confirm": True, "fail": False}
+        assert final_record.budget_committed is True
+        assert final_state.committed == Decimal("10.0")
+        assert final_state.reserved == Decimal("0")
+    elif final_record.state == OperationState.FAILED:
+        assert outcomes == {"confirm": False, "fail": True}
+        assert final_record.budget_committed is False
+        assert final_state.committed == Decimal("0")
+        assert final_state.reserved == Decimal("0")
+    else:
+        raise AssertionError(f"Unexpected terminal race result: {final_record.state}")
