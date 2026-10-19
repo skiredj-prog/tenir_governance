@@ -187,11 +187,11 @@ class TestMembraneCoreInvariants:
 class TestNomenclature:
 
     def test_cave_canonical_definition(self):
-        """CAVE must be Context/Action/Value/Effect — NOT Control/Veto."""
+        """CAVE must be Control/Aim/Veto/Epistemics — NOT Context/Effect."""
         exp = CAVEFieldNames.EXPANSION
-        assert "Context" in exp and "Action" in exp and "Value" in exp and "Effect" in exp
-        assert "Control" not in exp, "Deprecated CAVE variant 'Control' found"
-        assert "Veto" not in exp, "Deprecated CAVE variant 'Veto' found"
+        assert "Control" in exp and "Aim" in exp and "Veto" in exp and "Epistemics" in exp
+        assert "Context" not in exp, "Deprecated CAVE variant 'Context' found"
+        assert "Effect" not in exp, "Deprecated CAVE variant 'Effect' found"
 
     def test_operating_mode_r4_r5_alignment(self):
         r4_to_r5 = OperatingModeNames.R4_TO_R5

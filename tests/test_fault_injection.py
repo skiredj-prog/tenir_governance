@@ -20,7 +20,7 @@ from tenir_governance.operations import (
     DurableOperationRegistry, OperationRecord, OperationState,
 )
 
-# These imports require modules not yet built in the 5.2.0 repo
+# These imports require modules not yet built in the kernel repo
 # (ScoringKernel, TransitionMembrane, MembraneState, DualKernelGovernor).
 # Governor-dependent tests are skipped; registry-specific tests remain active.
 try:
@@ -45,7 +45,7 @@ except ImportError:
 
 _SKIP = pytest.mark.skipif(
     not _GOVERNOR_AVAILABLE,
-    reason="DualKernelGovernor / membrane / scoring not yet built in 5.2.0 repo",
+    reason="DualKernelGovernor / membrane / scoring not yet built in the kernel repo",
 )
 
 

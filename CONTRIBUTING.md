@@ -39,7 +39,7 @@ Please use [GitHub Issues](https://github.com/skiredj-prog/tenir-gov/issues) for
 ### Key Invariants (Do Not Break)
 
 - **POL-001**: All membrane decisions must flow through `PolicyEngine.evaluate_membrane()`. No local threshold literals.
-- **NOM-001**: `CAVEFieldNames.EXPANSION` must expand to Context / Action / Value / Effect.
+- **NOM-001**: `CAVEFieldNames.EXPANSION` must expand to Control / Aim / Veto / Epistemics.
 - **NOM-002**: `OperatingModeNames.R4_TO_R5` must map all four R4 modes.
 - Policy fingerprint for `PolicyEngine.default()` is `d083e0b82a16c04d`. Any intentional policy change must update this fingerprint and bump the policy version string.
 

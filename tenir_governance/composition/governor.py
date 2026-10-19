@@ -7,9 +7,9 @@
 
 This is the composition-layer governor. It replaces the prototype's
 DualKernelGovernor (which used the simplified ScoringKernel) with one that
-delegates the continuous-risk evaluation to 5.2.0's TenirKernel.
+delegates the continuous-risk evaluation to the TenirKernel.
 
-Bridge mapping (prototype ScoringKernel → 5.2.0 TenirKernel):
+Bridge mapping (prototype ScoringKernel → TenirKernel):
     ScoringKernel.adjudicate(pressure, velocity, capacity, option_space,
                              authority, evidence_quality,
                              irreversibility_materiality)

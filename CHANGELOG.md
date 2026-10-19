@@ -6,6 +6,31 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [5.4.3] — 2026-10-19 — Patch: CAVE Doctrinal Alignment, Metadata Fixes
+
+This patch aligns the CAVE acronym to the doctrinal definition (Control / Aim / Veto / Epistemics), fixes stale metadata across the corpus, and updates documentation references.
+
+### Changed
+- **CAVE canonical definition flipped** — `CAVEFieldNames.EXPANSION` is now `Control · Aim · Veto · Epistemics` (doctrinal definition). The former runtime definition `Context · Action · Value · Effect` is now in `FORBIDDEN_EXPANSIONS`. The copy-lint CI step now blocks the old variant.
+- **`.zenodo.json`** — description and notes updated from 5.2.0 references to 5.4.3, including I8 budget fix and CAVE alignment.
+- **`CITATION.cff`** — version bumped to 5.4.3, date to 2026-10-19, abstract updated from 5.2.0 reference.
+- **`SECURITY.md`** — all pip install examples updated from 5.4.1 to 5.4.3.
+- **`README.md`** — proof paragraph updated to v5.4.2 with I8 budget fix and 669 tests; test count table updated from 663 to 669.
+- **`demo.py`** — install instructions updated to 5.4.3.
+- **`tenir_kernel/__init__.py`** — version bumped from 5.2.0 to 5.4.3.
+- **`tenir_governance/__init__.py`` — module docstring version updated from 5.2.0 to 5.4.3.
+- **`tenir_governance/composition/governor.py`** — comments referencing "5.2.0's TenirKernel" cleaned to remove stale version.
+- **`tests/test_cross_process.py`**, **`tests/test_fault_injection.py`** — skip reasons updated from "5.2.0 repo" to "kernel repo".
+- **`docs/manuscript.md`** — test count updated from 663 to 669, version references updated to v5.4.3, changelog table extended with 5.4.2 and 5.4.3 entries.
+- **`HARDENING_REPORT_v1.0.0-rc2.md`** — CAVE definition and NOM-001 check updated to Control/Aim/Veto/Epistemics.
+- **`CONTRIBUTING.md`** — NOM-001 invariant updated to Control / Aim / Veto / Epistemics.
+
+### Tests
+- Total: 669 tests passing, 0 failures, 0 regressions.
+- CAVE flip verified: `test_cave_canonical_definition` and `test_deprecated_cave_always_blocks` both pass with the new definitions.
+
+---
+
 ## [5.4.2] — 2026-10-18 — Patch: Budget Coordination Fix
 
 This patch fixes two bugs in the I8 aggregate budget invariant and hardens the budget lifecycle.

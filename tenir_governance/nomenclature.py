@@ -290,16 +290,16 @@ class LedgerEntryTypes:
 # ─── CAVE MATRIX (CANONICAL, LOCKED) ─────────────────────────────────────────
 
 class CAVEFieldNames:
-    """CAVE = Context · Action · Value · Effect. NOT Control/Aim/Veto/Epistemics."""
-    CONTEXT = "context"
-    ACTION  = "action"
-    VALUE   = "value"
-    EFFECT  = "effect"
+    """CAVE = Control · Aim · Veto · Epistemics. NOT Context/Action/Value/Effect."""
+    CONTROL    = "control"
+    AIM        = "aim"
+    VETO       = "veto"
+    EPISTEMICS = "epistemics"
     ACRONYM   = "CAVE"
-    EXPANSION = "Context · Action · Value · Effect"
+    EXPANSION = "Control · Aim · Veto · Epistemics"
     FORBIDDEN_EXPANSIONS: Set[str] = {
-        "Control · Aim · Veto · Epistemics",
-        "Control/Aim/Veto/Epistemics",
+        "Context · Action · Value · Effect",
+        "Context/Action/Value/Effect",
     }
 
 

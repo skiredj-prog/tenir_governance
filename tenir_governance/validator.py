@@ -309,10 +309,10 @@ class TENIRValidator:
     def _check_nomenclature_alignment(self) -> None:
         """Verify CAVE canonical definition is consistent."""
         from .nomenclature import CAVEFieldNames
-        # The canonical expansion must NOT contain 'Control' or 'Veto' (deprecated variant)
+        # The canonical expansion must NOT contain 'Context' or 'Effect' (deprecated variant)
         expansion = CAVEFieldNames.EXPANSION
-        if "Control" in expansion or "Veto" in expansion:
-            self._fail("NOM-001", "CAVE definition contains deprecated 'Control/Veto' variant",
+        if "Context" in expansion or "Effect" in expansion:
+            self._fail("NOM-001", "CAVE definition contains deprecated 'Context/Effect' variant",
                        f"Found in: {expansion!r}")
         else:
             self._pass("NOM-001", f"CAVE canonical definition is correct: {expansion!r}")

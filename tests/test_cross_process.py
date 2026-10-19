@@ -90,7 +90,7 @@ def _child_dispatch(store_path, key, result_queue):
     result_queue.put(("dispatch", key, "dispatched" if success else "blocked"))
 
 
-# Governor-dependent tests require modules not yet built in the 5.2.0 repo
+# Governor-dependent tests require modules not yet built in the kernel repo
 # (ScoringKernel, TransitionMembrane, MembraneState, DualKernelGovernor).
 try:
     from tenir_governance import (
@@ -106,7 +106,7 @@ except ImportError:
 
 _SKIP = pytest.mark.skipif(
     not _GOVERNOR_AVAILABLE,
-    reason="DualKernelGovernor / membrane / scoring not yet built in 5.2.0 repo",
+    reason="DualKernelGovernor / membrane / scoring not yet built in the kernel repo",
 )
 
 

@@ -38,8 +38,8 @@ throughout via `OPERATOR_LABEL` and `PUBLIC_LABEL` dicts on every class.
 
 **Resolved inconsistencies:**
 
-- `CAVE` is locked to `Context · Action · Value · Effect`. The earlier
-  `Control · Aim · Veto · Epistemics` variant is in `FORBIDDEN_EXPANSIONS` and
+- `CAVE` is locked to `Control · Aim · Veto · Epistemics`. The earlier
+  `Context · Action · Value · Effect` variant is in `FORBIDDEN_EXPANSIONS` and
   triggers an immediate BLOCK from the copy-lint CI step.
 - R4 `OperatingMode` enum values map cleanly to R5 canonical strings via
   `OperatingModeNames.R4_TO_R5`.
@@ -80,7 +80,7 @@ checks. It is both a standalone CLI tool and a pytest fixture:
 | MEM-001 | Membrane decisions monotone non-decreasing as S decreases |
 | MEM-002 | SHADOW→intended_block and ENFORCE→block differentiated at TAU breach |
 | CES-001 | All five CES states reachable from classifier |
-| NOM-001 | CAVE canonical definition is Context/Action/Value/Effect |
+| NOM-001 | CAVE canonical definition is Control/Aim/Veto/Epistemics |
 | NOM-002 | R4↔R5 mode mapping covers all modes |
 
 The `.github/workflows/tenir-ci.yml` workflow runs five jobs

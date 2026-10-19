@@ -16,10 +16,10 @@ Usage:
     python demo.py
 
 Requirements:
-    pip install tenir-governance==5.4.1
+    pip install tenir-governance==5.4.3
 
     Or from source:
-    pip install -e . (from the tenir-gov-5.2.0 directory)
+    pip install -e . (from the tenir-governance directory)
 """
 from __future__ import annotations
 
