@@ -943,7 +943,9 @@ class DualKernelGovernor:
         must be reconciled instead and must never be refunded speculatively.
         """
         record = self.registry.get(idempotency_key)
-        if record is None:
+        if record is None or record.state == OperationState.UNKNOWN:
+            # An UNKNOWN external outcome is not evidence of non-execution.
+            # It must go through reconciliation; never resolve/refund it here.
             return False
 
         durable_resource_id = record.resource_id or None
