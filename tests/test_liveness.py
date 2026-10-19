@@ -390,6 +390,66 @@ class TestLivenessTermination:
 class TestReconciliationLiveness:
     """Verify that reconciliation terminates (C2.3)."""
 
+    def test_reconcile_commit_crash_recovers_budget_and_registry(self, tmp_path, monkeypatch):
+        class SimulatedCrash(BaseException):
+            pass
+
+        backend = SingleHostLockBackend(
+            str(tmp_path), provider_reconcile=lambda key: True
+        )
+        backend.register_resource("reconcile-commit-budget", Decimal("1"))
+        reservation = backend.reserve(
+            "reconcile-commit-key", Decimal("0.1"), "reconcile-commit-budget"
+        )
+        assert reservation.status == "RESERVED"
+
+        def crash_before_registry_write(_reservations):
+            raise SimulatedCrash("crash after reconciliation budget commit")
+
+        monkeypatch.setattr(backend, "_persist_reservations", crash_before_registry_write)
+        with pytest.raises(SimulatedCrash):
+            backend.reconcile("reconcile-commit-key")
+
+        reopened = SingleHostLockBackend(str(tmp_path))
+        state = reopened.get_state("reconcile-commit-budget")
+        record = reopened._load_reservations()[reservation.reservation_id]
+        assert record["state"] == "COMMITTED"
+        assert state.reserved == 0
+        assert Decimal(str(state.committed)) == Decimal("0.1")
+        assert not (tmp_path / "transaction.json").exists()
+
+    def test_reconcile_release_crash_recovers_without_double_release(self, tmp_path, monkeypatch):
+        class SimulatedCrash(BaseException):
+            pass
+
+        backend = SingleHostLockBackend(
+            str(tmp_path), provider_reconcile=lambda key: False
+        )
+        backend.register_resource("reconcile-release-budget", Decimal("1"))
+        reservation = backend.reserve(
+            "reconcile-release-key", Decimal("0.1"), "reconcile-release-budget"
+        )
+        other = backend.reserve(
+            "reconcile-release-other-key", Decimal("0.2"), "reconcile-release-budget"
+        )
+        assert reservation.status == other.status == "RESERVED"
+
+        def crash_before_registry_write(_reservations):
+            raise SimulatedCrash("crash after reconciliation budget release")
+
+        monkeypatch.setattr(backend, "_persist_reservations", crash_before_registry_write)
+        with pytest.raises(SimulatedCrash):
+            backend.reconcile("reconcile-release-key")
+
+        reopened = SingleHostLockBackend(str(tmp_path))
+        state = reopened.get_state("reconcile-release-budget")
+        registry = reopened._load_reservations()
+        assert registry[reservation.reservation_id]["state"] == "RELEASED"
+        assert registry[other.reservation_id]["state"] == "RESERVED"
+        assert Decimal(str(state.reserved)) == Decimal("0.2")
+        assert state.committed == 0
+        assert not (tmp_path / "transaction.json").exists()
+
     def test_reconcile_confirmed_terminates(self, tmp_path):
         """reconcile() with provider returning True must terminate."""
         def provider(key):
