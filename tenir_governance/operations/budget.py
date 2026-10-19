@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import Protocol, runtime_checkable
 
 
@@ -156,6 +156,27 @@ except ImportError:
     fcntl = None  # Windows fallback
 
 
+def _decimal_precision(*values: Decimal) -> int:
+    """Choose enough precision to add/subtract finite Decimals without rounding."""
+    if not values:
+        return 28
+    highest_adjusted = max(value.adjusted() for value in values if value)
+    lowest_exponent = min(value.as_tuple().exponent for value in values)
+    return max(28, highest_adjusted - lowest_exponent + 2)
+
+
+def _decimal_add(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = _decimal_precision(left, right)
+        return left + right
+
+
+def _decimal_subtract(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = _decimal_precision(left, right)
+        return left - right
+
+
 class DurableBudgetCoordinator:
     """Cross-process budget coordination using fcntl.flock + durable JSON state.
 
@@ -214,7 +235,7 @@ class DurableBudgetCoordinator:
                         raise RuntimeError("Corrupt persisted budget state; registration refused.") from exc
                     if (
                         not all(v.is_finite() and v >= 0 for v in (old_capacity, reserved, consumed))
-                        or reserved + consumed > old_capacity
+                        or _decimal_add(reserved, consumed) > old_capacity
                     ):
                         raise RuntimeError("Corrupt persisted budget invariant; registration refused.")
                     if old_capacity != capacity:
@@ -232,7 +253,7 @@ class DurableBudgetCoordinator:
                     raise ValueError("Initial resource counters must be finite and non-negative.") from exc
                 if (
                     not reserved.is_finite() or not consumed.is_finite()
-                    or reserved < 0 or consumed < 0 or reserved + consumed > capacity
+                    or reserved < 0 or consumed < 0 or _decimal_add(reserved, consumed) > capacity
                 ):
                     raise ValueError("Initial resource counters violate the budget invariant.")
                 self._resources[resource.resource_id] = {
@@ -288,7 +309,7 @@ class DurableBudgetCoordinator:
                     raise ValueError(f"invalid counters for resource {resource_id!r}") from exc
                 if (
                     not all(v.is_finite() and v >= 0 for v in (capacity, reserved, consumed))
-                    or reserved + consumed > capacity
+                    or _decimal_add(reserved, consumed) > capacity
                 ):
                     raise ValueError(f"budget invariant invalid for resource {resource_id!r}")
                 normalized[resource_id] = {
@@ -330,7 +351,7 @@ class DurableBudgetCoordinator:
         r = self._resources.get(resource_id)
         if r is None:
             return False
-        available = r["capacity"] - r["reserved"] - r["consumed"]
+        available = _decimal_subtract(_decimal_subtract(r["capacity"], r["reserved"]), r["consumed"])
         return available >= amount
 
     def reserve(self, resource_id: str, amount: float) -> bool:
@@ -352,7 +373,7 @@ class DurableBudgetCoordinator:
                 if not self._reload_and_check(resource_id, amount):
                     return False
                 r = self._resources[resource_id]
-                r["reserved"] += amount
+                r["reserved"] = _decimal_add(r["reserved"], amount)
                 self._persist()
                 return True
             finally:
@@ -375,8 +396,8 @@ class DurableBudgetCoordinator:
                 r = self._resources.get(resource_id)
                 if r is None or r["reserved"] < amount:
                     return False
-                r["reserved"] -= amount
-                r["consumed"] += amount
+                r["reserved"] = _decimal_subtract(r["reserved"], amount)
+                r["consumed"] = _decimal_add(r["consumed"], amount)
                 self._persist()
                 return True
             finally:
@@ -399,7 +420,7 @@ class DurableBudgetCoordinator:
                 r = self._resources.get(resource_id)
                 if r is None:
                     return
-                r["reserved"] = max(Decimal("0"), r["reserved"] - amount)
+                r["reserved"] = max(Decimal("0"), _decimal_subtract(r["reserved"], amount))
                 self._persist()
             finally:
                 if flock:
@@ -415,7 +436,7 @@ class DurableBudgetCoordinator:
                 r = self._resources.get(resource_id)
                 if r is None or r["capacity"] <= 0:
                     return None
-                return float((r["consumed"] + r["reserved"]) / r["capacity"])
+                return float(_decimal_add(r["consumed"], r["reserved"]) / r["capacity"])
             finally:
                 if flock:
                     flock.close()
@@ -431,7 +452,7 @@ class DurableBudgetCoordinator:
                 if r is None:
                     return None
                 return {
-                    "available": float(r["capacity"] - r["reserved"] - r["consumed"]),
+                    "available": float(_decimal_subtract(_decimal_subtract(r["capacity"], r["reserved"]), r["consumed"])),
                     "reserved": float(r["reserved"]),
                     "consumed": float(r["consumed"]),
                     "capacity": float(r["capacity"]),
