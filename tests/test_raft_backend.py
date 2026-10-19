@@ -461,20 +461,11 @@ class TestLeaderFailover:
         leader.register_resource("budget-FO", 100)
         time.sleep(0.5)
 
-        # Crash the leader
+        # Crash the leader and poll for a bounded replacement election.
         leader.destroy()
-        time.sleep(2.0)  # Wait for election
+        new_leader = _wait_for_leader(cluster, exclude=leader, timeout=10.0)
 
-        # Find new leader among remaining nodes
-        new_leader = None
-        for node in cluster:
-            if node is leader:
-                continue
-            if node.is_leader():
-                new_leader = node
-                break
-
-        assert new_leader is not None, "No new leader elected after crash"
+        assert new_leader is not None, "No new leader elected within 10 seconds after crash"
 
         # Operations should work with new leader
         res = new_leader.reserve("key-1", 30, "budget-FO")
@@ -496,20 +487,11 @@ class TestLeaderFailover:
         assert leader.commit(res.reservation_id).status == "COMMITTED"
         time.sleep(0.5)
 
-        # Crash the leader
+        # Crash the leader and poll for a bounded replacement election.
         leader.destroy()
-        time.sleep(3.0)
+        new_leader = _wait_for_leader(cluster5, exclude=leader, timeout=10.0)
 
-        # Find new leader
-        new_leader = None
-        for node in cluster5:
-            if node is leader:
-                continue
-            if node.is_leader():
-                new_leader = node
-                break
-
-        assert new_leader is not None, "No new leader in 5-node cluster after crash"
+        assert new_leader is not None, "No new leader in 5-node cluster within 10 seconds"
 
         # I8 must still hold
         state = new_leader.get_state("budget-FO5")
