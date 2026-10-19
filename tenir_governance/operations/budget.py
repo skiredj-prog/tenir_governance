@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Protocol, runtime_checkable
 
 
@@ -182,7 +183,7 @@ class DurableBudgetCoordinator:
     def __init__(self, store_path: str | None = None):
         self._store_path = store_path
         self._lock = threading.Lock()
-        self._resources: dict[str, dict] = {}  # resource_id -> {capacity, reserved, consumed}
+        self._resources: dict[str, dict] = {}  # Decimal counters: capacity, reserved, consumed
         if store_path:
             self._load()
 
@@ -192,10 +193,10 @@ class DurableBudgetCoordinator:
         if isinstance(capacity, bool):
             raise ValueError("Resource capacity must be finite and non-negative.")
         try:
-            capacity = float(capacity)
-        except (TypeError, ValueError, OverflowError) as exc:
+            capacity = self._decimal(capacity)
+        except (TypeError, ValueError, InvalidOperation) as exc:
             raise ValueError("Resource capacity must be finite and non-negative.") from exc
-        if not math.isfinite(capacity) or capacity < 0:
+        if not capacity.is_finite() or capacity < 0:
             raise ValueError("Resource capacity must be finite and non-negative.")
 
         with self._lock:
@@ -206,13 +207,13 @@ class DurableBudgetCoordinator:
                 existing = self._resources.get(resource.resource_id)
                 if existing is not None:
                     try:
-                        old_capacity = float(existing["capacity"])
-                        reserved = float(existing["reserved"])
-                        consumed = float(existing["consumed"])
+                        old_capacity = self._decimal(existing["capacity"])
+                        reserved = self._decimal(existing["reserved"])
+                        consumed = self._decimal(existing["consumed"])
                     except (KeyError, TypeError, ValueError, OverflowError) as exc:
                         raise RuntimeError("Corrupt persisted budget state; registration refused.") from exc
                     if (
-                        not all(math.isfinite(v) and v >= 0 for v in (old_capacity, reserved, consumed))
+                        not all(v.is_finite() and v >= 0 for v in (old_capacity, reserved, consumed))
                         or reserved + consumed > old_capacity
                     ):
                         raise RuntimeError("Corrupt persisted budget invariant; registration refused.")
@@ -226,11 +227,11 @@ class DurableBudgetCoordinator:
                 reserved = getattr(resource, "reserved", 0.0)
                 consumed = getattr(resource, "consumed", 0.0)
                 try:
-                    reserved, consumed = float(reserved), float(consumed)
-                except (TypeError, ValueError, OverflowError) as exc:
+                    reserved, consumed = self._decimal(reserved), self._decimal(consumed)
+                except (TypeError, ValueError, InvalidOperation) as exc:
                     raise ValueError("Initial resource counters must be finite and non-negative.") from exc
                 if (
-                    not math.isfinite(reserved) or not math.isfinite(consumed)
+                    not reserved.is_finite() or not consumed.is_finite()
                     or reserved < 0 or consumed < 0 or reserved + consumed > capacity
                 ):
                     raise ValueError("Initial resource counters violate the budget invariant.")
@@ -241,6 +242,13 @@ class DurableBudgetCoordinator:
             finally:
                 if flock:
                     flock.close()
+
+    @staticmethod
+    def _decimal(value) -> Decimal:
+        """Parse accounting values without introducing binary-float rounding."""
+        if isinstance(value, bool):
+            raise InvalidOperation("boolean is not a budget amount")
+        return value if isinstance(value, Decimal) else Decimal(str(value))
 
     def get_resource(self, resource_id: str):
         """Return a lightweight view of the resource state."""
@@ -273,13 +281,13 @@ class DurableBudgetCoordinator:
                 if not isinstance(record, dict):
                     raise ValueError(f"invalid record for resource {resource_id!r}")
                 try:
-                    capacity = float(record["capacity"])
-                    reserved = float(record["reserved"])
-                    consumed = float(record["consumed"])
+                    capacity = self._decimal(record["capacity"])
+                    reserved = self._decimal(record["reserved"])
+                    consumed = self._decimal(record["consumed"])
                 except (KeyError, TypeError, ValueError, OverflowError) as exc:
                     raise ValueError(f"invalid counters for resource {resource_id!r}") from exc
                 if (
-                    not all(math.isfinite(v) and v >= 0 for v in (capacity, reserved, consumed))
+                    not all(v.is_finite() and v >= 0 for v in (capacity, reserved, consumed))
                     or reserved + consumed > capacity
                 ):
                     raise ValueError(f"budget invariant invalid for resource {resource_id!r}")
@@ -287,7 +295,7 @@ class DurableBudgetCoordinator:
                     "capacity": capacity, "reserved": reserved, "consumed": consumed,
                 }
             self._resources = normalized
-        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        except (json.JSONDecodeError, ValueError, TypeError, InvalidOperation) as exc:
             # Corrupt durable state is not equivalent to an empty budget.
             # Refuse the operation so registration cannot silently reset it.
             raise RuntimeError("Corrupted durable budget store; refusing operation.") from exc
@@ -297,8 +305,12 @@ class DurableBudgetCoordinator:
         if not self._store_path:
             return
         tmp = self._store_path + ".tmp"
+        serializable = {
+            resource_id: {key: str(value) for key, value in record.items()}
+            for resource_id, record in self._resources.items()
+        }
         with open(tmp, "w") as f:
-            json.dump(self._resources, f)
+            json.dump(serializable, f)
             f.flush()
             os.fsync(f.fileno())
         os.rename(tmp, self._store_path)
@@ -308,7 +320,7 @@ class DurableBudgetCoordinator:
         finally:
             os.close(dir_fd)
 
-    def _reload_and_check(self, resource_id: str, amount: float) -> bool:
+    def _reload_and_check(self, resource_id: str, amount: Decimal) -> bool:
         """Reload from disk under lock and check if amount is available.
         Returns True if available >= amount after reload.
         Does NOT mutate state — caller mutates after check passes.
@@ -328,6 +340,12 @@ class DurableBudgetCoordinator:
         changed state), checks availability, mutates, and persists.
         I8: reserved + consumed <= capacity is maintained.
         """
+        try:
+            amount = self._decimal(amount)
+        except (TypeError, ValueError, InvalidOperation):
+            return False
+        if not amount.is_finite() or amount <= 0:
+            return False
         with self._lock:
             flock = self._lock_file()
             try:
@@ -343,6 +361,12 @@ class DurableBudgetCoordinator:
 
     def commit(self, resource_id: str, amount: float) -> bool:
         """Move amount from reserved to consumed (cross-process atomic)."""
+        try:
+            amount = self._decimal(amount)
+        except (TypeError, ValueError, InvalidOperation):
+            return False
+        if not amount.is_finite() or amount <= 0:
+            return False
         with self._lock:
             flock = self._lock_file()
             try:
@@ -361,6 +385,12 @@ class DurableBudgetCoordinator:
 
     def release(self, resource_id: str, amount: float) -> None:
         """Release a reservation (cross-process atomic)."""
+        try:
+            amount = self._decimal(amount)
+        except (TypeError, ValueError, InvalidOperation):
+            return
+        if not amount.is_finite() or amount <= 0:
+            return
         with self._lock:
             flock = self._lock_file()
             try:
@@ -369,7 +399,7 @@ class DurableBudgetCoordinator:
                 r = self._resources.get(resource_id)
                 if r is None:
                     return
-                r["reserved"] = max(0.0, r["reserved"] - amount)
+                r["reserved"] = max(Decimal("0"), r["reserved"] - amount)
                 self._persist()
             finally:
                 if flock:
@@ -385,7 +415,7 @@ class DurableBudgetCoordinator:
                 r = self._resources.get(resource_id)
                 if r is None or r["capacity"] <= 0:
                     return None
-                return (r["consumed"] + r["reserved"]) / r["capacity"]
+                return float((r["consumed"] + r["reserved"]) / r["capacity"])
             finally:
                 if flock:
                     flock.close()
@@ -401,10 +431,10 @@ class DurableBudgetCoordinator:
                 if r is None:
                     return None
                 return {
-                    "available": r["capacity"] - r["reserved"] - r["consumed"],
-                    "reserved": r["reserved"],
-                    "consumed": r["consumed"],
-                    "capacity": r["capacity"],
+                    "available": float(r["capacity"] - r["reserved"] - r["consumed"]),
+                    "reserved": float(r["reserved"]),
+                    "consumed": float(r["consumed"]),
+                    "capacity": float(r["capacity"]),
                 }
             finally:
                 if flock:
