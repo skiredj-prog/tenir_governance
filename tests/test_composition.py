@@ -1147,6 +1147,21 @@ class TestSchemaAdapter:
         with pytest.raises(ValueError, match="trace identifier"):
             conform_to_schema(source)
 
+    def test_non_mapping_trace_fails_closed(self):
+        source = self._make_result()
+        source["canonical_context"]["trace"] = None
+        with pytest.raises(ValueError, match="canonical_context.trace"):
+            conform_to_schema(source)
+
+    def test_duplicate_active_profiles_fail_closed(self):
+        source = self._make_result()
+        source["canonical_context"]["active_profiles"] = [
+            "agentic-governance-profile-v1.0.0",
+            "agentic-governance-profile-v1.0.0",
+        ]
+        with pytest.raises(ValueError, match="duplicate profile"):
+            conform_to_schema(source)
+
     def test_absent_ledger_metadata_is_not_fabricated(self):
         source = self._make_result()
         source.pop("ledger_entries", None)
