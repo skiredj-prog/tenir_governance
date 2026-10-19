@@ -65,7 +65,7 @@ MAX_AMOUNT = Decimal("1000000000000000000")
 
 
 def _validated_amount(value, *, allow_zero=False):
-    """Return a finite, bounded float or None; reject bool and malformed input."""
+    """Return a finite, bounded Decimal or None; reject bool and malformed input."""
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -88,7 +88,7 @@ class _RaftStateMachine(SyncObj):
 
     The state machine maintains:
     - _resources: {resource_id: {capacity, reserved, committed}}
-    - _reservations: {reservation_id: {key, amount, resource_id, state, created_at, ...}}
+    - _reservations: {reservation_id: {key, amount, resource_id, state, logical timestamps, ...}}
     - _key_index: {key: reservation_id} for fast idempotency lookup
     """
 
