@@ -454,6 +454,7 @@ class TestGovernorHoldLifecycle:
             "op-hold-test-1",
             passage=p3,
             pressure=0.1, velocity=0.1, capacity=0.9,
+            authority=0.9, context_fit=1.0, evidence_quality=1.0,
             resource_id="budget", amount=10.0,
         )
         assert r2["hold_resolved"] is True
