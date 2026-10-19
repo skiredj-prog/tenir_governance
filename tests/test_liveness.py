@@ -50,8 +50,8 @@ class TestLivenessTermination:
         assert replay.status == "RESERVED"
         assert replay.reservation_id == first.reservation_id
         state = backend.get_state("decimal-budget")
-        assert state.reserved == 0.1
-        assert state.available == 0.9
+        assert state.reserved == Decimal("0.1")
+        assert state.available == Decimal("0.9")
 
     def test_decimal_budget_accepts_exact_capacity_without_float_drift(self, tmp_path):
         """Decimal reservations may consume an exact decimal capacity fully."""
@@ -66,8 +66,8 @@ class TestLivenessTermination:
         assert second.status == "RESERVED"
         assert over.status == "INSUFFICIENT_BUDGET"
         state = backend.get_state("exact-decimal-budget")
-        assert state.reserved == pytest.approx(0.3)
-        assert state.available == pytest.approx(0.0)
+        assert state.reserved == Decimal("0.3")
+        assert state.available == Decimal("0.0")
         assert state.reserved + state.committed <= state.capacity
 
     def test_high_precision_decimal_reservation_survives_restart(self, tmp_path):
@@ -143,8 +143,8 @@ class TestLivenessTermination:
         backend.register_resource("reregister-budget", 1)
         state = backend.get_state("reregister-budget")
         assert state.reserved == 0
-        assert state.committed == 0.4
-        assert state.available == pytest.approx(0.6)
+        assert state.committed == Decimal("0.4")
+        assert state.available == Decimal("0.6")
 
         with pytest.raises(ValueError, match="different capacity"):
             backend.register_resource("reregister-budget", 2)
@@ -196,8 +196,8 @@ class TestLivenessTermination:
         reopened = SingleHostLockBackend(str(tmp_path))
         state = reopened.get_state("crash-reserve-budget")
         registry = reopened._load_reservations()
-        assert state.reserved == pytest.approx(0.1)
-        assert state.available == pytest.approx(0.9)
+        assert state.reserved == Decimal("0.1")
+        assert state.available == Decimal("0.9")
         assert len(registry) == 1
         recovered_id, recovered_record = next(iter(registry.items()))
         assert recovered_record["state"] == "RESERVED"
@@ -286,7 +286,7 @@ class TestLivenessTermination:
         )
         assert retried.status == "RESERVED"
         state = backend.get_state("persist-failure-budget")
-        assert state.reserved == 0.1
+        assert state.reserved == Decimal("0.1")
         assert state.reserved + state.committed <= state.capacity
 
     def test_reserve_terminates_within_T_max(self, tmp_path):
