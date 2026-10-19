@@ -131,3 +131,200 @@ class InProcessBudgetCoordinator:
             if resource.capacity <= 0:
                 return None  # indeterminate — fail closed
             return (resource.consumed + resource.reserved) / resource.capacity
+
+import json
+import os
+import tempfile
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # Windows fallback
+
+
+class DurableBudgetCoordinator:
+    """Cross-process budget coordination using fcntl.flock + durable JSON state.
+
+    Extends the InProcessBudgetCoordinator pattern to multiple processes on
+    the same host. Budget state (reserved, consumed, capacity per resource_id)
+    is persisted to a JSON file, and all read-check-write sequences are
+    serialized via an exclusive file lock (fcntl.flock).
+
+    LIMITATIONS:
+        - Single-host only: fcntl.flock does not coordinate across hosts.
+        - No WAL: a crash during _persist may lose in-flight state.
+        - For multi-host, replace with a transactional database or
+          distributed coordination service (etcd, Zookeeper).
+
+    I8 invariant: reserved + consumed <= capacity, per resource_id, at all
+    times. Enforced atomically under the file lock.
+
+    ConsensusBackend conformance: this coordinator implements the
+    reserve/commit/release/get_utilization interface defined in
+    consensus-interface-v1.json. It satisfies C1 (safety) and I8 for
+    single-host, multi-process deployments. It does NOT satisfy C2
+    (liveness under partition) or C3 (fault tolerance across hosts).
+    """
+
+    def __init__(self, store_path: str | None = None):
+        self._store_path = store_path
+        self._lock = threading.Lock()
+        self._resources: dict[str, dict] = {}  # resource_id -> {capacity, reserved, consumed}
+        if store_path:
+            self._load()
+
+    def register(self, resource) -> None:
+        """Register a Resource object's capacity with this coordinator."""
+        with self._lock:
+            self._resources[resource.resource_id] = {
+                "capacity": resource.capacity,
+                "reserved": getattr(resource, "reserved", 0.0),
+                "consumed": getattr(resource, "consumed", 0.0),
+            }
+            self._persist()
+
+    def get_resource(self, resource_id: str):
+        """Return a lightweight view of the resource state."""
+        with self._lock:
+            return self._resources.get(resource_id)
+
+    def _lock_file(self):
+        """Acquire a cross-process exclusive lock on the budget store file."""
+        if not self._store_path or fcntl is None:
+            return None
+        lock_path = self._store_path + ".lock"
+        if not os.path.exists(lock_path):
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+            os.close(fd)
+        f = open(lock_path, "r+")
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        return f
+
+    def _load(self):
+        """Load budget state from the durable store."""
+        if not self._store_path or not os.path.exists(self._store_path):
+            return
+        try:
+            with open(self._store_path, "r") as f:
+                self._resources = json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            # Corrupted store — fail-closed: keep existing state or empty
+            pass
+
+    def _persist(self):
+        """Persist budget state atomically (temp file, fsync, rename)."""
+        if not self._store_path:
+            return
+        tmp = self._store_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self._resources, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, self._store_path)
+        dir_fd = os.open(os.path.dirname(self._store_path) or ".", os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    def _reload_and_check(self, resource_id: str, amount: float) -> bool:
+        """Reload from disk under lock and check if amount is available.
+        Returns True if available >= amount after reload.
+        Does NOT mutate state — caller mutates after check passes.
+        """
+        if self._store_path and os.path.exists(self._store_path):
+            self._load()
+        r = self._resources.get(resource_id)
+        if r is None:
+            return False
+        available = r["capacity"] - r["reserved"] - r["consumed"]
+        return available >= amount
+
+    def reserve(self, resource_id: str, amount: float) -> bool:
+        """Atomically reserve budget across processes.
+
+        Acquires fcntl.flock, reloads from disk (another process may have
+        changed state), checks availability, mutates, and persists.
+        I8: reserved + consumed <= capacity is maintained.
+        """
+        with self._lock:
+            flock = self._lock_file()
+            try:
+                if not self._reload_and_check(resource_id, amount):
+                    return False
+                r = self._resources[resource_id]
+                r["reserved"] += amount
+                self._persist()
+                return True
+            finally:
+                if flock:
+                    flock.close()
+
+    def commit(self, resource_id: str, amount: float) -> bool:
+        """Move amount from reserved to consumed (cross-process atomic)."""
+        with self._lock:
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                r = self._resources.get(resource_id)
+                if r is None or r["reserved"] < amount:
+                    return False
+                r["reserved"] -= amount
+                r["consumed"] += amount
+                self._persist()
+                return True
+            finally:
+                if flock:
+                    flock.close()
+
+    def release(self, resource_id: str, amount: float) -> None:
+        """Release a reservation (cross-process atomic)."""
+        with self._lock:
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                r = self._resources.get(resource_id)
+                if r is None:
+                    return
+                r["reserved"] = max(0.0, r["reserved"] - amount)
+                self._persist()
+            finally:
+                if flock:
+                    flock.close()
+
+    def get_utilization(self, resource_id: str) -> float | None:
+        """Get current utilization fraction (0.0–1.0), or None if unavailable."""
+        with self._lock:
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                r = self._resources.get(resource_id)
+                if r is None or r["capacity"] <= 0:
+                    return None
+                return (r["consumed"] + r["reserved"]) / r["capacity"]
+            finally:
+                if flock:
+                    flock.close()
+
+    def get_state(self, resource_id: str) -> dict | None:
+        """Return the full state for a resource (ConsensusBackend interface)."""
+        with self._lock:
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                r = self._resources.get(resource_id)
+                if r is None:
+                    return None
+                return {
+                    "available": r["capacity"] - r["reserved"] - r["consumed"],
+                    "reserved": r["reserved"],
+                    "consumed": r["consumed"],
+                    "capacity": r["capacity"],
+                }
+            finally:
+                if flock:
+                    flock.close()

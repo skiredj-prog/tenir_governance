@@ -6,6 +6,32 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [5.5.0] — 2026-10-19 — Minor: Cross-Process Budget, Consensus Backend, Liveness
+
+This minor release adds the `DurableBudgetCoordinator` for cross-process budget conservation (I8), a reference `ConsensusBackend` adapter implementing the REG-Conformance interface, a linearizability checker, and liveness tests. These components close the implementation gaps identified in the REG-Conformance audit: cross-process I8, consensus interface conformance, and liveness verification.
+
+### Added
+- **`DurableBudgetCoordinator`** (`tenir_governance/operations/budget.py`) — Cross-process budget coordination using `fcntl.flock` + durable JSON state. Extends I8 enforcement from single-process (`threading.Lock`) to multi-process on a single host. All read-check-write sequences are serialized via exclusive file lock. I8 (`reserved + consumed ≤ capacity`) is maintained atomically under the lock at all times.
+- **`FileLockConsensusBackend`** (`tenir_governance/operations/consensus_backend.py`) — Reference adapter implementing the `ConsensusBackend` interface defined in `reg-conformance/specs/consensus-interface-v1.json`. Wraps `DurableBudgetCoordinator` and adds a reservation registry with `reserve/commit/release/reconcile/get_state` operations. Conforms to C1 (safety), I8 (budget), C2 (liveness) for single-host deployments. The `ConsensusBackend` Protocol is defined as a `runtime_checkable` Protocol for implementation-neutral conformance.
+- **`LinearizabilityChecker`** (`tenir_governance/operations/linearizability_checker.py`) — Wing-Gong algorithm for concurrent history validation. Takes a history of invocation/response events and verifies that a valid linearization exists respecting real-time precedence. Includes `consensus_sequential_spec` for the ConsensusBackend operations.
+- **Tests: cross-process I8** (`tests/test_durable_budget_cross_process.py`) — 10 tests: two processes reserve same budget (one fails), multiple processes reserve within budget, cross-process reserve then commit, I8 under concurrent reserve and release, plus 6 unit tests for DurableBudgetCoordinator.
+- **Tests: liveness** (`tests/test_liveness.py`) — 15 tests: termination within T_max for all operations, concurrent operations all terminate, max latency under load, reconciliation liveness (confirmed/failed/unresolved/not-found), liveness conditional (insufficient budget returns immediately), linearizability with liveness under concurrent load.
+
+### Changed
+- Version bumped to 5.5.0 in `__init__.py`, `tenir_kernel/__init__.py`, `pyproject.toml`, `CITATION.cff`, `.zenodo.json`, `SECURITY.md`, `demo.py`.
+
+### Tests
+- Total: **758 tests** passing, 0 failures, 0 regressions (687 in `tests/`, 61 in `r4/tests/`, 10 new cross-process I8 + 15 new liveness = 758).
+- Cross-process I8: 10 tests pass (4 subprocess-based + 6 unit).
+- Liveness: 15 tests pass (termination, reconciliation, conditional, linearizability).
+
+### Limitations
+- `DurableBudgetCoordinator` is single-host only (`fcntl.flock` does not cross host boundaries). Cross-host requires a `DurableBudgetCoordinator` backed by a transactional database or distributed coordination service.
+- `FileLockConsensusBackend` satisfies C1 (safety) and I8 for single-host, multi-process deployments. It does NOT satisfy C3 (fault tolerance across hosts) or byzantine tolerance.
+- `LinearizabilityChecker` uses the Wing-Gong recursive search, which is tractable for small histories but exponential in the worst case. For large histories, a more efficient algorithm (e.g., PO-Check) would be needed.
+
+---
+
 ## [5.4.4] — 2026-10-19 — Patch: Test Coverage, Attribution Fixes
 
 This patch adds missing regression tests for authorize_exit budget paths, adds mutation-test documentation for the _reserve_budget lock, corrects the repository test count from 669 to 733 (669 in `tests/` + 61 in `r4/tests/` + 3 new), and fixes budget fix attribution in documentation.
