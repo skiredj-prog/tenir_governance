@@ -1121,10 +1121,25 @@ class DualKernelGovernor:
             }
         elif prov_result.outcome == ProviderOutcome.FAILED:
             try:
-                self.fail(idempotency_key, resource_id, amount, authoritative_non_execution=True)
+                failed = self.fail(
+                    idempotency_key, resource_id, amount,
+                    authoritative_non_execution=True,
+                )
             finally:
                 with self._active_dispatches_lock:
                     self._active_dispatches.discard(idempotency_key)
+            if not failed:
+                latest = self.registry.get(idempotency_key)
+                return {
+                    "dispatched": True,
+                    "executed": False,
+                    "idempotency_key": idempotency_key,
+                    "operation_state": latest.state.value if latest else "not_found",
+                    "provider_error": prov_result.error,
+                    "provider_latency_ms": prov_result.latency_ms,
+                    "recommendation": "human_review",
+                    "reason": "Provider confirmed failure, but durable budget compensation or registry transition remains unresolved.",
+                }
             return {
                 "dispatched": True,
                 "executed": False,
