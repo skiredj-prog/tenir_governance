@@ -1188,6 +1188,18 @@ class TestSchemaAdapter:
         result = conform_to_schema(source)
         assert result["irreversible_pathway_assessment"] == source["irreversible_pathway_assessment"]
 
+    def test_invalid_explicit_assessment_is_not_silently_ignored(self):
+        source = self._make_result()
+        source["irreversible_pathway_assessment"] = "not-an-assessment"
+        with pytest.raises(ValueError, match="irreversible_pathway_assessment must be a mapping"):
+            conform_to_schema(source)
+
+    def test_invalid_explicit_constraint_geometry_is_not_silently_ignored(self):
+        source = self._make_result()
+        source["constraint_geometry"] = "not-a-geometry"
+        with pytest.raises(ValueError, match="constraint_geometry must be a mapping"):
+            conform_to_schema(source)
+
     def test_schema_version(self):
         result = conform_to_schema(self._make_result())
         assert result["schema_version"] == "1.2"
