@@ -1900,11 +1900,25 @@ class DualKernelGovernor:
         if result.get("exited") and not approve:
             record = self.registry.get(idempotency_key)
             if record and record.budget_reserved and record.resource_id and record.amount > 0:
-                resource = self.membrane.state.resources.get(record.resource_id)
-                if resource:
-                    with self.membrane.state.get_lock(record.resource_id):
-                        resource.release(record.amount)
-                self.registry.set_budget_flags(idempotency_key, budget_reserved=False)
+                if self.consensus_backend is not None and record.reservation_id:
+                    try:
+                        released = self.consensus_backend.release(record.reservation_id)
+                    except Exception:
+                        released = None
+                    if getattr(released, "status", None) not in ("RELEASED", "ALREADY_RELEASED"):
+                        result["budget_reconciliation_required"] = True
+                        result["reason"] = "Exit recorded, but durable budget release is unresolved."
+                        return result
+                    self.registry.set_budget_flags(
+                        idempotency_key, budget_reserved=False,
+                        budget_committed=False, reservation_id=record.reservation_id,
+                    )
+                else:
+                    resource = self.membrane.state.resources.get(record.resource_id)
+                    if resource:
+                        with self.membrane.state.get_lock(record.resource_id):
+                            resource.release(record.amount)
+                    self.registry.set_budget_flags(idempotency_key, budget_reserved=False)
         return result
 
     def expire_hold(self, idempotency_key: str) -> dict[str, Any]:
@@ -1924,14 +1938,29 @@ class DualKernelGovernor:
 
         # Release any reserved budget
         if result.get("expired") and record.resource_id and record.amount > 0:
-            resource = self.membrane.state.resources.get(record.resource_id)
-            if resource:
-                with self.membrane.state.get_lock(record.resource_id):
-                    resource.release(record.amount)
-            if record.budget_reserved or record.budget_committed:
-                self.registry.set_budget_flags(
-                    idempotency_key, budget_reserved=False, budget_committed=False,
-                )
+            if self.consensus_backend is not None and record.reservation_id:
+                try:
+                    released = self.consensus_backend.release(record.reservation_id)
+                except Exception:
+                    released = None
+                if getattr(released, "status", None) not in ("RELEASED", "ALREADY_RELEASED"):
+                    result["budget_reconciliation_required"] = True
+                    result["reason"] = "HOLD expired, but durable budget release is unresolved."
+                    return result
+                if record.budget_reserved or record.budget_committed:
+                    self.registry.set_budget_flags(
+                        idempotency_key, budget_reserved=False,
+                        budget_committed=False, reservation_id=record.reservation_id,
+                    )
+            else:
+                resource = self.membrane.state.resources.get(record.resource_id)
+                if resource:
+                    with self.membrane.state.get_lock(record.resource_id):
+                        resource.release(record.amount)
+                if record.budget_reserved or record.budget_committed:
+                    self.registry.set_budget_flags(
+                        idempotency_key, budget_reserved=False, budget_committed=False,
+                    )
 
         return result
 
