@@ -632,3 +632,32 @@ def test_crash_after_durable_refund_replays_reconciliation_idempotently(tmp_path
     assert final_record.budget_committed is False
     assert after.reserved == Decimal("0")
     assert after.committed == Decimal("0")
+
+
+def test_durable_backend_missing_reservation_identity_fails_closed(tmp_path):
+    from tenir_governance.operations.registry import OperationRecord
+
+    gov, state, backend = _setup_durable_backend_governor(tmp_path)
+    key = "missing-durable-reservation-id"
+    assert gov.registry.register(OperationRecord(
+        idempotency_key=key, passage_id="passage-missing-id",
+        agent_id="alice", action_type="payment",
+        amount=10.0, resource_id="budget",
+        budget_reserved=True,
+    ))
+
+    # A missing durable identity must never trigger legacy in-memory release.
+    local_resource = state.resources["budget"]
+    local_reserved_before = local_resource.reserved
+    backend_before = backend.get_state("budget")
+
+    assert gov.fail(key, "budget", 10.0) is False
+    record = gov.registry.get(key)
+    backend_after = backend.get_state("budget")
+
+    assert record.state == OperationState.CREATED
+    assert record.budget_reserved is True
+    assert record.reservation_id == ""
+    assert local_resource.reserved == local_reserved_before
+    assert backend_after.reserved == backend_before.reserved
+    assert backend_after.committed == backend_before.committed
