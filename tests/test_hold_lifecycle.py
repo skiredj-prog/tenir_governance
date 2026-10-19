@@ -1057,3 +1057,37 @@ class TestHoldPersistence:
         assert loaded.hold_record.exit_receipt.authorized_by == "operator@org"
         assert loaded.hold_record.exit_receipt.authorization == "ceremony-G-R5-001"
         assert loaded.hold_record.escalated_by == "risk-officer"
+
+
+def test_agent_c_expiring_unowned_hold_does_not_release_another_operations_budget():
+    """An expired HOLD must not release aggregate budget it never owned.
+
+    Reproduction: another operation owns a 10-unit reservation; this HOLD
+    record carries the same resource/amount but budget_reserved=False. Expiry
+    must fail closed without changing the other operation's reservation.
+    """
+    gov, state = _setup_governor()
+    budget = state.resources["budget"]
+    assert budget.reserve(10.0)
+
+    key = "agent-c-unowned-hold-expiry"
+    rec = OperationRecord(
+        idempotency_key=key,
+        passage_id="p-agent-c-unowned-hold-expiry",
+        agent_id="alice",
+        action_type="payment",
+        amount=10.0,
+        resource_id="budget",
+    )
+    gov.registry.register(rec)
+    entered = gov.hold_manager.enter_hold(key, tau_k_seconds=3600)
+    assert entered["entered"] is True
+    assert gov.registry.get(key).budget_reserved is False
+
+    result = gov.expire_hold(key)
+
+    assert result["expired"] is True
+    assert budget.reserved == 10.0, (
+        "HOLD expiry released budget owned by a different operation"
+    )
+    assert budget.consumed == 0.0
