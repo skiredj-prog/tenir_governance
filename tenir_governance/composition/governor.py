@@ -1300,7 +1300,9 @@ class DualKernelGovernor:
                     if not flags_ok:
                         return False
                 success, _prev_state = self.registry.transition_to(
-                    idempotency_key, OperationState.FAILED,
+                    idempotency_key,
+                    OperationState.FAILED,
+                    expected_states={current.state},
                 )
                 if not success:
                     if flags_changed:
@@ -1319,7 +1321,11 @@ class DualKernelGovernor:
                     resource.release(recorded_amount)
                 return True
 
-        success, _prev_state = self.registry.transition_to(idempotency_key, OperationState.FAILED)
+        success, _prev_state = self.registry.transition_to(
+            idempotency_key,
+            OperationState.FAILED,
+            expected_states={record.state},
+        )
         return success
 
     def mark_unknown(self, idempotency_key: str) -> bool:
