@@ -477,8 +477,9 @@ class RaftConsensusBackend:
                     status = self._raft.reconcile_commit(rid, sync=True, timeout=10.0)
                     if status in ("COMMITTED", "ALREADY_COMMITTED"):
                         return ReconciliationResult(status="CONFIRMED", effect_observed=True)
-                    else:
-                        return ReconciliationResult(status="ERROR", effect_observed=True)
+                    if status == "RECONCILE_CONFLICT":
+                        return ReconciliationResult(status="RECONCILE_CONFLICT", effect_observed=True)
+                    return ReconciliationResult(status="ERROR", effect_observed=True)
                 except Exception:
                     return ReconciliationResult(status="ERROR", effect_observed=True)
 
