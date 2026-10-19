@@ -129,6 +129,28 @@ class TestMultiNodeReserveCommitRelease:
             state = node.get_state("budget-A")
             assert state.reserved == 30, f"Node {i} has reserved={state.reserved}, expected 30"
 
+    def test_high_precision_decimal_capacity_is_preserved(self, cluster):
+        """Raft must not round budget counters at Decimal's default precision."""
+        leader = _get_leader(cluster)
+        assert leader is not None
+        amount = Decimal("1.234567890123456789012345678901234567")
+        assert leader.register_resource("precision-budget", amount) == "REGISTERED"
+        time.sleep(0.3)
+
+        result = leader.reserve("precision-key", amount, "precision-budget")
+        assert result.status == "RESERVED"
+        time.sleep(0.3)
+
+        state = leader.get_state("precision-budget")
+        assert state.capacity == amount
+        assert state.reserved == amount
+        assert state.available == Decimal("0")
+        over = leader.reserve(
+            "precision-overrun", Decimal("0.000000000000000000000000000000000001"),
+            "precision-budget",
+        )
+        assert over.status == "INSUFFICIENT_BUDGET"
+
     def test_get_state_fails_closed_on_overcommitted_restored_state(self, cluster):
         """A corrupt persisted total must not expose negative available budget."""
         leader = _get_leader(cluster)
