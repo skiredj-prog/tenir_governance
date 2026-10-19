@@ -32,6 +32,7 @@ import os
 import threading
 import time
 import uuid
+from decimal import Decimal
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -49,7 +50,7 @@ except ImportError:
 class ReservationResult:
     status: str  # RESERVED | INSUFFICIENT_BUDGET | DUPLICATE_KEY | ERROR
     reservation_id: str | None = None
-    amount_reserved: int | None = None
+    amount_reserved: int | float | Decimal | None = None
 
 
 @dataclass
