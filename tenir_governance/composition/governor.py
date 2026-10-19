@@ -1697,16 +1697,27 @@ class DualKernelGovernor:
 
         result = self.hold_manager.expire_hold(idempotency_key)
 
-        # Release any reserved budget
+        # Only mutate aggregate accounting when this operation's durable
+        # ownership flags prove that it owns the reservation/commit. Resource
+        # totals alone cannot establish ownership.
         if result.get("expired") and record.resource_id and record.amount > 0:
-            resource = self.membrane.state.resources.get(record.resource_id)
-            if resource:
-                with self.membrane.state.get_lock(record.resource_id):
-                    resource.release(record.amount)
-            if record.budget_reserved or record.budget_committed:
-                self.registry.set_budget_flags(
-                    idempotency_key, budget_reserved=False, budget_committed=False,
-                )
+            owns_reservation = bool(record.budget_reserved)
+            owns_commit = bool(record.budget_committed)
+            if owns_reservation or owns_commit:
+                resource = self.membrane.state.resources.get(record.resource_id)
+                if resource:
+                    with self.membrane.state.get_lock(record.resource_id):
+                        if owns_commit:
+                            resource.refund(record.amount)
+                        elif owns_reservation:
+                            resource.release(record.amount)
+                    flags_ok = self.registry.set_budget_flags(
+                        idempotency_key, budget_reserved=False, budget_committed=False,
+                    )
+                    if not flags_ok:
+                        result["accounting_warning"] = (
+                            "Budget accounting was updated but ownership flags could not be persisted."
+                        )
 
         return result
 
