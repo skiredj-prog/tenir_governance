@@ -39,7 +39,7 @@ import os
 import threading
 import time
 import uuid
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -52,6 +52,11 @@ except ImportError:
     FAIL_REASON = None
 
 # Re-use the result types from consensus_backend for interface compatibility
+from tenir_governance.operations.budget import (
+    _decimal_add,
+    _decimal_subtract,
+    _decimal_precision,
+)
 from tenir_governance.operations.consensus_backend import (
     ReservationResult,
     CommitResult,
@@ -61,26 +66,7 @@ from tenir_governance.operations.consensus_backend import (
 )
 
 
-def _decimal_precision(*values: Decimal) -> int:
-    """Choose enough precision to preserve exact finite Decimal arithmetic."""
-    highest_adjusted = max((value.adjusted() for value in values if value), default=0)
-    lowest_exponent = min((value.as_tuple().exponent for value in values), default=0)
-    return max(28, highest_adjusted - lowest_exponent + 2)
-
-
-def _decimal_add(left: Decimal, right: Decimal) -> Decimal:
-    with localcontext() as context:
-        context.prec = _decimal_precision(left, right)
-        return left + right
-
-
-def _decimal_subtract(left: Decimal, right: Decimal) -> Decimal:
-    with localcontext() as context:
-        context.prec = _decimal_precision(left, right)
-        return left - right
-
-
-MAX_AMOUNT = Decimal("1000000000000000000")
+undefinedMAX_AMOUNT = Decimal("1000000000000000000")
 
 
 def _validated_amount(value, *, allow_zero=False):
