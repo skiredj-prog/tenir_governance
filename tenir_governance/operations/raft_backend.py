@@ -256,7 +256,7 @@ class _RaftStateMachine(SyncObj):
         if rec["state"] in ("RESERVED", "UNKNOWN"):
             if res["reserved"] < amount:
                 return "INCONSISTENT_RESERVED_AMOUNT"
-            res["reserved"] -= amount
+            res["reserved"] = _decimal_subtract(res["reserved"], amount)
         rec["state"] = "RELEASED"
         rec["released_at_logical"] = self._tick_logical()
         return "RELEASED"
@@ -284,8 +284,8 @@ class _RaftStateMachine(SyncObj):
         if res["reserved"] < amount:
             self._record_incident("RESERVED_AMOUNT_MISSING", reservation_id, rec["state"])
             return "INCONSISTENT_RESERVED_AMOUNT"
-        res["reserved"] -= amount
-        res["committed"] += amount
+        res["reserved"] = _decimal_subtract(res["reserved"], amount)
+        res["committed"] = _decimal_add(res["committed"], amount)
         rec["state"] = "COMMITTED"
         rec["committed_at_logical"] = self._tick_logical()
         return "COMMITTED"
@@ -312,7 +312,7 @@ class _RaftStateMachine(SyncObj):
         if rec["state"] in ("RESERVED", "UNKNOWN"):
             if res["reserved"] < amount:
                 return "INCONSISTENT_RESERVED_AMOUNT"
-            res["reserved"] -= amount
+            res["reserved"] = _decimal_subtract(res["reserved"], amount)
         rec["state"] = "RELEASED"
         rec["released_at_logical"] = self._tick_logical()
         return "RELEASED"
