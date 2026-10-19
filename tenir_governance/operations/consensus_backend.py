@@ -71,10 +71,10 @@ class ReconciliationResult:
 
 @dataclass
 class ConsensusState:
-    available: int | float
-    reserved: int | float
-    committed: int | float
-    capacity: int | float
+    available: int | float | Decimal
+    reserved: int | float | Decimal
+    committed: int | float | Decimal
+    capacity: int | float | Decimal
     reservations: list = field(default_factory=list)
 
 
@@ -88,7 +88,7 @@ class ConsensusBackend(Protocol):
     C1/C2/C3/I8 (consensus-contract-v1.md) est conforme.
     """
 
-    def reserve(self, key: str, amount: int, resource_id: str) -> ReservationResult:
+    def reserve(self, key: str, amount: int | float | Decimal, resource_id: str) -> ReservationResult:
         """Réserver un montant budgétaire pour une clé d'idempotence."""
         ...
 
@@ -137,7 +137,7 @@ class SingleHostLockBackend:
         self._provider_reconcile = provider_reconcile
         self._lock = threading.Lock()
 
-    def register_resource(self, resource_id: str, capacity: int):
+    def register_resource(self, resource_id: str, capacity: int | float | Decimal):
         """Register a resource with the backend."""
         resource = type("Resource", (), {
             "resource_id": resource_id,
@@ -364,10 +364,10 @@ class SingleHostLockBackend:
         ]
 
         return ConsensusState(
-            available=int(state["available"]),
-            reserved=int(state["reserved"]),
-            committed=int(state["consumed"]),
-            capacity=int(state["capacity"]),
+            available=state["available"],
+            reserved=state["reserved"],
+            committed=state["consumed"],
+            capacity=state["capacity"],
             reservations=res_list,
         )
 
