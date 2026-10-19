@@ -561,3 +561,74 @@ def test_crash_after_backend_commit_reconciles_using_backend_state(tmp_path, mon
     assert final_record.budget_committed is False
     assert final_state.reserved == Decimal("0")
     assert final_state.committed == Decimal("0")
+
+
+def test_reconcile_confirmed_keeps_durable_budget_committed(tmp_path):
+    provider = MockProvider(
+        behavior="timeout",
+        reconcile_outcome=ProviderOutcome.CONFIRMED,
+    )
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
+    passage, _result = _adjudicate_durable_budget(gov)
+
+    dispatched = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    assert dispatched["operation_state"] in (
+        OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
+    )
+
+    reconciled = gov.reconcile_unknown(passage.idempotency_key)
+    record = gov.registry.get(passage.idempotency_key)
+    state = backend.get_state("budget")
+
+    assert reconciled["reconciled"] is True
+    assert record.state == OperationState.CONFIRMED
+    assert record.budget_reserved is False
+    assert record.budget_committed is True
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("10.0")
+
+
+def test_crash_after_durable_refund_replays_reconciliation_idempotently(tmp_path, monkeypatch):
+    from tenir_governance.operations.registry import DurableOperationRegistry
+
+    provider = MockProvider(
+        behavior="timeout",
+        reconcile_outcome=ProviderOutcome.FAILED,
+    )
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
+    registry_path = str(tmp_path / "operations.json")
+    gov.registry = DurableOperationRegistry(registry_path)
+    passage, _result = _adjudicate_durable_budget(gov)
+    key = passage.idempotency_key
+
+    first = gov.dispatch_and_execute(key, "budget", 10.0)
+    assert first["operation_state"] in (
+        OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
+    )
+
+    def crash_after_compensation(*args, **kwargs):
+        raise _SimulatedProcessCrash("crash after refund before ownership flags")
+
+    monkeypatch.setattr(gov.registry, "set_budget_flags", crash_after_compensation)
+    with pytest.raises(_SimulatedProcessCrash):
+        gov.reconcile_unknown(key)
+
+    reopened_backend = SingleHostLockBackend(str(tmp_path))
+    reopened_registry = DurableOperationRegistry(registry_path)
+    gov.consensus_backend = reopened_backend
+    gov.registry = reopened_registry
+
+    before = reopened_backend.get_state("budget")
+    assert before.reserved == Decimal("0")
+    assert before.committed == Decimal("0")
+
+    replay = gov.reconcile_unknown(key)
+    final_record = reopened_registry.get(key)
+    after = reopened_backend.get_state("budget")
+
+    assert replay["reconciled"] is True
+    assert final_record.state == OperationState.FAILED
+    assert final_record.budget_reserved is False
+    assert final_record.budget_committed is False
+    assert after.reserved == Decimal("0")
+    assert after.committed == Decimal("0")
