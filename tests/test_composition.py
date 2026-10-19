@@ -446,7 +446,15 @@ class TestDualKernelGovernor:
             raise OSError("simulated flag persistence failure")
 
         monkeypatch.setattr(gov.registry, "set_budget_flags", fail_flags)
-        dispatched = gov.dispatch("dispatch-flag-write-failure", "budget", 10.0)
+
+        class FailIfExecutedProvider:
+            def execute(self, **_kwargs):
+                pytest.fail("provider must not execute when budget ownership persistence fails")
+
+        gov.provider = FailIfExecutedProvider()
+        dispatched = gov.dispatch_and_execute(
+            "dispatch-flag-write-failure", "budget", 10.0,
+        )
         assert dispatched["dispatched"] is False
         assert "provider execution blocked" in dispatched["reason"]
         assert resource.reserved == 10.0
