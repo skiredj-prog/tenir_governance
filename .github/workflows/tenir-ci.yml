@@ -183,8 +183,12 @@ jobs:
           python -c "
           from tenir_governance.nomenclature import CAVEFieldNames
           exp = CAVEFieldNames.EXPANSION
-          assert 'Context' in exp and 'Effect' in exp, f'CAVE wrong: {exp}'
-          assert 'Control' not in exp and 'Veto' not in exp, f'Legacy CAVE: {exp}'
+          # Doctrinal CAVE (post-5.4.3): Control · Aim · Veto · Epistemics
+          assert 'Control' in exp and 'Aim' in exp and 'Veto' in exp and 'Epistemics' in exp, f'CAVE wrong: {exp}'
+          assert 'Context' not in exp and 'Effect' not in exp, f'Legacy CAVE still present: {exp}'
+          # Also enforce the forbidden set
+          for forbidden in CAVEFieldNames.FORBIDDEN_EXPANSIONS:
+              assert forbidden not in exp, f'Forbidden expansion leaked: {forbidden}'
           print(f'CAVE OK: {exp}')
           "
 
