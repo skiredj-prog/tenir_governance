@@ -253,6 +253,35 @@ class TestDualKernelGovernor:
         assert current is not None
         assert current.budget_reserved is False
 
+    def test_registry_post_rename_error_keeps_durable_budget_ownership(self, tmp_path, monkeypatch):
+        store = tmp_path / "operations.json"
+        registry = DurableOperationRegistry(str(store))
+        record = OperationRecord(
+            idempotency_key="registry-post-rename",
+            passage_id="passage-registry-post-rename",
+            agent_id="alice",
+            action_type="payment",
+            amount=10.0,
+            resource_id="budget",
+            state=OperationState.CREATED,
+        )
+        assert registry.register(record)
+        persist = registry._persist
+
+        def persist_then_raise():
+            persist()
+            raise OSError("simulated directory fsync failure after rename")
+
+        monkeypatch.setattr(registry, "_persist", persist_then_raise)
+        # The file already contains the new ownership flag. Report committed
+        # rather than causing the caller to release a reservation still owned
+        # by the durable operation record.
+        assert registry.set_budget_flags(
+            "registry-post-rename", budget_reserved=True,
+        )
+        reloaded = DurableOperationRegistry(str(store))
+        assert reloaded.get("registry-post-rename").budget_reserved is True
+
     @pytest.mark.parametrize("failure_mode", ["false", "exception"])
     def test_failed_budget_flag_persistence_compensates_reservation(
         self, monkeypatch, failure_mode
