@@ -963,18 +963,18 @@ class DualKernelGovernor:
         if record is None:
             return {"reconciled": False, "reason": "Operation not registered."}
 
-        if record.state != OperationState.UNKNOWN:
+        if record.state not in (OperationState.UNKNOWN, OperationState.DISPATCHING):
             return {
                 "reconciled": False,
                 "operation_state": record.state.value,
-                "reason": f"Operation is in state {record.state.value}, not UNKNOWN.",
+                "reason": f"Operation is in state {record.state.value}, not DISPATCHING or UNKNOWN.",
             }
 
         if self.provider is None:
             return {
                 "reconciled": False,
                 "idempotency_key": idempotency_key,
-                "operation_state": OperationState.UNKNOWN.value,
+                "operation_state": record.state.value,
                 "recommendation": "human_review",
                 "reason": "No provider configured — manual reconciliation required.",
             }
@@ -1025,7 +1025,7 @@ class DualKernelGovernor:
                 # release/refund, and accounting must cover the exact amount.
                 with self.membrane.state.get_lock(record.resource_id):
                     current = self.registry.get(idempotency_key)
-                    if current is None or current.state != OperationState.UNKNOWN:
+                    if current is None or current.state not in (OperationState.UNKNOWN, OperationState.DISPATCHING):
                         return {
                             "reconciled": False, "idempotency_key": idempotency_key,
                             "operation_state": current.state.value if current else "not_found",
