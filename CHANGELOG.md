@@ -10,7 +10,7 @@
 - Make resource registration non-destructive; reject implicit capacity changes.
 
 ### Test perimeter
-- Command: `pytest -q tests/test_raft_backend.py`
+- Reproduction: `python -m pip install -e ".[test]" "pysyncobj==0.3.17" && pytest -q tests/test_raft_backend.py`
 - Included: local `pysyncobj` Raft integration tests, I8 regressions, invalid-amount cases, idempotent replay, resource re-registration, logical-clock replication and fractional-budget accounting.
 - Environment: test cluster nodes use `localhost` and separate ports; this is not a physical multi-host network test.
 - Excluded: Byzantine tolerance, hardened peer transport/authentication, third-party attestation, and proof of exactly-once external effects.
