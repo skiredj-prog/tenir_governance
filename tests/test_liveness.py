@@ -93,6 +93,25 @@ class TestLivenessTermination:
             "precision-overrun", Decimal("0.000000000000000000001"), "precision-budget"
         ).status == "INSUFFICIENT_BUDGET"
 
+    def test_decimal_accounting_exceeds_default_context_precision(self, tmp_path):
+        """I8 accounting must not round exact values at Decimal's default precision."""
+        amount = Decimal("1.234567890123456789012345678901234567")
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("long-decimal-budget", amount)
+        result = backend.reserve("long-decimal-key", amount, "long-decimal-budget")
+        assert result.status == "RESERVED"
+
+        # Reopening validates the durable I8 invariant using the exact counters.
+        reopened = SingleHostLockBackend(str(tmp_path))
+        exact = reopened._coordinator.get_state_exact("long-decimal-budget")
+        assert exact["reserved"] == amount
+        assert exact["capacity"] == amount
+        assert exact["available"] == Decimal("0")
+        assert reopened.reserve(
+            "long-decimal-overrun", Decimal("0.000000000000000000000000000000000001"),
+            "long-decimal-budget",
+        ).status == "INSUFFICIENT_BUDGET"
+
     def test_corrupted_budget_store_fails_closed(self, tmp_path):
         (tmp_path / "budget.json").write_text("{not-json")
         with pytest.raises(RuntimeError, match="Corrupted durable budget store"):
