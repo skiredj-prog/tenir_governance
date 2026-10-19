@@ -432,6 +432,8 @@ class DurableOperationRegistry:
         idempotency_key: str,
         new_state: OperationState,
         claimed_by: str = "",
+        *,
+        expected_states: set[OperationState] | None = None,
     ) -> tuple[bool, OperationState | None]:
         """Atomically transition an operation to a new state.
 
@@ -478,6 +480,11 @@ class DurableOperationRegistry:
                     return False, None
 
                 prev_state = record.state
+
+                # Optional compare-and-transition guard: validate the state
+                # observed under this same registry lock, not a stale caller read.
+                if expected_states is not None and prev_state not in expected_states:
+                    return False, prev_state
 
                 # Check legal transition
                 if new_state not in _LEGAL_TRANSITIONS.get(record.state, set()):
