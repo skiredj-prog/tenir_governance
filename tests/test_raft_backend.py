@@ -954,20 +954,25 @@ class TestLinearizability:
         assert leader.commit(r1.reservation_id).status == "COMMITTED"
         time.sleep(0.3)
 
-        # Crash leader
+        # Crash leader and wait for a bounded election window. A fixed
+        # 2-second sleep is shorter than a reliable failover guarantee on
+        # loaded CI runners and can sample the cluster during election.
         leader.destroy()
-        time.sleep(2.0)
+        new_leader = _wait_for_leader(cluster, exclude=leader, timeout=10.0)
 
-        # Find new leader
-        new_leader = None
-        for node in cluster:
-            if node is leader:
-                continue
-            if node.is_leader():
-                new_leader = node
-                break
-
-        assert new_leader is not None
+        if new_leader is None:
+            statuses = [
+                {
+                    "addr": getattr(node, "_self_addr", "<unknown>"),
+                    "status": node.get_status(),
+                }
+                for node in cluster
+                if node is not leader
+            ]
+            pytest.fail(
+                "No replacement Raft leader elected within 10 seconds; "
+                f"remaining node statuses: {statuses!r}"
+            )
 
         # Operations after failover
         r2 = new_leader.reserve("key-2", 30, "budget-LIN4")
