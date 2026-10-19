@@ -774,50 +774,71 @@ class TestLinearizability:
         assert result.linearizable, f"Sequential history should be linearizable: {result.reason}"
 
     def test_concurrent_history_linearizability(self, cluster):
-        """Concurrent operations from multiple nodes produce a linearizable history."""
+        """Check the actual concurrent history, not just the final budget."""
+        from tenir_governance.operations.linearizability_checker import (
+            LinearizabilityChecker, consensus_sequential_spec,
+            Operation, Invocation, Response,
+        )
+
         leader = _get_leader(cluster)
-        leader.register_resource("budget-LIN2", 100)
+        assert leader is not None
+        assert leader.register_resource("budget-LIN2", 100) == "REGISTERED"
         time.sleep(0.5)
 
         history = []
         history_lock = threading.Lock()
+        event_lock = threading.Lock()
+        event_id = 0
+
+        def next_event_id():
+            nonlocal event_id
+            with event_lock:
+                event_id += 1
+                return event_id
 
         def do_reserve(node, key, amount):
-            res = node.reserve(key, amount, "budget-LIN2")
+            client_id = threading.get_ident()
+            invocation_id = next_event_id()
+            result = node.reserve(key, amount, "budget-LIN2")
+            response_id = next_event_id()
+            operation = Operation(
+                invocation=Invocation(
+                    op="reserve", args=(key, amount, "budget-LIN2"),
+                    client_id=client_id, event_id=invocation_id,
+                ),
+                response=Response(
+                    result={"status": result.status, "reservation_id": result.reservation_id},
+                    client_id=client_id, event_id=response_id,
+                ),
+            )
             with history_lock:
-                history.append({
-                    "type": "reserve",
-                    "key": key,
-                    "amount": amount,
-                    "result": res.status,
-                    "reservation_id": res.reservation_id,
-                })
+                history.append(operation)
 
         threads = []
         for i in range(5):
             node = cluster[i % 3]
-            t = threading.Thread(target=do_reserve, args=(node, f"lin-{i}", 15))
-            threads.append(t)
-            t.start()
+            thread = threading.Thread(target=do_reserve, args=(node, f"lin-{i}", 15))
+            threads.append(thread)
+            thread.start()
 
-        for t in threads:
-            t.join(timeout=10.0)
+        for thread in threads:
+            thread.join(timeout=10.0)
 
-        time.sleep(0.5)
-
-        # All operations should have completed
+        assert all(not thread.is_alive() for thread in threads), "reserve worker timed out"
         assert len(history) == 5
 
-        # Count successful reservations
-        successful = [h for h in history if h["result"] == "RESERVED"]
-        # 5 * 15 = 75 <= 100, so all should succeed
+        checker = LinearizabilityChecker(consensus_sequential_spec)
+        result = checker.check(history)
+        assert result.linearizable, f"Concurrent Raft history is not linearizable: {result.reason}"
+
+        successful = [op for op in history if op.response.result["status"] == "RESERVED"]
         assert len(successful) == 5, (
             f"Expected 5 successful reserves, got {len(successful)}: "
-            f"{[h['result'] for h in history]}"
+            f"{[op.response.result['status'] for op in history]}"
         )
 
-        # I8 must hold
         state = leader.get_state("budget-LIN2")
+        assert state.reserved == 75
         assert state.reserved + state.committed <= state.capacity
 
     def test_mixed_ops_linearizability(self, cluster):
