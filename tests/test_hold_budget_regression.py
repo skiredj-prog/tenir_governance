@@ -120,6 +120,37 @@ def test_reconcile_from_escalated_unknown_releases_reservation():
     assert budget.consumed == 0.0
 
 
+def test_reconciliation_flag_write_failure_leaves_budget_untouched(monkeypatch):
+    provider = MockProvider(
+        behavior="timeout",
+        reconcile_outcome=ProviderOutcome.FAILED,
+    )
+    gov, state = _setup_governor(provider=provider, budget_capacity=100.0)
+    budget = state.resources["budget"]
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    result = gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    assert result["operation_state"] == OperationState.RESERVED.value
+
+    executed = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    assert executed["operation_state"] == OperationState.UNKNOWN.value
+    assert budget.reserved == 0.0
+    assert budget.consumed == 10.0
+
+    def fail_flags(*_args, **_kwargs):
+        raise OSError("simulated registry write failure")
+
+    monkeypatch.setattr(gov.registry, "set_budget_flags", fail_flags)
+    reconciled = gov.reconcile_unknown(passage.idempotency_key)
+    assert reconciled["reconciled"] is False
+    assert "ownership release" in reconciled["reason"]
+    assert gov.registry.get(passage.idempotency_key).state == OperationState.UNKNOWN
+    assert budget.reserved == 0.0
+    assert budget.consumed == 10.0
+
+
 def test_concurrent_adjudication_reserves_budget_once():
     """Two concurrent PASS-able passages on a 1500 budget: exactly one reserves.
 
