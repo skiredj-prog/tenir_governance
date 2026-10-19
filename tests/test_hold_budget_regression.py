@@ -909,3 +909,21 @@ def test_reconcile_failed_recovers_missing_durable_reservation_identity(tmp_path
     assert latest.budget_committed is False
     assert state.reserved == Decimal("0")
     assert state.committed == Decimal("0")
+
+
+def test_confirm_from_reserved_does_not_commit_budget_before_rejected_transition(tmp_path):
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path)
+    passage, _result = _adjudicate_durable_budget(gov)
+    record = gov.registry.get(passage.idempotency_key)
+    assert record.state == OperationState.RESERVED
+    before = backend.get_state("budget")
+
+    assert gov.confirm(passage.idempotency_key) is False
+
+    after = backend.get_state("budget")
+    latest = gov.registry.get(passage.idempotency_key)
+    assert latest.state == OperationState.RESERVED
+    assert latest.budget_reserved is True
+    assert latest.budget_committed is False
+    assert after.reserved == before.reserved == Decimal("10.0")
+    assert after.committed == before.committed == Decimal("0")
