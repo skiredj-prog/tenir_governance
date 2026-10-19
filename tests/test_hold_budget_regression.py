@@ -511,6 +511,57 @@ def test_fail_refuses_dispatching_without_confirmed_provider_outcome():
 
 
 
+def test_reconcile_rechecks_expected_state_before_failed_transition(monkeypatch):
+    """A terminal-state race cannot make reconciliation compensate stale budget state."""
+    provider = MockProvider(
+        behavior="timeout",
+        reconcile_outcome=ProviderOutcome.FAILED,
+    )
+    gov, state = _setup_governor(budget_capacity=100.0, provider=provider)
+    budget = state.resources["budget"]
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    assert result["operation_state"] == OperationState.UNKNOWN.value
+    assert budget.reserved == 0.0
+    assert budget.consumed == 10.0
+
+    registry = gov.registry
+    original_transition = registry.transition_to
+    raced = False
+
+    def transition_with_confirmation_race(key, new_state, *args, **kwargs):
+        nonlocal raced
+        if (
+            key == passage.idempotency_key
+            and new_state == OperationState.FAILED
+            and not raced
+        ):
+            raced = True
+            # A competing, authoritative confirmation wins before the FAILED
+            # compare-and-transition reaches the registry lock.
+            confirmed, _ = original_transition(
+                key, OperationState.CONFIRMED,
+                expected_states={OperationState.UNKNOWN},
+            )
+            assert confirmed is True
+        return original_transition(key, new_state, *args, **kwargs)
+
+    monkeypatch.setattr(registry, "transition_to", transition_with_confirmation_race)
+    reconciled = gov.reconcile_unknown(passage.idempotency_key)
+
+    assert reconciled["reconciled"] is False
+    record = registry.get(passage.idempotency_key)
+    assert record.state == OperationState.CONFIRMED
+    assert record.budget_committed is True
+    assert record.budget_reserved is False
+    assert budget.reserved == 0.0
+    assert budget.consumed == 10.0
+
+
 def test_fail_uses_atomic_expected_state_for_unbudgeted_operation(monkeypatch):
     """A concurrent dispatch/UNKNOWN cannot be overwritten in the no-budget path."""
     gov, _state = _setup_governor()
