@@ -21,7 +21,7 @@ Environment variables:
   OLLAMA_URL         http://localhost:11434
   LEDGER_PATH        ledger/tenir_ledger.jsonl
   OATH_SECRET        <production secret>
-  PEER_NODES         http://node2:8000,http://node3:8000  (comma-separated)
+  PEER_NODES         https://node2:8443,https://node3:8443 (comma-separated; valid TLS certificates required)
 """
 
 import os
