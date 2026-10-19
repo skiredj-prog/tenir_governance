@@ -1134,16 +1134,36 @@ class TestListOneRegressions:
     def test_legacy_float_state_is_normalized_before_decimal_reserve(self, cluster):
         leader = _get_leader(cluster)
         assert leader.register_resource("budget-LEGACY-L1", 100) == "REGISTERED"
-        # Simulate state serialized by the pre-Decimal implementation.
-        leader._raft._resources["budget-LEGACY-L1"] = {
-            "capacity": 100.0, "reserved": 0.1, "committed": 0.2,
-        }
+        # Simulate every replica restoring state serialized by the pre-Decimal implementation.
+        for node in cluster:
+            node._raft._resources["budget-LEGACY-L1"] = {
+                "capacity": 100.0, "reserved": 0.1, "committed": 0.2,
+            }
         result = leader.reserve("after-upgrade", "0.3", "budget-LEGACY-L1")
         assert result.status == "RESERVED"
         state = leader.get_state("budget-LEGACY-L1")
         assert state.capacity == Decimal("100.0")
         assert state.reserved == Decimal("0.4")
         assert state.committed == Decimal("0.2")
+
+    def test_legacy_float_reservation_can_be_committed_after_upgrade(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-LEGACY-COMMIT", 100) == "REGISTERED"
+        # Simulate a pre-Decimal journal restored consistently on all replicas.
+        for node in cluster:
+            node._raft._resources["budget-LEGACY-COMMIT"] = {
+                "capacity": 100.0, "reserved": 0.1, "committed": 0.0,
+            }
+            node._raft._reservations["legacy-reservation"] = {
+                "key": "legacy-key", "amount": 0.1,
+                "resource_id": "budget-LEGACY-COMMIT", "state": "RESERVED",
+            }
+            node._raft._key_index["legacy-key"] = "legacy-reservation"
+        result = leader.commit("legacy-reservation")
+        assert result.status == "COMMITTED"
+        state = leader.get_state("budget-LEGACY-COMMIT")
+        assert state.reserved == Decimal("0.0")
+        assert state.committed == Decimal("0.1")
 
     def test_legacy_five_argument_reserve_command_remains_callable(self, cluster):
         leader = _get_leader(cluster)
