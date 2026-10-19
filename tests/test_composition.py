@@ -1064,7 +1064,7 @@ class TestSchemaAdapter:
     def test_degraded_mode_visible(self):
         """Per KB3: degraded status must stay visible."""
         result = conform_to_schema(self._make_result(composed="HOLD"))
-        assert result["degraded_mode"] is True
+        assert result["degraded_mode"] == ["sparse_ingress"]
 
     def test_disclosure_metadata_present(self):
         """Per versioning policy §6: disclosure metadata required."""
