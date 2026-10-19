@@ -1342,6 +1342,38 @@ class DualKernelGovernor:
 
         committed = record.budget_committed
         owns_budget = record.budget_reserved or record.budget_committed
+        if self.consensus_backend is not None and record.reservation_id and owns_budget:
+            # A committed reservation can only be refunded after authoritative
+            # non-execution evidence. This API has no such proof parameter, so
+            # leave it for reconcile_unknown() rather than guessing.
+            if committed:
+                return False
+            if record.state not in (
+                OperationState.CREATED, OperationState.HOLD,
+                OperationState.RESERVED, OperationState.ESCALATED,
+            ):
+                return False
+            try:
+                released = self.consensus_backend.release(record.reservation_id)
+            except Exception:
+                return False
+            if getattr(released, "status", None) not in ("RELEASED", "ALREADY_RELEASED"):
+                return False
+            try:
+                flags_ok = self.registry.set_budget_flags(
+                    idempotency_key,
+                    budget_reserved=False,
+                    budget_committed=False,
+                    reservation_id=record.reservation_id,
+                )
+            except Exception:
+                flags_ok = False
+            if not flags_ok:
+                return False
+            success, _prev_state = self.registry.transition_to(
+                idempotency_key, OperationState.FAILED,
+            )
+            return success
         if recorded_resource and recorded_amount > 0 and owns_budget:
             resource = self.membrane.state.resources.get(recorded_resource)
             if resource is None:
