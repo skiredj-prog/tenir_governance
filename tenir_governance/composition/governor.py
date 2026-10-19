@@ -1261,7 +1261,10 @@ class DualKernelGovernor:
         # Provider calls may run concurrently (some providers require that for
         # bounded reconciliation); serialize only the settlement phase.
         with self._settlement_lock:
-            with self.registry.settlement_lock(idempotency_key):
+            with self.registry.settlement_lock(
+                    idempotency_key,
+                    require_persistent=self.consensus_backend is not None,
+                ):
                 current = self.registry.get(idempotency_key)
                 if current is None or current.state not in (
                     OperationState.UNKNOWN, OperationState.DISPATCHING,
@@ -1576,7 +1579,10 @@ class DualKernelGovernor:
         """Serialize confirmation with failure compensation across local processes."""
         with self._settlement_lock:
             try:
-                with self.registry.settlement_lock(idempotency_key):
+                with self.registry.settlement_lock(
+                    idempotency_key,
+                    require_persistent=self.consensus_backend is not None,
+                ):
                     return self._confirm_under_settlement_lock(idempotency_key)
             except Exception:
                 # An unavailable durable coordination lock is an indeterminate
@@ -1631,7 +1637,10 @@ class DualKernelGovernor:
         """Serialize failure compensation with confirmation for this governor instance."""
         with self._settlement_lock:
             try:
-                with self.registry.settlement_lock(idempotency_key):
+                with self.registry.settlement_lock(
+                    idempotency_key,
+                    require_persistent=self.consensus_backend is not None,
+                ):
                     return self._fail_under_settlement_lock(
                         idempotency_key, resource_id, amount,
                         authoritative_non_execution=authoritative_non_execution,
