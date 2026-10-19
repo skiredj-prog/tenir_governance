@@ -1108,6 +1108,18 @@ class TestSchemaAdapter:
         result = conform_to_schema(self._make_result(composed="PASS"))
         assert result["synthesis"]["principal_failure_mode"] is None
 
+    def test_malformed_degraded_mode_fails_closed(self):
+        source = self._make_result()
+        source["canonical_context"]["degraded_mode"] = [["sparse_ingress"]]
+        with pytest.raises(ValueError, match="non-string or unknown"):
+            conform_to_schema(source)
+
+    def test_duplicate_degraded_mode_fails_closed(self):
+        source = self._make_result()
+        source["canonical_context"]["degraded_mode"] = ["sparse_ingress", "sparse_ingress"]
+        with pytest.raises(ValueError, match="duplicate"):
+            conform_to_schema(source)
+
     def test_missing_active_profiles_fails_closed(self):
         source = self._make_result()
         source["canonical_context"].pop("active_profiles", None)
