@@ -421,3 +421,39 @@ def test_fail_rejects_unknown_outcome_without_releasing_or_refunding_budget():
     assert after_record.budget_reserved == before_record.budget_reserved
     assert budget.reserved == before_reserved == 0.0
     assert budget.consumed == before_consumed == 10.0
+
+
+def test_fail_rechecks_state_under_budget_lock_before_compensating(monkeypatch):
+    """A concurrent UNKNOWN transition must not be overwritten by fail()."""
+    gov, state = _setup_governor(budget_capacity=100.0)
+    budget = state.resources["budget"]
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    result = gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    assert result["operation_state"] == OperationState.RESERVED.value
+    assert gov.dispatch(passage.idempotency_key, "budget", 10.0)["dispatched"] is True
+    assert budget.consumed == 10.0
+
+    registry = gov.registry
+    original_get = registry.get
+    first_read = True
+
+    def get_then_race(key):
+        nonlocal first_read
+        record = original_get(key)
+        if key == passage.idempotency_key and first_read:
+            first_read = False
+            # Simulate uncertainty arriving after fail()'s initial read but
+            # before its locked re-check.
+            assert registry.transition_to(key, OperationState.UNKNOWN)[0]
+        return record
+
+    monkeypatch.setattr(registry, "get", get_then_race)
+    assert gov.fail(passage.idempotency_key) is False
+    record = original_get(passage.idempotency_key)
+    assert record.state == OperationState.UNKNOWN
+    assert record.budget_committed is True
+    assert budget.consumed == 10.0
+    assert budget.reserved == 0.0
