@@ -1022,25 +1022,28 @@ def test_cross_instance_confirm_and_proven_fail_cannot_diverge_durable_budget(tm
     assert gov1.dispatch(passage.idempotency_key, "budget", 10.0)["dispatched"] is True
     key = passage.idempotency_key
 
-    # Force both instances to read DISPATCHING before either settles. This
-    # exposes a cross-instance TOCTOU that an instance-local RLock cannot close.
-    both_read = threading.Barrier(2)
-    original_get1 = gov1.registry.get
-    original_get2 = gov2.registry.get
-    first1 = {"pending": True}
-    first2 = {"pending": True}
+    # Force both instances to contend at the settlement boundary. The durable
+    # per-operation lock must allow only one to read/settle the current state.
+    from contextlib import contextmanager
 
-    def synchronized_get(original, first):
-        def get_once(idempotency_key):
-            record = original(idempotency_key)
-            if idempotency_key == key and first["pending"]:
-                first["pending"] = False
-                both_read.wait(timeout=5)
-            return record
-        return get_once
+    both_start = threading.Barrier(2)
 
-    monkeypatch.setattr(gov1.registry, "get", synchronized_get(original_get1, first1))
-    monkeypatch.setattr(gov2.registry, "get", synchronized_get(original_get2, first2))
+    def synchronized_lock(original):
+        @contextmanager
+        def lock_once(idempotency_key):
+            both_start.wait(timeout=5)
+            with original(idempotency_key):
+                yield
+        return lock_once
+
+    monkeypatch.setattr(
+        gov1.registry, "settlement_lock",
+        synchronized_lock(gov1.registry.settlement_lock),
+    )
+    monkeypatch.setattr(
+        gov2.registry, "settlement_lock",
+        synchronized_lock(gov2.registry.settlement_lock),
+    )
     results = {}
 
     def confirm_worker():
