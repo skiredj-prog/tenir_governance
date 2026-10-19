@@ -9,6 +9,8 @@ Covers:
 
 These tests require pysyncobj (pip install pysyncobj).
 """
+import ast
+import inspect
 import os
 import sys
 import time
@@ -20,7 +22,7 @@ import pytest
 # Skip all tests if pysyncobj is not installed
 pysyncobj = pytest.importorskip("pysyncobj")
 
-from tenir_governance.operations.raft_backend import RaftConsensusBackend
+from tenir_governance.operations.raft_backend import RaftConsensusBackend, _RaftStateMachine
 from tenir_governance.operations.consensus_backend import ConsensusState
 
 
@@ -1048,6 +1050,23 @@ class TestListOneRegressions:
         assert state.reserved == 40
         assert state.committed == 0
 
+    def test_replicated_methods_do_not_use_local_clock_or_randomness(self):
+        source = inspect.getsource(_RaftStateMachine)
+        tree = ast.parse(source)
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_RaftStateMachine")
+        forbidden = {"time.time", "time.monotonic", "datetime.now", "uuid.uuid4", "random.random"}
+        for method in cls.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not any(isinstance(dec, ast.Name) and dec.id == "replicated" for dec in method.decorator_list):
+                continue
+            calls = set()
+            for node in ast.walk(method):
+                if isinstance(node, ast.Call):
+                    fn = ast.unparse(node.func)
+                    if fn in forbidden:
+                        calls.add(fn)
+            assert not calls, f"non-deterministic calls in replicated {method.name}: {sorted(calls)}"
     def test_fractional_amounts_are_preserved_in_budget_state(self, cluster):
         leader = _get_leader(cluster)
         assert leader.register_resource("budget-DECIMAL-L1", "1.00") == "REGISTERED"
