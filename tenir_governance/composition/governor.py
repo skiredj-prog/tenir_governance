@@ -1939,6 +1939,10 @@ class DualKernelGovernor:
         # Release any reserved budget
         if result.get("expired") and record.resource_id and record.amount > 0:
             if self.consensus_backend is not None and record.reservation_id:
+                if record.budget_committed:
+                    result["budget_reconciliation_required"] = True
+                    result["reason"] = "HOLD expiry found a committed reservation; refusing release without reconciliation."
+                    return result
                 try:
                     released = self.consensus_backend.release(record.reservation_id)
                 except Exception:
