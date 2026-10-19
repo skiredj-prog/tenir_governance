@@ -24,6 +24,7 @@ from tenir_governance.composition.decisions import Decision
 from tenir_governance.composition.policy import CompositionPolicy
 from tenir_governance.membrane import TransitionMembrane, MembraneState
 from tenir_governance.objects import Agent, Passage, Resource, Delegation
+from tenir_governance.operations.registry import OperationRecord, OperationState
 
 
 class TestCompose:
@@ -223,6 +224,34 @@ class TestDualKernelGovernor:
         membrane = TransitionMembrane(state)
         governor = DualKernelGovernor(scoring, membrane, policy=policy)
         return governor, state
+
+    @pytest.mark.parametrize("failure_mode", ["false", "exception"])
+    def test_failed_budget_flag_persistence_compensates_reservation(
+        self, monkeypatch, failure_mode
+    ):
+        gov, state = self._setup()
+        record = OperationRecord(
+            idempotency_key="budget-flag-failure",
+            passage_id="passage-budget-flag-failure",
+            agent_id="alice",
+            action_type="payment",
+            amount=10.0,
+            resource_id="budget",
+            state=OperationState.CREATED,
+        )
+        assert gov.registry.register(record)
+
+        def fail_flag_write(*_args, **_kwargs):
+            if failure_mode == "exception":
+                raise OSError("simulated registry persistence failure")
+            return False
+
+        monkeypatch.setattr(gov.registry, "set_budget_flags", fail_flag_write)
+        assert not gov._reserve_budget("budget-flag-failure", "budget", 10.0)
+        assert state.resources["budget"].reserved == 0.0
+        current = gov.registry.get("budget-flag-failure")
+        assert current is not None
+        assert current.budget_reserved is False
 
     def test_resource_reregistration_cannot_reset_budget_or_lock(self):
         gov, state = self._setup()
