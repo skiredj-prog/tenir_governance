@@ -20,6 +20,8 @@ on:
       - "tenir_governance/membrane/**"
       - "tests/test_raft_backend.py"
       - "tests/test_composition.py"
+      - "tests/test_provider.py"
+      - "tests/test_linearizability_checker.py"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
 
