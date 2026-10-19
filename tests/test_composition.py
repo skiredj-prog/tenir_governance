@@ -1108,6 +1108,23 @@ class TestSchemaAdapter:
         result = conform_to_schema(self._make_result(composed="PASS"))
         assert result["synthesis"]["principal_failure_mode"] is None
 
+    def test_missing_trace_identifier_fails_closed(self):
+        source = self._make_result()
+        source["canonical_context"]["trace"].pop("trace_id", None)
+        source.pop("idempotency_key", None)
+        with pytest.raises(ValueError, match="trace identifier"):
+            conform_to_schema(source)
+
+    def test_absent_ledger_metadata_is_not_fabricated(self):
+        source = self._make_result()
+        source.pop("ledger_entries", None)
+        source.pop("ledger_valid", None)
+        source.pop("passage_id", None)
+        result = conform_to_schema(source)
+        assert "ledger_entries" not in result["trace"]
+        assert "ledger_valid" not in result["trace"]
+        assert "passage_id" not in result["trace"]
+
     def test_missing_irreversible_assessment_fails_closed(self):
         source = self._make_result()
         source["canonical_context"].pop("irreversible_pathway_assessment")
