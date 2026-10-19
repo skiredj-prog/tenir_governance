@@ -952,9 +952,11 @@ class DualKernelGovernor:
             )
         except Exception as e:
             # Provider call threw an exception — fail closed to UNKNOWN
-            self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
-            with self._active_dispatches_lock:
-                self._active_dispatches.discard(idempotency_key)
+            try:
+                self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+            finally:
+                with self._active_dispatches_lock:
+                    self._active_dispatches.discard(idempotency_key)
             return {
                 "dispatched": True,
                 "executed": False,
@@ -966,9 +968,11 @@ class DualKernelGovernor:
 
         # 5. Transition based on provider outcome
         if prov_result.outcome == ProviderOutcome.CONFIRMED:
-            self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
-            with self._active_dispatches_lock:
-                self._active_dispatches.discard(idempotency_key)
+            try:
+                self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+            finally:
+                with self._active_dispatches_lock:
+                    self._active_dispatches.discard(idempotency_key)
             return {
                 "dispatched": True,
                 "executed": True,
@@ -978,9 +982,11 @@ class DualKernelGovernor:
                 "provider_latency_ms": prov_result.latency_ms,
             }
         elif prov_result.outcome == ProviderOutcome.FAILED:
-            self.fail(idempotency_key, resource_id, amount)
-            with self._active_dispatches_lock:
-                self._active_dispatches.discard(idempotency_key)
+            try:
+                self.fail(idempotency_key, resource_id, amount)
+            finally:
+                with self._active_dispatches_lock:
+                    self._active_dispatches.discard(idempotency_key)
             return {
                 "dispatched": True,
                 "executed": False,
