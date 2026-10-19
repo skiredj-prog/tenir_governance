@@ -1195,6 +1195,14 @@ class DualKernelGovernor:
         self,
         idempotency_key: str,
     ) -> dict[str, Any]:
+        """Serialize provider reconciliation with terminal budget settlement."""
+        with self._settlement_lock:
+            return self._reconcile_unknown_under_settlement_lock(idempotency_key)
+
+    def _reconcile_unknown_under_settlement_lock(
+        self,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
         """Reconcile UNKNOWN or interrupted DISPATCHING with the provider.
 
         DISPATCHING is included because a process may crash after claiming
