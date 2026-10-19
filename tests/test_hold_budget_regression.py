@@ -394,7 +394,14 @@ def test_recovery_rejects_unknown_journal_operation(tmp_path):
 
 
 def _setup_durable_backend_governor(tmp_path, provider=None, budget_capacity=100.0):
+    from tenir_governance.operations.registry import DurableOperationRegistry
+
     gov, state = _setup_governor(budget_capacity=budget_capacity, provider=provider)
+    # A durable budget backend requires a durable operation registry too;
+    # otherwise terminal state cannot be coordinated across governor instances.
+    registry = DurableOperationRegistry(str(tmp_path / "operations.json"))
+    gov.registry = registry
+    gov.hold_manager.registry = registry
     backend = SingleHostLockBackend(str(tmp_path))
     backend.register_resource("budget", Decimal(str(budget_capacity)))
     gov.consensus_backend = backend
