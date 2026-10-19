@@ -934,22 +934,38 @@ class DualKernelGovernor:
         return success
 
     def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0) -> bool:
-        """Transition to FAILED. No effect occurred. Release or refund reservation.
+        """Transition to FAILED after non-execution is confirmed.
 
-        Uses the previous state returned atomically by transition_to() so
-        the refund-vs-release decision is based on the state observed under
-        the lock.
+        Durable operation parameters are authoritative for budget accounting;
+        optional caller arguments are accepted only when they match that record.
+        A DISPATCHING operation is refunded only because this method's contract
+        explicitly asserts that no external effect occurred. UNKNOWN outcomes
+        must be reconciled instead and must never be refunded speculatively.
         """
-        success, prev_state = self.registry.transition_to(idempotency_key, OperationState.FAILED)
-        if success and resource_id and amount > 0:
-            was_dispatching = prev_state == OperationState.DISPATCHING
-            if was_dispatching:
+        record = self.registry.get(idempotency_key)
+        if record is None:
+            return False
+
+        durable_resource_id = record.resource_id or None
+        durable_amount = record.amount
+        if resource_id is not None and resource_id != durable_resource_id:
+            return False
+        if amount > 0 and amount != durable_amount:
+            return False
+
+        success, prev_state = self.registry.transition_to(
+            idempotency_key, OperationState.FAILED
+        )
+        if success and durable_resource_id and durable_amount > 0:
+            if prev_state == OperationState.DISPATCHING:
                 self.budget_coordinator.refund(
-                    resource_id, amount, reservation_id=idempotency_key
+                    durable_resource_id, durable_amount,
+                    reservation_id=idempotency_key,
                 )
             else:
                 self.budget_coordinator.release(
-                    resource_id, amount, reservation_id=idempotency_key
+                    durable_resource_id, durable_amount,
+                    reservation_id=idempotency_key,
                 )
         return success
 
