@@ -1481,6 +1481,10 @@ class DualKernelGovernor:
 
         committed = record.budget_committed
         owns_budget = record.budget_reserved or record.budget_committed
+        if self.consensus_backend is not None and owns_budget and not record.reservation_id:
+            # Never fall back to the membrane's in-memory counters when the
+            # durable backend is configured but reservation ownership is unknown.
+            return False
         if self.consensus_backend is not None and record.reservation_id and owns_budget:
             # A committed reservation can only be refunded after authoritative
             # non-execution evidence. This API has no such proof parameter, so
@@ -1821,7 +1825,10 @@ class DualKernelGovernor:
             # Only release a reservation that this durable operation actually owns.
             should_release_budget = bool(held_record and held_record.budget_reserved)
             if resource_id and amount > 0 and should_release_budget:
-                if self.consensus_backend is not None and held_record and held_record.reservation_id:
+                if self.consensus_backend is not None and not (held_record and held_record.reservation_id):
+                    composed_decision = Decision.HOLD.value
+                    composed_rationale = "Durable reservation identity missing; budget release blocked pending reconciliation."
+                elif self.consensus_backend is not None and held_record and held_record.reservation_id:
                     try:
                         released = self.consensus_backend.release(held_record.reservation_id)
                     except Exception:
@@ -1965,6 +1972,10 @@ class DualKernelGovernor:
         if result.get("exited") and not approve:
             record = self.registry.get(idempotency_key)
             if record and record.budget_reserved and record.resource_id and record.amount > 0:
+                if self.consensus_backend is not None and not record.reservation_id:
+                    result["budget_reconciliation_required"] = True
+                    result["reason"] = "Durable reservation identity missing; budget release blocked."
+                    return result
                 if self.consensus_backend is not None and record.reservation_id:
                     try:
                         released = self.consensus_backend.release(record.reservation_id)
@@ -2003,6 +2014,10 @@ class DualKernelGovernor:
 
         # Release any reserved budget
         if result.get("expired") and record.resource_id and record.amount > 0:
+            if self.consensus_backend is not None and not record.reservation_id and (record.budget_reserved or record.budget_committed):
+                result["budget_reconciliation_required"] = True
+                result["reason"] = "Durable reservation identity missing; budget release blocked."
+                return result
             if self.consensus_backend is not None and record.reservation_id:
                 if record.budget_committed:
                     result["budget_reconciliation_required"] = True
