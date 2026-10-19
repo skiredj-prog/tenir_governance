@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import threading
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -308,7 +309,7 @@ class DualKernelGovernor:
         # Process-local guard for the window where provider.execute() is active.
         # Durable DISPATCHING recovery remains available after process restart.
         self._active_dispatches: set[str] = set()
-        self._active_dispatches_lock = __import__("threading").RLock()
+        self._active_dispatches_lock = threading.RLock()
         self.hold_manager = HoldManager(self.registry)
         # Post-execution assessor (optional). When set, the governor can
         # run τ⁻¹ and EVP assessments after terminal states. The assessor
@@ -905,6 +906,8 @@ class DualKernelGovernor:
         # 3. Get the operation record for metadata
         record = self.registry.get(idempotency_key)
         if record is None:
+            with self._active_dispatches_lock:
+                self._active_dispatches.discard(idempotency_key)
             return dispatch_result
         # The provider receives the exact amount bound to the durable record,
         # not an omitted/default or caller-substituted amount.
