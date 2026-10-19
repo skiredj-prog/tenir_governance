@@ -9,6 +9,12 @@
 - Return the actual reservation state on idempotent replay.
 - Make resource registration non-destructive; reject implicit capacity changes.
 
+### Additional safety corrections under review
+- Preserve compatibility with five-argument legacy Raft reserve commands and normalize restored float accounting before Decimal arithmetic.
+- Preserve exact Decimal values in Raft state reads and fractional values in the shared consensus state contract.
+- Validate governor amounts before budget gating; bind dispatch resource and amount to the adjudicated durable record; block dispatch under QUARANTINE_LOCK and serialize quarantine transitions against dispatch/provider execution.
+- Add regression tests for legacy state/journal compatibility, large-capacity decimal precision, invalid amounts, dispatch identity mismatch, and pre-reserved operations under quarantine.
+
 ### Test perimeter
 - Reproduction: `python -m pip install -e ".[test]" "pysyncobj==0.3.17" && pytest -q tests/test_raft_backend.py`
 - Included: local `pysyncobj` Raft integration tests, I8 regressions, invalid-amount cases, idempotent replay, resource re-registration, logical-clock replication and fractional-budget accounting.
