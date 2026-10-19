@@ -96,6 +96,18 @@ def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
     composed = governor_result.get("composed_decision", Decision.HOLD.value)
     posture = POSTURE_MAP.get(composed, "HOLDING-FIRST")
     is_degraded = composed in (Decision.HOLD.value, Decision.HARD_VETO.value)
+    trace_context = dict(context.get("trace", {}))
+    trace_id = governor_result.get("idempotency_key") or trace_context.get("trace_id")
+    if not isinstance(trace_id, str) or not trace_id.strip():
+        raise ValueError(
+            "canonical_context.trace.trace_id or idempotency_key is required; "
+            "the adapter will not fabricate a trace identifier"
+        )
+    trace_context["trace_id"] = trace_id
+    trace_context["stages"] = _build_trace_stages(governor_result)
+    for trace_key in ("ledger_entries", "ledger_valid", "passage_id"):
+        if trace_key in governor_result:
+            trace_context[trace_key] = governor_result[trace_key]
     result.update({
         "schema_version": "1.2",
         "engine_spec_version": "TENIR-2.0",
@@ -108,15 +120,7 @@ def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
         "compliance_class": COMPLIANCE_CLASS,
         "degraded_mode": _degraded_modes(context, is_degraded),
         "active_profiles": list(context.get("active_profiles", [PROFILE_VERSION])),
-        "trace": {
-            **dict(context.get("trace", {})),
-            "trace_id": str(governor_result.get("idempotency_key")
-                            or context.get("trace", {}).get("trace_id", "")),
-            "stages": _build_trace_stages(governor_result),
-            "ledger_entries": governor_result.get("ledger_entries", 0),
-            "ledger_valid": governor_result.get("ledger_valid", False),
-            "passage_id": governor_result.get("passage_id", ""),
-        },
+        "trace": trace_context,
         "synthesis": {
             **dict(context.get("synthesis", {})),
             "final_posture": posture,
@@ -182,7 +186,7 @@ def _rationale_items(governor_result: Mapping[str, Any]) -> list[str]:
         value = governor_result.get(key)
         if isinstance(value, str) and value.strip() and value not in items:
             items.append(value)
-    return items or ["Decision recorded; no rationale supplied by the governor."]
+    return items
 
 
 
