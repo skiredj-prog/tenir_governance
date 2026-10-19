@@ -1106,21 +1106,50 @@ class DualKernelGovernor:
                             "recommendation": "human_review",
                             "reason": "Budget accounting is inconsistent; refusing automatic refund/release.",
                         }
+                    # Persist ownership release before mutating accounting.
+                    # If this write fails, leave both the unresolved state and
+                    # the budget untouched; never release capacity while the
+                    # durable record still claims to own it.
+                    flags_changed = committed or record.budget_reserved
+                    if flags_changed:
+                        try:
+                            flags_ok = self.registry.set_budget_flags(
+                                idempotency_key,
+                                budget_reserved=False,
+                                budget_committed=False,
+                            )
+                        except Exception:
+                            flags_ok = False
+                        if not flags_ok:
+                            return {
+                                "reconciled": False, "idempotency_key": idempotency_key,
+                                "operation_state": current.state.value,
+                                "recommendation": "human_review",
+                                "reason": "Could not persist budget ownership release; budget unchanged.",
+                            }
                     success, _ = self.registry.transition_to(idempotency_key, OperationState.FAILED)
                     if not success:
+                        # Restore the ownership flags if the terminal transition
+                        # lost a race. No accounting mutation has happened yet.
+                        if flags_changed:
+                            try:
+                                self.registry.set_budget_flags(
+                                    idempotency_key,
+                                    budget_reserved=not committed,
+                                    budget_committed=committed,
+                                )
+                            except Exception:
+                                pass
+                        latest = self.registry.get(idempotency_key)
                         return {
                             "reconciled": False, "idempotency_key": idempotency_key,
-                            "operation_state": self.registry.get(idempotency_key).state.value,
+                            "operation_state": latest.state.value if latest else "not_found",
                             "reason": "Reconciliation transition lost; budget unchanged.",
                         }
                     if committed:
                         resource.refund(record.amount)
                     else:
                         resource.release(record.amount)
-                    if committed or record.budget_reserved:
-                        self.registry.set_budget_flags(
-                            idempotency_key, budget_reserved=False, budget_committed=False,
-                        )
             else:
                 success, _ = self.registry.transition_to(idempotency_key, OperationState.FAILED)
                 if not success:
