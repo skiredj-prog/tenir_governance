@@ -234,7 +234,7 @@ class _RaftStateMachine(SyncObj):
             return "ERROR"
         if not self._normalize_resource_values(res):
             return "CORRUPT_RESOURCE_STATE"
-        if rec["state"] == "RESERVED":
+        if rec["state"] in ("RESERVED", "UNKNOWN"):
             if res["reserved"] < amount:
                 return "INCONSISTENT_RESERVED_AMOUNT"
             res["reserved"] -= amount
@@ -290,7 +290,7 @@ class _RaftStateMachine(SyncObj):
             return "ERROR"
         if not self._normalize_resource_values(res):
             return "CORRUPT_RESOURCE_STATE"
-        if rec["state"] == "RESERVED":
+        if rec["state"] in ("RESERVED", "UNKNOWN"):
             if res["reserved"] < amount:
                 return "INCONSISTENT_RESERVED_AMOUNT"
             res["reserved"] -= amount
