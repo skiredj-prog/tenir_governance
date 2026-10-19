@@ -985,10 +985,14 @@ class DualKernelGovernor:
                 idempotency_key=idempotency_key,
             )
         except Exception as e:
+            current = self.registry.get(idempotency_key)
+            if current is not None and current.state == OperationState.DISPATCHING:
+                self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+                current = self.registry.get(idempotency_key)
             return {
                 "reconciled": False,
                 "idempotency_key": idempotency_key,
-                "operation_state": OperationState.UNKNOWN.value,
+                "operation_state": current.state.value if current else "not_found",
                 "provider_error": str(e),
                 "recommendation": "human_review",
             }
@@ -1071,11 +1075,16 @@ class DualKernelGovernor:
                 "reason": "Provider confirmed no effect occurred.",
             }
         else:
-            # Still UNKNOWN — human review required
+            # An interrupted dispatch that remains indeterminate becomes UNKNOWN;
+            # it must not remain mislabeled DISPATCHING after reconciliation.
+            current = self.registry.get(idempotency_key)
+            if current is not None and current.state == OperationState.DISPATCHING:
+                self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+                current = self.registry.get(idempotency_key)
             return {
                 "reconciled": False,
                 "idempotency_key": idempotency_key,
-                "operation_state": OperationState.UNKNOWN.value,
+                "operation_state": current.state.value if current else "not_found",
                 "provider_reference": recon.provider_reference,
                 "provider_error": recon.error,
                 "recommendation": "human_review",
