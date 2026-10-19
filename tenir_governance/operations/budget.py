@@ -156,10 +156,29 @@ except ImportError:
     fcntl = None  # Windows fallback
 
 
+MAX_DECIMAL_DIGITS = 128
+MAX_DECIMAL_EXPONENT = 128
+MAX_DECIMAL_ADJUSTED = 128
+
+
+def _validate_decimal_bounds(value: Decimal) -> Decimal:
+    """Bound accounting inputs to prevent pathological Decimal exponents."""
+    parts = value.as_tuple()
+    if (
+        len(parts.digits) > MAX_DECIMAL_DIGITS
+        or abs(parts.exponent) > MAX_DECIMAL_EXPONENT
+        or (value and value.adjusted() > MAX_DECIMAL_ADJUSTED)
+    ):
+        raise ValueError("Decimal amount exceeds supported precision or exponent bounds.")
+    return value
+
+
 def _decimal_precision(*values: Decimal) -> int:
-    """Choose enough precision to add/subtract finite Decimals without rounding."""
+    """Choose enough precision to add/subtract bounded finite Decimals exactly."""
     if not values:
         return 28
+    for value in values:
+        _validate_decimal_bounds(value)
     nonzero_values = [value for value in values if value]
     # Decimal(0).adjusted() is not useful for sizing precision, and all-zero
     # operands are common in initial budget state/invariant checks.
@@ -269,10 +288,11 @@ class DurableBudgetCoordinator:
 
     @staticmethod
     def _decimal(value) -> Decimal:
-        """Parse accounting values without introducing binary-float rounding."""
+        """Parse bounded accounting values without binary-float rounding."""
         if isinstance(value, bool):
             raise InvalidOperation("boolean is not a budget amount")
-        return value if isinstance(value, Decimal) else Decimal(str(value))
+        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
+        return _validate_decimal_bounds(parsed)
 
     def get_resource(self, resource_id: str):
         """Return a lightweight view of the resource state."""
