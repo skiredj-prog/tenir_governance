@@ -960,6 +960,20 @@ class TestSchemaAdapter:
         result = conform_to_schema(self._make_result(composed="PASS"))
         assert result["synthesis"]["principal_failure_mode"] is None
 
+    def test_does_not_infer_human_verification_from_score_presence(self):
+        result = conform_to_schema(self._make_result())
+        assert "irreversible_pathway_assessment" not in result
+
+    def test_preserves_explicit_irreversible_pathway_assessment(self):
+        source = self._make_result()
+        source["irreversible_pathway_assessment"] = {
+            "materially_affects_irreversible_pathway": True,
+            "raw_data_human_verification_required": True,
+            "human_verified_raw_data": False,
+        }
+        result = conform_to_schema(source)
+        assert result["irreversible_pathway_assessment"] == source["irreversible_pathway_assessment"]
+
     def test_schema_version(self):
         result = conform_to_schema(self._make_result())
         assert result["schema_version"] == "1.2"
