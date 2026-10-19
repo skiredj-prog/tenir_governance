@@ -717,6 +717,16 @@ class DualKernelGovernor:
         resource_id: str | None = None,
         amount: float = 0.0,
     ) -> dict[str, Any]:
+        # Linearize the quarantine check and dispatch claim against lock/unlock.
+        with self.membrane.state._quarantine_lock:
+            return self._dispatch_under_quarantine_lock(idempotency_key, resource_id, amount)
+
+    def _dispatch_under_quarantine_lock(
+        self,
+        idempotency_key: str,
+        resource_id: str | None = None,
+        amount: float = 0.0,
+    ) -> dict[str, Any]:
         """Atomically claim the dispatch slot and transition to DISPATCHING.
 
         Per review 3 §1: the transition from RESERVED → DISPATCHING is the
@@ -749,7 +759,7 @@ class DualKernelGovernor:
 
         # QUARANTINE_LOCK blocks dispatch, including operations reserved before
         # the lock was activated. Check before the durable dispatch transition.
-        if self.membrane.state.quarantine_active():
+        if self.membrane.state.quarantine_active:
             return {
                 "dispatched": False,
                 "reason": "QUARANTINE_LOCK is active; dispatch is blocked.",
@@ -812,6 +822,20 @@ class DualKernelGovernor:
         }
 
     def dispatch_and_execute(
+        self,
+        idempotency_key: str,
+        resource_id: str | None = None,
+        amount: float = 0.0,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        # Hold the same lock through the provider call: quarantine and dispatch
+        # are ordered atomically, so a late lock cannot race an unstarted effect.
+        with self.membrane.state._quarantine_lock:
+            return self._dispatch_and_execute_under_quarantine_lock(
+                idempotency_key, resource_id, amount, metadata,
+            )
+
+    def _dispatch_and_execute_under_quarantine_lock(
         self,
         idempotency_key: str,
         resource_id: str | None = None,
