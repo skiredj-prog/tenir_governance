@@ -472,21 +472,49 @@ class SingleHostLockBackend:
                 rec = reservations[reservation_id]
 
                 if effect_observed is True:
-                    # Effect confirmed — commit
-                    if self._coordinator.commit(rec["resource_id"], Decimal(str(rec["amount"]))):
-                        rec["state"] = "COMMITTED"
-                        rec["committed_at"] = time.time()
-                        self._persist_reservations(reservations)
-                        return ReconciliationResult(status="CONFIRMED", effect_observed=True)
-                    else:
+                    # Effect confirmed — journal the budget/registry transition
+                    # so a crash between the two durable writes is recoverable.
+                    amount = Decimal(str(rec["amount"]))
+                    before = self._snapshot(rec["resource_id"])
+                    if Decimal(before["reserved"]) < amount:
                         return ReconciliationResult(status="ERROR", effect_observed=True)
+                    after = dict(before)
+                    after["reserved"] = str(Decimal(before["reserved"]) - amount)
+                    after["consumed"] = str(Decimal(before["consumed"]) + amount)
+                    updated = dict(rec)
+                    updated["state"] = "COMMITTED"
+                    updated["committed_at"] = time.time()
+                    self._persist_transaction({
+                        "operation": "commit", "reservation_id": reservation_id,
+                        "record": updated, "before": before, "after": after,
+                    })
+                    if not self._coordinator.commit(rec["resource_id"], amount):
+                        self._clear_transaction()
+                        return ReconciliationResult(status="ERROR", effect_observed=True)
+                    reservations[reservation_id] = updated
+                    self._persist_reservations(reservations)
+                    self._clear_transaction()
+                    return ReconciliationResult(status="CONFIRMED", effect_observed=True)
 
                 elif effect_observed is False:
-                    # No effect — release
-                    self._coordinator.release(rec["resource_id"], Decimal(str(rec["amount"])))
-                    rec["state"] = "RELEASED"
-                    rec["released_at"] = time.time()
+                    # No effect — journal the release so restart cannot double-release.
+                    amount = Decimal(str(rec["amount"]))
+                    before = self._snapshot(rec["resource_id"])
+                    if Decimal(before["reserved"]) < amount:
+                        return ReconciliationResult(status="ERROR", effect_observed=False)
+                    after = dict(before)
+                    after["reserved"] = str(Decimal(before["reserved"]) - amount)
+                    updated = dict(rec)
+                    updated["state"] = "RELEASED"
+                    updated["released_at"] = time.time()
+                    self._persist_transaction({
+                        "operation": "release", "reservation_id": reservation_id,
+                        "record": updated, "before": before, "after": after,
+                    })
+                    self._coordinator.release(rec["resource_id"], amount)
+                    reservations[reservation_id] = updated
                     self._persist_reservations(reservations)
+                    self._clear_transaction()
                     return ReconciliationResult(status="FAILED", effect_observed=False)
 
                 else:
