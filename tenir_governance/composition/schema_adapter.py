@@ -106,7 +106,14 @@ def conform_to_schema(governor_result: Mapping[str, Any]) -> dict[str, Any]:
             "the adapter will not infer profile activation"
         )
     active_profiles = list(active_profiles)
-    trace_context = dict(context.get("trace", {}))
+    if len(set(active_profiles)) != len(active_profiles):
+        raise ValueError(
+            "canonical_context.active_profiles must not contain duplicate profile identifiers"
+        )
+    trace_value = context.get("trace")
+    if not isinstance(trace_value, Mapping):
+        raise ValueError("canonical_context.trace must be an explicit mapping")
+    trace_context = dict(trace_value)
     trace_id = governor_result.get("idempotency_key") or trace_context.get("trace_id")
     if not isinstance(trace_id, str) or not trace_id.strip():
         raise ValueError(
