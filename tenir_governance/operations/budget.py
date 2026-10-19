@@ -181,13 +181,24 @@ def _decimal_precision(*values: Decimal) -> int:
     """Choose enough precision to add/subtract bounded finite Decimals exactly."""
     if not values:
         return 28
-    for value in values:
-        _validate_decimal_bounds(value)
+    # Inputs are validated at the accounting boundary by _decimal(). Zero
+    # values carry no magnitude, so their representation exponent must not
+    # inflate precision requirements or make an otherwise valid operation
+    # fail (e.g. a persisted Decimal zero with exponent -129).
     nonzero_values = [value for value in values if value]
-    # Decimal(0).adjusted() is not useful for sizing precision, and all-zero
-    # operands are common in initial budget state/invariant checks.
+    # Do not apply the external-input digit-count limit to arithmetic results:
+    # exact subtraction near the supported magnitude boundary can legitimately
+    # create a temporary coefficient longer than MAX_DECIMAL_DIGITS. Keep the
+    # exponent/magnitude guards here to bound internal work; _decimal() remains
+    # the strict validation boundary for caller-supplied amounts and capacities.
+    for value in nonzero_values:
+        parts = value.as_tuple()
+        if abs(parts.exponent) > MAX_DECIMAL_EXPONENT or value.adjusted() > MAX_DECIMAL_ADJUSTED:
+            raise ValueError("Decimal operand exceeds supported exponent or magnitude bounds.")
     highest_adjusted = max((value.adjusted() for value in nonzero_values), default=0)
-    lowest_exponent = min(value.as_tuple().exponent for value in values)
+    lowest_exponent = min(
+        (value.as_tuple().exponent for value in nonzero_values), default=0
+    )
     return max(28, highest_adjusted - lowest_exponent + 2)
 
 
