@@ -265,10 +265,32 @@ class DurableBudgetCoordinator:
             return
         try:
             with open(self._store_path, "r") as f:
-                self._resources = json.load(f)
-        except (json.JSONDecodeError, ValueError):
-            # Corrupted store — fail-closed: keep existing state or empty
-            pass
+                loaded = json.load(f)
+            if not isinstance(loaded, dict):
+                raise ValueError("budget store root must be an object")
+            normalized = {}
+            for resource_id, record in loaded.items():
+                if not isinstance(record, dict):
+                    raise ValueError(f"invalid record for resource {resource_id!r}")
+                try:
+                    capacity = float(record["capacity"])
+                    reserved = float(record["reserved"])
+                    consumed = float(record["consumed"])
+                except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError(f"invalid counters for resource {resource_id!r}") from exc
+                if (
+                    not all(math.isfinite(v) and v >= 0 for v in (capacity, reserved, consumed))
+                    or reserved + consumed > capacity
+                ):
+                    raise ValueError(f"budget invariant invalid for resource {resource_id!r}")
+                normalized[resource_id] = {
+                    "capacity": capacity, "reserved": reserved, "consumed": consumed,
+                }
+            self._resources = normalized
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            # Corrupt durable state is not equivalent to an empty budget.
+            # Refuse the operation so registration cannot silently reset it.
+            raise RuntimeError("Corrupted durable budget store; refusing operation.") from exc
 
     def _persist(self):
         """Persist budget state atomically (temp file, fsync, rename)."""
