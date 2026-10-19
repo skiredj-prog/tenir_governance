@@ -1176,7 +1176,18 @@ class TestListOneRegressions:
         assert state.reserved == Decimal("0")
         assert state.committed == Decimal("0")
 
-    def test_legacy_float_reservation_can_be_committed_after_upgrade(self, cluster):
+    @pytest.mark.parametrize(
+        ("operation", "expected_status", "expected_reserved", "expected_committed"),
+        [
+            ("commit", "COMMITTED", Decimal("0.0"), Decimal("0.1")),
+            ("release", "RELEASED", Decimal("0.0"), Decimal("0.0")),
+            ("reconcile_commit", "COMMITTED", Decimal("0.0"), Decimal("0.1")),
+            ("reconcile_release", "RELEASED", Decimal("0.0"), Decimal("0.0")),
+        ],
+    )
+    def test_legacy_float_reservation_transitions_after_upgrade(
+        self, cluster, operation, expected_status, expected_reserved, expected_committed
+    ):
         leader = _get_leader(cluster)
         assert leader.register_resource("budget-LEGACY-COMMIT", 100) == "REGISTERED"
         # Simulate a pre-Decimal journal restored consistently on all replicas.
@@ -1189,11 +1200,14 @@ class TestListOneRegressions:
                 "resource_id": "budget-LEGACY-COMMIT", "state": "RESERVED",
             }
             node._raft._key_index["legacy-key"] = "legacy-reservation"
-        result = leader.commit("legacy-reservation")
-        assert result.status == "COMMITTED"
+        raw_status = getattr(leader._raft, operation)(
+            "legacy-reservation", sync=True, timeout=10.0,
+        )
+        assert raw_status == expected_status
         state = leader.get_state("budget-LEGACY-COMMIT")
-        assert state.reserved == Decimal("0.0")
-        assert state.committed == Decimal("0.1")
+        assert state.reserved == expected_reserved
+        assert state.committed == expected_committed
+        assert state.reserved + state.committed <= state.capacity
 
     def test_legacy_five_argument_reserve_command_remains_callable(self, cluster):
         leader = _get_leader(cluster)
