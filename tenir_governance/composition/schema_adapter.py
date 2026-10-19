@@ -246,27 +246,23 @@ def _trace_status(decision: Any) -> str:
 
 
 def _principal_failure_mode(governor_result: Mapping[str, Any]) -> str | None:
-    """Determine the principal failure mode for synthesis.
+    """Preserve an explicitly evidenced failure mode; never infer its cause.
 
-    Per schema: principal_failure_mode describes why the system is in
-    a degraded state. Returns None if not degraded.
+    A posture or kernel decision alone is insufficient evidence to attribute
+    a causal failure mode. The canonical context may provide the field directly,
+    or the governor result may provide an explicit principal_failure_mode.
     """
-    composed = governor_result.get("composed_decision", "")
+    supplied = governor_result.get("principal_failure_mode")
+    if supplied is None:
+        context = governor_result.get("canonical_context")
+        synthesis = context.get("synthesis") if isinstance(context, Mapping) else None
+        if isinstance(synthesis, Mapping):
+            supplied = synthesis.get("principal_failure_mode")
 
-    if composed == Decision.HARD_VETO.value:
-        if governor_result.get("scoring_decision") == Decision.HARD_VETO.value:
-            return "scoring-conclusive-risk"
-        if governor_result.get("membrane_decision") == Decision.HARD_VETO.value:
-            return "membrane-invariant-violation"
-        return "composed-hard-veto"
-
-    if composed == Decision.HOLD.value:
-        if governor_result.get("scoring_decision") is None:
-            return "scoring-kernel-unavailable"
-        if governor_result.get("membrane_decision") is None:
-            return "membrane-kernel-unavailable"
-        if governor_result.get("membrane_decision") == Decision.HOLD.value:
-            return "membrane-pending-reconciliation"
-        return "budget-escalation"
-
-    return None
+    if supplied is not None and (
+        not isinstance(supplied, str) or not supplied.strip()
+    ):
+        raise ValueError(
+            "principal_failure_mode must be a non-empty string or null when supplied"
+        )
+    return supplied
