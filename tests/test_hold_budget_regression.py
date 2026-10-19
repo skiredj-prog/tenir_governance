@@ -480,14 +480,34 @@ def test_fail_refuses_dispatching_without_confirmed_provider_outcome():
     assert record.budget_committed is True
     assert budget.consumed == 10.0
 
-    # The same path is allowed only when the provider explicitly establishes
-    # that no external effect occurred (the dispatch implementation passes it).
-    assert gov.fail(
-        passage.idempotency_key,
-        _provider_confirmed_no_effect=True,
-    ) is True
-    assert gov.registry.get(passage.idempotency_key).state == OperationState.FAILED
-    assert budget.consumed == 0.0
+    # Public callers cannot forge provider confirmation through a boolean flag.
+    with pytest.raises(TypeError):
+        gov.fail(
+            passage.idempotency_key,
+            _provider_confirmed_no_effect=True,
+        )
+    assert gov.fail(passage.idempotency_key) is False
+    assert gov.registry.get(passage.idempotency_key).state == OperationState.DISPATCHING
+    assert budget.consumed == 10.0
+
+    # A real provider FAILED result uses the dedicated dispatch path.
+    failed_provider = MockProvider(behavior="failed")
+    failed_gov, failed_state = _setup_governor(
+        budget_capacity=100.0, provider=failed_provider,
+    )
+    failed_budget = failed_state.resources["budget"]
+    failed_passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    failed_gov.adjudicate(
+        failed_passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    failed_result = failed_gov.dispatch_and_execute(
+        failed_passage.idempotency_key, "budget", 10.0,
+    )
+    assert failed_result["operation_state"] == OperationState.FAILED.value
+    assert failed_gov.registry.get(failed_passage.idempotency_key).state == OperationState.FAILED
+    assert failed_budget.reserved == 0.0
+    assert failed_budget.consumed == 0.0
 
 
 
