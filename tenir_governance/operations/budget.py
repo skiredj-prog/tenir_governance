@@ -53,54 +53,8 @@ class BudgetCoordinator(Protocol):
         ...
 
     def refund(self, resource_id: str, amount: float) -> bool:
-        """Reverse committed accounting after authoritative non-execution proof.
-
-        Unlike release(), refund() never silently clamps an underflow: a caller
-        must not convert inconsistent accounting into an apparently valid state.
-        """
-        try:
-            amount = self._decimal(amount)
-        except (TypeError, ValueError, InvalidOperation):
-            return False
-        if not amount.is_finite() or amount <= 0:
-            return False
-        with self._lock:
-            flock = self._lock_file()
-            try:
-                if self._store_path and os.path.exists(self._store_path):
-                    self._load()
-                resource = self._resources.get(resource_id)
-                if resource is None or resource["consumed"] < amount:
-                    return False
-                resource["consumed"] = _decimal_subtract(resource["consumed"], amount)
-                self._persist()
-                return True
-            finally:
-                if flock:
-                    flock.close()
-
-    def refund(self, resource_id: str, amount: float) -> bool:
         """Reverse committed accounting after authoritative non-execution proof."""
-        try:
-            amount = self._decimal(amount)
-        except (TypeError, ValueError, InvalidOperation):
-            return False
-        if not amount.is_finite() or amount <= 0:
-            return False
-        with self._lock:
-            flock = self._lock_file()
-            try:
-                if self._store_path and os.path.exists(self._store_path):
-                    self._load()
-                resource = self._resources.get(resource_id)
-                if resource is None or resource["consumed"] < amount:
-                    return False
-                resource["consumed"] = _decimal_subtract(resource["consumed"], amount)
-                self._persist()
-                return True
-            finally:
-                if flock:
-                    flock.close()
+        ...
 
     def get_utilization(self, resource_id: str) -> float | None:
         """Get current utilization fraction (0.0–1.0), or None if unavailable.
@@ -510,6 +464,32 @@ class DurableBudgetCoordinator:
                     return
                 r["reserved"] = max(Decimal("0"), _decimal_subtract(r["reserved"], amount))
                 self._persist()
+            finally:
+                if flock:
+                    flock.close()
+
+    def refund(self, resource_id: str, amount: float) -> bool:
+        """Reverse committed accounting after authoritative non-execution proof.
+
+        Refuse underflow rather than silently clamping inconsistent state.
+        """
+        try:
+            amount = self._decimal(amount)
+        except (TypeError, ValueError, InvalidOperation):
+            return False
+        if not amount.is_finite() or amount <= 0:
+            return False
+        with self._lock:
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                resource = self._resources.get(resource_id)
+                if resource is None or resource["consumed"] < amount:
+                    return False
+                resource["consumed"] = _decimal_subtract(resource["consumed"], amount)
+                self._persist()
+                return True
             finally:
                 if flock:
                     flock.close()
