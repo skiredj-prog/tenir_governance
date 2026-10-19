@@ -61,15 +61,17 @@ class TestLivenessTermination:
     def test_corrupted_reservation_registry_fails_closed(self, tmp_path):
         backend = SingleHostLockBackend(str(tmp_path))
         backend.register_resource("corrupt-registry-budget", 1)
+        budget_path = tmp_path / "budget.json"
+        budget_before = budget_path.read_bytes()
         (tmp_path / "reservations.json").write_text("{not-json")
 
         with pytest.raises(RuntimeError, match="Corrupted durable reservation registry"):
             backend.reserve("must-not-duplicate", 0.1, "corrupt-registry-budget")
-        # The budget is untouched because the registry cannot prove idempotency.
-        state = backend.get_state("corrupt-registry-budget")
-        assert state.reserved == 0
-        assert state.committed == 0
-        assert state.available == 1
+        # The budget file is untouched, and reads also fail closed while the
+        # registry cannot prove the operation state.
+        assert budget_path.read_bytes() == budget_before
+        with pytest.raises(RuntimeError, match="Corrupted durable reservation registry"):
+            backend.get_state("corrupt-registry-budget")
 
     def test_resource_reregistration_preserves_accounting(self, tmp_path):
         backend = SingleHostLockBackend(str(tmp_path))
