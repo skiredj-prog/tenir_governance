@@ -1221,17 +1221,36 @@ class DualKernelGovernor:
                 accounted = resource.consumed if committed else resource.reserved
                 if accounted < recorded_amount:
                     return False
-                success, _prev_state = self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                flags_changed = committed or record.budget_reserved
+                if flags_changed:
+                    try:
+                        flags_ok = self.registry.set_budget_flags(
+                            idempotency_key,
+                            budget_reserved=False,
+                            budget_committed=False,
+                        )
+                    except Exception:
+                        flags_ok = False
+                    if not flags_ok:
+                        return False
+                success, _prev_state = self.registry.transition_to(
+                    idempotency_key, OperationState.FAILED,
+                )
                 if not success:
+                    if flags_changed:
+                        try:
+                            self.registry.set_budget_flags(
+                                idempotency_key,
+                                budget_reserved=not committed,
+                                budget_committed=committed,
+                            )
+                        except Exception:
+                            pass
                     return False
                 if committed:
                     resource.refund(recorded_amount)
                 else:
                     resource.release(recorded_amount)
-                if committed or record.budget_reserved:
-                    self.registry.set_budget_flags(
-                        idempotency_key, budget_reserved=False, budget_committed=False,
-                    )
                 return True
 
         success, _prev_state = self.registry.transition_to(idempotency_key, OperationState.FAILED)
