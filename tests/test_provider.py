@@ -31,6 +31,29 @@ from tenir_governance.objects import Passage
 from tenir_kernel.kernel import TenirKernel
 
 
+def test_indeterminate_reconciliation_normalizes_dispatching_to_unknown():
+    gov, _state = _setup_governor()
+    key = "interrupted-dispatch-indeterminate"
+    record = OperationRecord(
+        idempotency_key=key, passage_id="p-interrupted",
+        agent_id="alice", action_type="payment", amount=0.0,
+    )
+    assert gov.registry.register(record)
+    assert gov.registry.transition_to(key, OperationState.RESERVED)[0]
+    assert gov.registry.transition_to(key, OperationState.DISPATCHING)[0]
+
+    class IndeterminateProvider:
+        def reconcile(self, **kwargs):
+            return ReconciliationResult(resolved=False, outcome=ProviderOutcome.UNKNOWN)
+
+    gov.provider = IndeterminateProvider()
+    result = gov.reconcile_unknown(key)
+
+    assert result["reconciled"] is False
+    assert result["operation_state"] == OperationState.UNKNOWN.value
+    assert gov.registry.get(key).state == OperationState.UNKNOWN
+
+
 def test_reconcile_can_recover_interrupted_dispatching_operation():
     gov, state = _setup_governor(provider=MockProvider(behavior="timeout"))
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
