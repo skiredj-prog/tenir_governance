@@ -159,7 +159,7 @@ def _degraded_modes(context: Mapping[str, Any], is_degraded: bool) -> list[str]:
     """Return schema-defined degradation labels without inventing causes."""
     supplied = context.get("degraded_mode")
     modes = list(supplied) if isinstance(supplied, (list, tuple)) else []
-    if is_degraded and not modes:
+    if is_degraded and (not modes or modes == ["none"]):
         modes = ["sparse_ingress"]
     if not is_degraded and not modes:
         modes = ["none"]
