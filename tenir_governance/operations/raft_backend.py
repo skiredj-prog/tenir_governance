@@ -124,12 +124,12 @@ class _RaftStateMachine(SyncObj):
         return "REGISTERED"
 
     @replicated
-    def reserve(self, key, amount, resource_id, reservation_id):
+    def reserve(self, key, amount, resource_id, reservation_id, _legacy_timestamp=None):
         """Reserve budget for an idempotency key.
 
-        reservation_id and timestamp are generated client-side and passed as
-        arguments to ensure deterministic replication (Raft requires all
-        state machine commands to be deterministic).
+        The optional legacy timestamp preserves replay compatibility with
+        journals written by the previous five-argument command. New calls do
+        not use wall-clock timestamps; logical time is assigned on replication.
 
         Returns: (status, reservation_id, amount_reserved)
         - RESERVED: reservation created or existing returned (idempotent)
@@ -144,13 +144,27 @@ class _RaftStateMachine(SyncObj):
             rec = self._reservations.get(rid)
             if rec is None:
                 return ("IDEMPOTENCY_INDEX_CORRUPTED", None, None)
-            if rec["amount"] == normalized and rec["resource_id"] == resource_id:
+            # Old journals may contain float accounting values. Normalize via
+            # str() to avoid importing binary float artifacts into Decimal math.
+            old_amount = _validated_amount(rec.get("amount"), allow_zero=True)
+            if old_amount is None:
+                return ("CORRUPT_RESERVATION_STATE", None, None)
+            rec["amount"] = old_amount
+            if old_amount == normalized and rec["resource_id"] == resource_id:
                 return (rec["state"], rid, normalized)
             return ("DUPLICATE_KEY", None, None)
         res = self._resources.get(resource_id)
         if res is None:
             return ("UNKNOWN_RESOURCE", None, None)
-        if res["reserved"] + res["committed"] + normalized > res["capacity"]:
+        # Normalize persisted pre-Decimal state before arithmetic after upgrade.
+        # Fail closed if any stored accounting value is invalid.
+        capacity = _validated_amount(res.get("capacity"), allow_zero=True)
+        reserved = _validated_amount(res.get("reserved"), allow_zero=True)
+        committed = _validated_amount(res.get("committed"), allow_zero=True)
+        if capacity is None or reserved is None or committed is None:
+            return ("CORRUPT_RESOURCE_STATE", None, None)
+        res["capacity"], res["reserved"], res["committed"] = capacity, reserved, committed
+        if reserved + committed + normalized > capacity:
             return ("INSUFFICIENT_BUDGET", None, None)
         if reservation_id in self._reservations:
             return ("RESERVATION_ID_CONFLICT", None, None)
@@ -264,19 +278,34 @@ class _RaftStateMachine(SyncObj):
             {
                 "reservation_id": rid,
                 "key": rec["key"],
-                "amount": float(rec["amount"]),
+                "amount": _validated_amount(rec["amount"], allow_zero=True),
                 "state": rec["state"],
             }
             for rid, rec in self._reservations.items()
             if rec.get("resource_id") == resource_id
         ]
 
+        # Expose exact decimal values; float conversion loses precision for
+        # large capacities (e.g. 1e18 with a 0.1 reservation).
+        try:
+            capacity = Decimal(str(res["capacity"]))
+            reserved = Decimal(str(res["reserved"]))
+            committed = Decimal(str(res["committed"]))
+            if not all(v.is_finite() and v >= 0 for v in (capacity, reserved, committed)):
+                raise InvalidOperation
+            normalized_reservations = [
+                {**record, "amount": Decimal(str(record["amount"]))}
+                for record in reservations
+            ]
+        except (InvalidOperation, ValueError, TypeError, KeyError):
+            return {"available": Decimal("0"), "reserved": Decimal("0"), "committed": Decimal("0"),
+                    "capacity": Decimal("0"), "reservations": [], "error": "CORRUPT_STATE"}
         return {
-            "available": float(res["capacity"] - res["reserved"] - res["committed"]),
-            "reserved": float(res["reserved"]),
-            "committed": float(res["committed"]),
-            "capacity": float(res["capacity"]),
-            "reservations": reservations,
+            "available": capacity - reserved - committed,
+            "reserved": reserved,
+            "committed": committed,
+            "capacity": capacity,
+            "reservations": normalized_reservations,
         }
 
     def find_by_key(self, key):
