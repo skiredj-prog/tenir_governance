@@ -754,3 +754,31 @@ def test_direct_provider_confirmation_uses_durable_confirm_path(tmp_path):
     assert record.budget_committed is True
     assert state.reserved == Decimal("0")
     assert state.committed == Decimal("10.0")
+
+
+def test_fail_recovers_reservation_identity_after_crash_before_registry_flags(tmp_path):
+    from tenir_governance.operations.registry import OperationRecord
+
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path)
+    key = "fail-after-reserve-before-flags"
+    assert gov.registry.register(OperationRecord(
+        idempotency_key=key, passage_id="passage-crash-fail",
+        agent_id="alice", action_type="payment",
+        amount=10.0, resource_id="budget",
+    ))
+
+    reservation = backend.reserve(key, Decimal("10.0"), "budget")
+    assert reservation.status == "RESERVED"
+    # Simulate a process crash before reservation_id/budget_reserved reached
+    # the operation registry.
+    assert gov.registry.get(key).reservation_id == ""
+    assert gov.registry.get(key).budget_reserved is False
+
+    assert gov.fail(key, "budget", 10.0) is True
+    record = gov.registry.get(key)
+    state = backend.get_state("budget")
+    assert record.state == OperationState.FAILED
+    assert record.reservation_id == reservation.reservation_id
+    assert record.budget_reserved is False
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("0")
