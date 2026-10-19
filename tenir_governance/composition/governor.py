@@ -1246,11 +1246,11 @@ class DualKernelGovernor:
         is uncertain and must be reconciled, just like UNKNOWN.
         """
         record = self.registry.get(idempotency_key)
-        if record.state == OperationState.DISPATCHING and not _provider_confirmed_no_effect:
-            return False
         if record is None or record.state == OperationState.UNKNOWN:
             # UNKNOWN is not proof of non-execution. Require reconciliation
             # before transitioning to FAILED or compensating committed spend.
+            return False
+        if record.state == OperationState.DISPATCHING and not _provider_confirmed_no_effect:
             return False
         recorded_resource = record.resource_id or None
         if resource_id is None:
