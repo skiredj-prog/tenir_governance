@@ -237,3 +237,25 @@ def test_fail_without_budget_arguments_refunds_durable_committed_spend():
     assert record.state == OperationState.FAILED
     assert state.resources["budget"].reserved == 0.0
     assert state.resources["budget"].consumed == 0.0
+
+
+def test_commit_passage_fails_closed_on_coordinator_resource_identity_mismatch():
+    state = MembraneState()
+    membrane_resource = Resource(resource_id="budget", capacity=100.0)
+    state.register_resource(membrane_resource)
+    membrane = TransitionMembrane(state)
+
+    foreign_coordinator = InProcessBudgetCoordinator()
+    foreign_resource = Resource(resource_id="budget", capacity=1000.0)
+    foreign_coordinator.register(foreign_resource)
+    membrane.budget_coordinator = foreign_coordinator
+
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    assert foreign_coordinator.reserve("budget", 10.0, reservation_id=passage.idempotency_key)
+
+    # Must not leak ValueError from register() or mutate the foreign resource.
+    membrane.commit_passage(passage, resource_id="budget", amount=10.0)
+
+    assert passage.execution_status.value != "DISPATCHED"
+    assert foreign_resource.reserved == 10.0
+    assert foreign_resource.consumed == 0.0
