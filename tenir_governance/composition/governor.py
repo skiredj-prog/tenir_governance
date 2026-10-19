@@ -1330,18 +1330,42 @@ class DualKernelGovernor:
             }
         elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
             committed = record.budget_committed
-            if self.consensus_backend is not None and record.reservation_id:
+            if self.consensus_backend is not None and record.amount > 0:
                 # The backend is authoritative when a crash occurred between
-                # its commit and the registry ownership-flag write.
+                # reservation/commit and registry ownership persistence.
                 try:
+                    if not record.resource_id:
+                        raise RuntimeError("Budgeted operation has no durable resource identity")
                     backend_state = self.consensus_backend.get_state(record.resource_id)
                     durable_reservation = next(
                         (item for item in backend_state.reservations
-                         if item.get("reservation_id") == record.reservation_id),
+                         if record.reservation_id
+                         and item.get("reservation_id") == record.reservation_id),
                         None,
                     )
+                    if durable_reservation is None and not record.reservation_id:
+                        durable_reservation = next(
+                            (item for item in backend_state.reservations
+                             if item.get("key") == idempotency_key),
+                            None,
+                        )
+                    if durable_reservation is None:
+                        raise RuntimeError("Durable reservation identity cannot be recovered or verified")
+                    if float(durable_reservation.get("amount", -1)) != float(record.amount):
+                        raise RuntimeError("Durable reservation amount does not match the operation record")
+                    reservation_id = durable_reservation.get("reservation_id")
+                    if not reservation_id:
+                        raise RuntimeError("Recovered durable reservation has no reservation ID")
+                    if record.reservation_id != reservation_id:
+                        identity_ok = self.registry.set_budget_flags(
+                            idempotency_key,
+                            reservation_id=reservation_id,
+                        )
+                        if not identity_ok:
+                            raise RuntimeError("Could not persist recovered durable reservation identity")
                 except Exception:
                     durable_reservation = None
+                    reservation_id = None
                 if durable_reservation is None:
                     return {
                         "reconciled": False, "idempotency_key": idempotency_key,
@@ -1367,9 +1391,9 @@ class DualKernelGovernor:
                 # compensate the durable reservation before terminalizing the registry.
                 try:
                     compensation = (
-                        self.consensus_backend.refund(record.reservation_id)
+                        self.consensus_backend.refund(reservation_id)
                         if committed
-                        else self.consensus_backend.release(record.reservation_id)
+                        else self.consensus_backend.release(reservation_id)
                     )
                 except Exception as exc:
                     return {
@@ -1394,7 +1418,7 @@ class DualKernelGovernor:
                         idempotency_key,
                         budget_reserved=False,
                         budget_committed=False,
-                        reservation_id=record.reservation_id,
+                        reservation_id=reservation_id,
                     )
                 except Exception:
                     flags_ok = False
