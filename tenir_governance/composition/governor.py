@@ -1481,7 +1481,24 @@ class DualKernelGovernor:
                             success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
                             if success:
                                 resource.release(amount)
-                                hold_resolved = True
+                                try:
+                                    self.registry.set_budget_flags(
+                                        idem_key,
+                                        budget_reserved=False,
+                                        budget_committed=False,
+                                    )
+                                except Exception:
+                                    # The operation is terminal, but ownership
+                                    # persistence failed. Preserve a visible
+                                    # reconciliation signal instead of claiming
+                                    # a fully resolved HOLD.
+                                    composed_decision = Decision.HOLD.value
+                                    composed_rationale = (
+                                        "HOLD veto applied, but budget ownership flags could not be persisted; reconciliation required."
+                                    )
+                                    hold_resolved = False
+                                else:
+                                    hold_resolved = True
                             else:
                                 composed_decision = Decision.HOLD.value
                                 composed_rationale = "HARD_VETO re-adjudication lost the terminal transition race; budget unchanged."
