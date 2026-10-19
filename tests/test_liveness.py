@@ -24,6 +24,7 @@ import threading
 import time
 
 import pytest
+from decimal import Decimal
 
 from tenir_governance.operations.consensus_backend import (
     SingleHostLockBackend,
@@ -39,6 +40,17 @@ class TestLivenessTermination:
     """Verify that operations terminate within T_max under quorum."""
 
     T_MAX = 5.0  # 5 seconds — generous for single-host file-lock
+
+    def test_decimal_reservation_is_json_safe_and_idempotent(self, tmp_path):
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("decimal-budget", 1)
+        first = backend.reserve("decimal-key", Decimal("0.1"), "decimal-budget")
+        assert first.status == "RESERVED"
+        replay = backend.reserve("decimal-key", Decimal("0.1"), "decimal-budget")
+        assert replay.status == "RESERVED"
+        state = backend.get_state("decimal-budget")
+        assert state.reserved == 0.1
+        assert state.available == 0.9
 
     def test_reserve_terminates_within_T_max(self, tmp_path):
         """reserve() must complete within T_max."""
