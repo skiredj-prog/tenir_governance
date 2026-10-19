@@ -299,12 +299,19 @@ class HoldManager:
             return {"expired": False, "operation_state": record.state.value,
                     "reason": f"Operation is in state {record.state.value}, not HOLD."}
 
-        if record.hold_record:
-            record.hold_record.exit_reason = "expired"
+        expiry = self.check_tau_k_expiry(idempotency_key)
+        if not expiry["expired"]:
+            return {
+                "expired": False,
+                "operation_state": record.state.value,
+                "reason": expiry["reason"],
+            }
 
         success, _prev = self._registry.transition_to(
             idempotency_key, OperationState.FAILED,
         )
+        if success and record.hold_record:
+            record.hold_record.exit_reason = "expired"
         return {
             "expired": success,
             "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,

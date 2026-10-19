@@ -2257,17 +2257,22 @@ class DualKernelGovernor:
 
         result = self.hold_manager.expire_hold(idempotency_key)
 
-        # Release any reserved budget
+        # Release only a reservation this operation's durable flags prove it owns.
+        # A reservation_id without those flags is not ownership.
         if result.get("expired") and record.resource_id and record.amount > 0:
-            if self.consensus_backend is not None and not record.reservation_id and (record.budget_reserved or record.budget_committed):
+            owns_reservation = bool(record.budget_reserved)
+            owns_commit = bool(record.budget_committed)
+            if not owns_reservation and not owns_commit:
+                return result
+            if owns_commit:
+                result["budget_reconciliation_required"] = True
+                result["reason"] = "HOLD expiry found a committed reservation; refusing release without reconciliation."
+                return result
+            if self.consensus_backend is not None and not record.reservation_id:
                 result["budget_reconciliation_required"] = True
                 result["reason"] = "Durable reservation identity missing; budget release blocked."
                 return result
             if self.consensus_backend is not None and record.reservation_id:
-                if record.budget_committed:
-                    result["budget_reconciliation_required"] = True
-                    result["reason"] = "HOLD expiry found a committed reservation; refusing release without reconciliation."
-                    return result
                 try:
                     released = self.consensus_backend.release(record.reservation_id)
                 except Exception:
@@ -2276,20 +2281,18 @@ class DualKernelGovernor:
                     result["budget_reconciliation_required"] = True
                     result["reason"] = "HOLD expired, but durable budget release is unresolved."
                     return result
-                if record.budget_reserved or record.budget_committed:
-                    self.registry.set_budget_flags(
-                        idempotency_key, budget_reserved=False,
-                        budget_committed=False, reservation_id=record.reservation_id,
-                    )
+                self.registry.set_budget_flags(
+                    idempotency_key, budget_reserved=False,
+                    budget_committed=False, reservation_id=record.reservation_id,
+                )
             else:
                 resource = self.membrane.state.resources.get(record.resource_id)
                 if resource:
                     with self.membrane.state.get_lock(record.resource_id):
                         resource.release(record.amount)
-                if record.budget_reserved or record.budget_committed:
-                    self.registry.set_budget_flags(
-                        idempotency_key, budget_reserved=False, budget_committed=False,
-                    )
+                self.registry.set_budget_flags(
+                    idempotency_key, budget_reserved=False, budget_committed=False,
+                )
 
         return result
 
