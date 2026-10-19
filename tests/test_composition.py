@@ -1108,6 +1108,12 @@ class TestSchemaAdapter:
         result = conform_to_schema(self._make_result(composed="PASS"))
         assert result["synthesis"]["principal_failure_mode"] is None
 
+    def test_missing_active_profiles_fails_closed(self):
+        source = self._make_result()
+        source["canonical_context"].pop("active_profiles", None)
+        with pytest.raises(ValueError, match="active_profiles"):
+            conform_to_schema(source)
+
     def test_missing_trace_identifier_fails_closed(self):
         source = self._make_result()
         source["canonical_context"]["trace"].pop("trace_id", None)
