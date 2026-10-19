@@ -45,6 +45,70 @@ def _setup_governor(budget_capacity=100.0, policy=None, registry=None):
     return DualKernelGovernor(scoring, membrane, policy=policy, registry=registry), state
 
 
+
+def test_failed_escalation_does_not_leave_false_exit_metadata(monkeypatch):
+    """A losing HOLD -> ESCALATED race must not persist an escalation marker."""
+    reg = DurableOperationRegistry()
+    key = "hold-escalation-lost-race"
+    assert reg.register(OperationRecord(
+        idempotency_key=key, passage_id="p-race",
+        agent_id="alice", action_type="payment",
+    ))
+    hm = HoldManager(reg)
+    assert hm.enter_hold(key, tau_k_seconds=3600)["entered"]
+    original = reg.transition_to
+
+    def lose_race(idempotency_key, target, *args, **kwargs):
+        if target == OperationState.ESCALATED:
+            # Another worker wins HOLD -> FAILED before this transition.
+            assert original(idempotency_key, OperationState.FAILED)[0]
+            return False, OperationState.FAILED
+        return original(idempotency_key, target, *args, **kwargs)
+
+    monkeypatch.setattr(reg, "transition_to", lose_race)
+    result = hm.escalate_hold(key, escalated_by="risk-officer")
+
+    assert result["escalated"] is False
+    final = reg.get(key)
+    assert final.state == OperationState.FAILED
+    assert final.hold_record.exit_reason != "escalated"
+    assert not final.hold_record.escalated_at
+
+
+def test_failed_authorized_exit_does_not_leave_false_receipt(monkeypatch):
+    """A losing ESCALATED exit must not leave an authorization receipt."""
+    reg = DurableOperationRegistry()
+    key = "hold-authorization-lost-race"
+    assert reg.register(OperationRecord(
+        idempotency_key=key, passage_id="p-race",
+        agent_id="alice", action_type="payment",
+    ))
+    hm = HoldManager(reg)
+    assert hm.enter_hold(key, tau_k_seconds=3600)["entered"]
+    assert hm.escalate_hold(key, escalated_by="risk-officer")["escalated"]
+    original = reg.transition_to
+
+    def lose_race(idempotency_key, target, *args, **kwargs):
+        if target == OperationState.RESERVED:
+            assert original(idempotency_key, OperationState.UNKNOWN)[0]
+            return False, OperationState.UNKNOWN
+        return original(idempotency_key, target, *args, **kwargs)
+
+    monkeypatch.setattr(reg, "transition_to", lose_race)
+    result = hm.authorize_exit(
+        key, authorized_by="officer-1", scope="payment",
+        authorization="ceremony-G-R5-001", approve=True,
+    )
+
+    assert result["exited"] is False
+    assert result["exit_receipt"] is None
+    final = reg.get(key)
+    assert final.state == OperationState.UNKNOWN
+    assert final.hold_record.exit_reason != "authorized_exit"
+    assert final.hold_record.exit_receipt is None
+
+
+
 # ── HOLD Lifecycle Tests ─────────────────────────────────────────────
 
 class TestHoldLifecycle:
