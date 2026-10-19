@@ -445,7 +445,8 @@ class SingleHostLockBackend:
                     return ReleaseResult(status="ALREADY_COMMITTED")
                 if rec["state"] == "RELEASED":
                     return ReleaseResult(status="ALREADY_RELEASED")
-                if rec["state"] not in ("RESERVED", "UNKNOWN"):
+                if rec["state"] != "RESERVED":
+                    # UNKNOWN is ambiguous, not proof that capacity can be released.
                     return ReleaseResult(status="ERROR")
 
                 amount = Decimal(str(rec["amount"]))
