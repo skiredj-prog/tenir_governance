@@ -36,3 +36,5 @@ jobs:
           python -m pip install -e ".[test]" "pysyncobj==0.3.17"
       - name: Run Raft regression suite
         run: pytest -q tests/test_raft_backend.py
+      - name: Run governor and membrane regression suite
+        run: pytest -q tests/test_composition.py
