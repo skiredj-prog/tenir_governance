@@ -170,6 +170,13 @@ class TestLivenessTermination:
         assert state.available == capacity - Decimal("1")
 
 
+    def test_zero_decimal_exponent_does_not_poison_internal_precision(self):
+        """A zero's scale is irrelevant to exact accounting arithmetic."""
+        from tenir_governance.operations.budget import _decimal_subtract
+
+        assert _decimal_subtract(Decimal("1e128"), Decimal("0e-129")) == Decimal("1e128")
+
+
     @pytest.mark.parametrize("value", ["1e-129", "1e999999", "0e-999999", "1" + "2" * 128])
     def test_budget_rejects_pathological_decimal_precision(self, tmp_path, value):
         backend = SingleHostLockBackend(str(tmp_path))
