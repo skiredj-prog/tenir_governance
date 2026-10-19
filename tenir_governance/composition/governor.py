@@ -1385,30 +1385,34 @@ class DualKernelGovernor:
                 composed_decision = Decision.HOLD.value
                 composed_rationale = "Re-adjudication produced PASS/FLAG but RESERVED transition failed — staying in HOLD."
         elif composed_decision == Decision.HARD_VETO.value:
-            success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
-            if not success:
-                # A losing transition must never release another operation's budget.
-                composed_decision = Decision.HOLD.value
-                composed_rationale = "HARD_VETO re-adjudication lost the terminal transition race; budget unchanged."
-            else:
-                hold_resolved = True  # Resolved (as denied)
-                if resource_id and amount > 0:
-                    resource = self.membrane.state.resources.get(resource_id)
-                    if resource is None:
-                        composed_decision = Decision.HOLD.value
-                        composed_rationale = "HOLD resource missing; budget release requires reconciliation."
-                        hold_resolved = False
-                    else:
-                        with self.membrane.state.get_lock(resource_id):
-                            if resource.reserved < amount:
-                                composed_decision = Decision.HOLD.value
-                                composed_rationale = "HOLD reservation accounting inconsistent; refusing release."
-                                hold_resolved = False
-                            else:
+            if resource_id and amount > 0:
+                resource = self.membrane.state.resources.get(resource_id)
+                if resource is None:
+                    composed_decision = Decision.HOLD.value
+                    composed_rationale = "HOLD resource missing; budget release requires reconciliation."
+                else:
+                    with self.membrane.state.get_lock(resource_id):
+                        if resource.reserved < amount:
+                            composed_decision = Decision.HOLD.value
+                            composed_rationale = "HOLD reservation accounting inconsistent; refusing release."
+                        else:
+                            success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
+                            if success:
                                 resource.release(amount)
-                if record := self.registry.get(idem_key):
-                    if record.hold_record:
-                        record.hold_record.exit_reason = "resolved_veto" if hold_resolved else ""
+                                hold_resolved = True
+                            else:
+                                composed_decision = Decision.HOLD.value
+                                composed_rationale = "HARD_VETO re-adjudication lost the terminal transition race; budget unchanged."
+            else:
+                success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
+                if success:
+                    hold_resolved = True
+                else:
+                    composed_decision = Decision.HOLD.value
+                    composed_rationale = "HARD_VETO re-adjudication lost the terminal transition race; budget unchanged."
+            if record := self.registry.get(idem_key):
+                if record.hold_record:
+                    record.hold_record.exit_reason = "resolved_veto" if hold_resolved else ""
         elif composed_decision == Decision.HOLD.value:
             # Still HOLD — update the hold record's timestamp
             if record := self.registry.get(idem_key):
