@@ -16,7 +16,7 @@ Usage:
     python demo.py
 
 Requirements:
-    pip install tenir-governance==5.4.4
+    pip install tenir-governance==5.5.0
 
     Or from source:
     pip install -e . (from the tenir-governance directory)

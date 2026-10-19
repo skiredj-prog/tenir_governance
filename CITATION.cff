@@ -13,7 +13,7 @@ abstract: >
   Release 5.4.4 extends the R5 governance middleware with a dependency-light
   schema 1.2 execution kernel, runtime constraint geometry, connectors, and
   security hardening. Validation is performed through the repository CI gate.
-version: "5.4.4"
+version: "5.5.0"
 date-released: "2026-10-19"
 license: Apache-2.0
 repository-code: "https://github.com/skiredj-prog/tenir-governance"
