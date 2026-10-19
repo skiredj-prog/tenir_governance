@@ -332,6 +332,26 @@ class TestDualKernelGovernor:
         assert state.resources["budget"].reserved == 0.0
         assert result["operation_state"] != OperationState.RESERVED.value
 
+    def test_quarantine_race_blocks_admission_without_budget_scope(self, monkeypatch):
+        gov, state = self._setup()
+        original = gov.membrane.adjudicate
+
+        def adjudicate_then_quarantine(**kwargs):
+            result = original(**kwargs)
+            state.lock_quarantine("unbudgeted-race-test")
+            return result
+
+        monkeypatch.setattr(gov.membrane, "adjudicate", adjudicate_then_quarantine)
+        passage = Passage(
+            agent_id="alice", action_type="read_only",
+            idempotency_key="quarantine-unbudgeted-race",
+        )
+        result = gov.adjudicate(
+            passage, pressure=0.2, velocity=0.3, capacity=1.0,
+        )
+        assert result["composed_decision"] == Decision.HARD_VETO.value
+        assert result["operation_state"] != OperationState.RESERVED.value
+
     def test_resource_reregistration_cannot_reset_budget_or_lock(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
