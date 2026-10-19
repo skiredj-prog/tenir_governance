@@ -661,3 +661,27 @@ def test_durable_backend_missing_reservation_identity_fails_closed(tmp_path):
     assert local_resource.reserved == local_reserved_before
     assert backend_after.reserved == backend_before.reserved
     assert backend_after.committed == backend_before.committed
+
+
+def test_direct_confirm_commits_durable_reservation_before_terminal_state(tmp_path):
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path)
+    passage, _result = _adjudicate_durable_budget(gov)
+    record = gov.registry.get(passage.idempotency_key)
+    assert record.reservation_id
+    assert backend.get_state("budget").reserved == Decimal("10.0")
+
+    # Model recovery/integration calling confirm after the external effect,
+    # before the backend commit was recorded by the normal dispatch path.
+    transitioned, _previous = gov.registry.transition_to(
+        passage.idempotency_key, OperationState.DISPATCHING,
+    )
+    assert transitioned
+
+    assert gov.confirm(passage.idempotency_key) is True
+    final_record = gov.registry.get(passage.idempotency_key)
+    state = backend.get_state("budget")
+    assert final_record.state == OperationState.CONFIRMED
+    assert final_record.budget_reserved is False
+    assert final_record.budget_committed is True
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("10.0")
