@@ -472,7 +472,7 @@ class DurableBudgetCoordinator:
                 if r is None:
                     return None
                 return {
-                    "available": r["capacity"] - r["reserved"] - r["consumed"],
+                    "available": _decimal_subtract(_decimal_subtract(r["capacity"], r["reserved"]), r["consumed"]),
                     "reserved": r["reserved"],
                     "consumed": r["consumed"],
                     "capacity": r["capacity"],
