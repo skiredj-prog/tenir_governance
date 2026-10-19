@@ -159,16 +159,19 @@ def _degraded_modes(context: Mapping[str, Any], is_degraded: bool) -> list[str]:
     """Return schema-defined degradation labels without inventing causes."""
     supplied = context.get("degraded_mode")
     modes = list(supplied) if isinstance(supplied, (list, tuple)) else []
-    if is_degraded and (not modes or modes == ["none"]):
-        modes = ["sparse_ingress"]
-    if not is_degraded and not modes:
-        modes = ["none"]
     allowed = {"none", "missing_agency", "missing_trajectory",
                "missing_epistemic", "sparse_ingress", "legacy_shape"}
+    if not modes:
+        raise ValueError("canonical_context.degraded_mode must explicitly describe degradation state")
     if any(mode not in allowed for mode in modes):
         raise ValueError("canonical_context.degraded_mode contains an unknown schema 1.2 label")
     if "none" in modes and len(modes) > 1:
         raise ValueError("degraded_mode cannot combine 'none' with degradation labels")
+    if is_degraded and modes == ["none"]:
+        raise ValueError(
+            "HOLD/HARD_VETO requires an explicit degraded_mode cause; "
+            "the adapter will not infer one from the decision alone"
+        )
     return modes
 
 
