@@ -194,6 +194,11 @@ deterministically. No GPU, no Ollama, no network required.
 ## Distributed Multi-Node Deployment
 
 ```bash
+# Before starting any node, provision TENIR_API_TOKEN from your secret manager.
+# It must be at least 32 characters and the SAME shared peer credential on all
+# nodes; do not generate a different token per node or commit it to source control.
+# The examples assume the secret manager injects TENIR_API_TOKEN into each process.
+#
 # Node 1
 # PEER_NODES must point to HTTPS endpoints backed by valid certificates.
 # Peer validation traffic carries bearer credentials and therefore requires HTTPS
