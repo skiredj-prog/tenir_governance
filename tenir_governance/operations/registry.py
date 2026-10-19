@@ -526,14 +526,32 @@ class DurableOperationRegistry:
                 previous = {name: getattr(record, name) for name in flags}
                 for name, value in flags.items():
                     setattr(record, name, bool(value))
+                desired = {name: getattr(record, name) for name in flags}
                 try:
                     self._persist()
                 except Exception:
-                    # Keep in-memory state consistent with the last known
-                    # persisted state. The caller must compensate any budget
-                    # mutation when this write fails.
-                    for name, value in previous.items():
-                        setattr(record, name, value)
+                    # Atomic rename may already have installed the new file
+                    # before a later directory-fsync error. Determine which
+                    # version is visible on disk before telling the caller to
+                    # compensate an external budget mutation.
+                    if self._store_path and os.path.exists(self._store_path):
+                        try:
+                            self._load()
+                        except Exception:
+                            pass
+                        durable = self._records.get(idempotency_key)
+                        if durable is not None and all(
+                            getattr(durable, name) == value
+                            for name, value in desired.items()
+                        ):
+                            # New ownership flags are visible. Treat the update
+                            # as committed so callers do not release capacity
+                            # while durable state claims to own it.
+                            return True
+                    current = self._records.get(idempotency_key)
+                    if current is not None:
+                        for name, value in previous.items():
+                            setattr(current, name, value)
                     raise
                 return True
             finally:
