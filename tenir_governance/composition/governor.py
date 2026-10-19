@@ -1217,6 +1217,35 @@ class DualKernelGovernor:
                 "reason": f"Operation is in state {record.state.value}, not HOLD.",
             }
 
+        # HOLD re-adjudication must retain the original economic identity.
+        recorded_resource = record.resource_id or None
+        if resource_id is None:
+            resource_id = recorded_resource
+        elif resource_id != recorded_resource:
+            return {
+                "hold_resolved": False,
+                "operation_state": record.state.value,
+                "reason": "Resource identity differs from the held operation.",
+            }
+        try:
+            supplied_amount = float(amount)
+            recorded_amount = float(record.amount)
+        except (TypeError, ValueError, OverflowError):
+            return {
+                "hold_resolved": False,
+                "operation_state": record.state.value,
+                "reason": "Amount is invalid for HOLD re-adjudication.",
+            }
+        if supplied_amount == 0 and recorded_amount > 0:
+            supplied_amount = recorded_amount
+        if not math.isfinite(supplied_amount) or supplied_amount != recorded_amount:
+            return {
+                "hold_resolved": False,
+                "operation_state": record.state.value,
+                "reason": "Amount differs from the held operation.",
+            }
+        amount = supplied_amount
+
         if passage is None:
             # A HOLD may only be resolved after fresh adjudication. Never let
             # omission of the passage bypass both kernels and the decision lattice.
@@ -1356,16 +1385,30 @@ class DualKernelGovernor:
                 composed_decision = Decision.HOLD.value
                 composed_rationale = "Re-adjudication produced PASS/FLAG but RESERVED transition failed — staying in HOLD."
         elif composed_decision == Decision.HARD_VETO.value:
-            self.registry.transition_to(idem_key, OperationState.FAILED)
-            hold_resolved = True  # Resolved (as denied)
-            if resource_id and amount > 0:
-                resource = self.membrane.state.resources.get(resource_id)
-                if resource:
-                    with self.membrane.state.get_lock(resource_id):
-                        resource.release(amount)
-            if record := self.registry.get(idem_key):
-                if record.hold_record:
-                    record.hold_record.exit_reason = "resolved_veto"
+            success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
+            if not success:
+                # A losing transition must never release another operation's budget.
+                composed_decision = Decision.HOLD.value
+                composed_rationale = "HARD_VETO re-adjudication lost the terminal transition race; budget unchanged."
+            else:
+                hold_resolved = True  # Resolved (as denied)
+                if resource_id and amount > 0:
+                    resource = self.membrane.state.resources.get(resource_id)
+                    if resource is None:
+                        composed_decision = Decision.HOLD.value
+                        composed_rationale = "HOLD resource missing; budget release requires reconciliation."
+                        hold_resolved = False
+                    else:
+                        with self.membrane.state.get_lock(resource_id):
+                            if resource.reserved < amount:
+                                composed_decision = Decision.HOLD.value
+                                composed_rationale = "HOLD reservation accounting inconsistent; refusing release."
+                                hold_resolved = False
+                            else:
+                                resource.release(amount)
+                if record := self.registry.get(idem_key):
+                    if record.hold_record:
+                        record.hold_record.exit_reason = "resolved_veto" if hold_resolved else ""
         elif composed_decision == Decision.HOLD.value:
             # Still HOLD — update the hold record's timestamp
             if record := self.registry.get(idem_key):
