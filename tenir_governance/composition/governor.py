@@ -1003,21 +1003,58 @@ class DualKernelGovernor:
             }
         elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
             committed = record.budget_committed
-            self.registry.transition_to(idempotency_key, OperationState.FAILED)
             if record.resource_id and record.amount > 0:
                 resource = self.membrane.state.resources.get(record.resource_id)
-                if resource:
-                    with self.membrane.state.get_lock(record.resource_id):
-                        # committed → consumed must be reversed (refund);
-                        # never committed → only the reservation exists (release).
-                        if committed:
-                            resource.refund(record.amount)
-                        else:
-                            resource.release(record.amount)
-                if committed or record.budget_reserved:
-                    self.registry.set_budget_flags(
-                        idempotency_key, budget_reserved=False, budget_committed=False,
-                    )
+                if resource is None:
+                    return {
+                        "reconciled": False, "idempotency_key": idempotency_key,
+                        "operation_state": OperationState.UNKNOWN.value,
+                        "recommendation": "human_review",
+                        "reason": "Budget resource is missing; cannot safely release or refund.",
+                    }
+                # Serialize competing reconciliation attempts with the budget
+                # mutation. Only the worker that wins UNKNOWN -> FAILED may
+                # release/refund, and accounting must cover the exact amount.
+                with self.membrane.state.get_lock(record.resource_id):
+                    current = self.registry.get(idempotency_key)
+                    if current is None or current.state != OperationState.UNKNOWN:
+                        return {
+                            "reconciled": False, "idempotency_key": idempotency_key,
+                            "operation_state": current.state.value if current else "not_found",
+                            "reason": "Reconciliation lost the terminal-state race; budget unchanged.",
+                        }
+                    available_accounting = resource.consumed if committed else resource.reserved
+                    if available_accounting < record.amount:
+                        return {
+                            "reconciled": False, "idempotency_key": idempotency_key,
+                            "operation_state": OperationState.UNKNOWN.value,
+                            "recommendation": "human_review",
+                            "reason": "Budget accounting is inconsistent; refusing automatic refund/release.",
+                        }
+                    success, _ = self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                    if not success:
+                        return {
+                            "reconciled": False, "idempotency_key": idempotency_key,
+                            "operation_state": self.registry.get(idempotency_key).state.value,
+                            "reason": "Reconciliation transition lost; budget unchanged.",
+                        }
+                    if committed:
+                        resource.refund(record.amount)
+                    else:
+                        resource.release(record.amount)
+                    if committed or record.budget_reserved:
+                        self.registry.set_budget_flags(
+                            idempotency_key, budget_reserved=False, budget_committed=False,
+                        )
+            else:
+                success, _ = self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                if not success:
+                    current = self.registry.get(idempotency_key)
+                    return {
+                        "reconciled": False, "idempotency_key": idempotency_key,
+                        "operation_state": current.state.value if current else "not_found",
+                        "reason": "Reconciliation transition lost; no budget mutation performed.",
+                    }
             return {
                 "reconciled": True,
                 "idempotency_key": idempotency_key,
@@ -1043,27 +1080,51 @@ class DualKernelGovernor:
         return success
 
     def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0) -> bool:
-        """Transition to FAILED. No effect occurred. Release or refund reservation.
-
-        Uses the durable budget_committed flag so the refund-vs-release
-        decision is based on whether the budget was actually committed
-        at dispatch, not on a fragile previous-state deduction.
-        """
+        """Transition to FAILED and mutate only this operation's budget."""
         record = self.registry.get(idempotency_key)
-        committed = bool(record and record.budget_committed)
+        if record is None:
+            return False
+        recorded_resource = record.resource_id or None
+        if resource_id is None:
+            resource_id = recorded_resource
+        elif resource_id != recorded_resource:
+            return False
+        try:
+            supplied_amount = float(amount)
+            recorded_amount = float(record.amount)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if supplied_amount == 0 and recorded_amount > 0:
+            supplied_amount = recorded_amount
+        if not math.isfinite(supplied_amount) or supplied_amount != recorded_amount:
+            return False
+
+        committed = record.budget_committed
+        if recorded_resource and recorded_amount > 0:
+            resource = self.membrane.state.resources.get(recorded_resource)
+            if resource is None:
+                return False
+            with self.membrane.state.get_lock(recorded_resource):
+                current = self.registry.get(idempotency_key)
+                if current is None or current.state in (OperationState.FAILED, OperationState.CONFIRMED):
+                    return False
+                accounted = resource.consumed if committed else resource.reserved
+                if accounted < recorded_amount:
+                    return False
+                success, _prev_state = self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                if not success:
+                    return False
+                if committed:
+                    resource.refund(recorded_amount)
+                else:
+                    resource.release(recorded_amount)
+                if committed or record.budget_reserved:
+                    self.registry.set_budget_flags(
+                        idempotency_key, budget_reserved=False, budget_committed=False,
+                    )
+                return True
+
         success, _prev_state = self.registry.transition_to(idempotency_key, OperationState.FAILED)
-        if success and resource_id and amount > 0:
-            resource = self.membrane.state.resources.get(resource_id)
-            if resource:
-                with self.membrane.state.get_lock(resource_id):
-                    if committed:
-                        resource.refund(amount)
-                    else:
-                        resource.release(amount)
-            if committed or (record and record.budget_reserved):
-                self.registry.set_budget_flags(
-                    idempotency_key, budget_reserved=False, budget_committed=False,
-                )
         return success
 
     def mark_unknown(self, idempotency_key: str) -> bool:
