@@ -793,3 +793,27 @@ def test_operation_record_reservation_id_preserves_legacy_positional_fields():
     )
     assert record.state == OperationState.RESERVED
     assert record.reservation_id == ""
+
+
+def test_durable_commit_error_does_not_terminalize_uncompensated_operation(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    provider = MockProvider(behavior="confirmed")
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
+    passage, _result = _adjudicate_durable_budget(gov)
+    monkeypatch.setattr(
+        backend, "commit",
+        lambda reservation_id: SimpleNamespace(status="ERROR"),
+    )
+
+    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    record = gov.registry.get(passage.idempotency_key)
+    state = backend.get_state("budget")
+
+    assert result["dispatched"] is False
+    assert result["operation_state"] == OperationState.DISPATCHING.value
+    assert record.state == OperationState.DISPATCHING
+    assert record.budget_reserved is True
+    assert provider.calls == []
+    assert state.reserved == Decimal("10.0")
+    assert state.committed == Decimal("0")
