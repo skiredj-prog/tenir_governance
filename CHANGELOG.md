@@ -14,7 +14,7 @@
 - Included: local `pysyncobj` Raft integration tests, I8 regressions, invalid-amount cases, idempotent replay, resource re-registration, logical-clock replication and fractional-budget accounting.
 - Environment: test cluster nodes use `localhost` and separate ports; this is not a physical multi-host network test.
 - Excluded: Byzantine tolerance, hardened peer transport/authentication, third-party attestation, and proof of exactly-once external effects.
-- Raft regression suite result: **46 collected, 46 passed, 0 failed, 0 skipped** in 130.55 s on GitHub Actions `ubuntu-latest`, Python 3.11.17, pytest 8.4.2, `pysyncobj` 0.3.17. Reproduce with `pytest -q tests/test_raft_backend.py`.
+- Raft regression suite result: **46 collected, 46 passed, 0 failed, 0 skipped** in 119.01 s on GitHub Actions `ubuntu-latest`, Python 3.11.17, pytest 8.4.2, `pysyncobj` 0.3.17. Tested implementation commit: `82037052556c5bfd731bd59fe958cf4df61d21b6`; CI run: [#39205580977](https://github.com/skiredj-prog/tenir_governance/actions/runs/39205580977). Reproduce with `pytest -q tests/test_raft_backend.py`.
 
 ### Status
 - Release status: not released by this change; do not infer a PyPI publication from this changelog entry.
