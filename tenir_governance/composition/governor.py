@@ -1756,40 +1756,67 @@ class DualKernelGovernor:
             # Only release a reservation that this durable operation actually owns.
             should_release_budget = bool(held_record and held_record.budget_reserved)
             if resource_id and amount > 0 and should_release_budget:
-                resource = self.membrane.state.resources.get(resource_id)
-                if resource is None:
-                    composed_decision = Decision.HOLD.value
-                    composed_rationale = "HOLD resource missing; budget release requires reconciliation."
-                else:
-                    with self.membrane.state.get_lock(resource_id):
-                        if resource.reserved < amount:
-                            composed_decision = Decision.HOLD.value
-                            composed_rationale = "HOLD reservation accounting inconsistent; refusing release."
-                        else:
+                if self.consensus_backend is not None and held_record and held_record.reservation_id:
+                    try:
+                        released = self.consensus_backend.release(held_record.reservation_id)
+                    except Exception:
+                        released = None
+                    if getattr(released, "status", None) not in ("RELEASED", "ALREADY_RELEASED"):
+                        composed_decision = Decision.HOLD.value
+                        composed_rationale = "Durable reservation release unresolved; HOLD retained for reconciliation."
+                    else:
+                        try:
+                            flags_ok = self.registry.set_budget_flags(
+                                idem_key, budget_reserved=False,
+                                budget_committed=False,
+                                reservation_id=held_record.reservation_id,
+                            )
+                        except Exception:
+                            flags_ok = False
+                        if flags_ok:
                             success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
-                            if success:
-                                resource.release(amount)
-                                try:
-                                    self.registry.set_budget_flags(
-                                        idem_key,
-                                        budget_reserved=False,
-                                        budget_committed=False,
-                                    )
-                                except Exception:
-                                    # The operation is terminal, but ownership
-                                    # persistence failed. Preserve a visible
-                                    # reconciliation signal instead of claiming
-                                    # a fully resolved HOLD.
-                                    composed_decision = Decision.HOLD.value
-                                    composed_rationale = (
-                                        "HOLD veto applied, but budget ownership flags could not be persisted; reconciliation required."
-                                    )
-                                    hold_resolved = False
-                                else:
-                                    hold_resolved = True
-                            else:
+                            hold_resolved = bool(success)
+                            if not success:
                                 composed_decision = Decision.HOLD.value
-                                composed_rationale = "HARD_VETO re-adjudication lost the terminal transition race; budget unchanged."
+                                composed_rationale = "Durable release completed but terminal transition lost; replay reconciliation."
+                        else:
+                            composed_decision = Decision.HOLD.value
+                            composed_rationale = "Durable release completed but ownership update failed; reconciliation required."
+                else:
+                    resource = self.membrane.state.resources.get(resource_id)
+                    if resource is None:
+                        composed_decision = Decision.HOLD.value
+                        composed_rationale = "HOLD resource missing; budget release requires reconciliation."
+                    else:
+                        with self.membrane.state.get_lock(resource_id):
+                            if resource.reserved < amount:
+                                composed_decision = Decision.HOLD.value
+                                composed_rationale = "HOLD reservation accounting inconsistent; refusing release."
+                            else:
+                                success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
+                                if success:
+                                    resource.release(amount)
+                                    try:
+                                        self.registry.set_budget_flags(
+                                            idem_key,
+                                            budget_reserved=False,
+                                            budget_committed=False,
+                                        )
+                                    except Exception:
+                                        # The operation is terminal, but ownership
+                                        # persistence failed. Preserve a visible
+                                        # reconciliation signal instead of claiming
+                                        # a fully resolved HOLD.
+                                        composed_decision = Decision.HOLD.value
+                                        composed_rationale = (
+                                            "HOLD veto applied, but budget ownership flags could not be persisted; reconciliation required."
+                                        )
+                                        hold_resolved = False
+                                    else:
+                                        hold_resolved = True
+                                else:
+                                    composed_decision = Decision.HOLD.value
+                                    composed_rationale = "HARD_VETO re-adjudication lost the terminal transition race; budget unchanged."
             else:
                 success, _prev = self.registry.transition_to(idem_key, OperationState.FAILED)
                 if success:
