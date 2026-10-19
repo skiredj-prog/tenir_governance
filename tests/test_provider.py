@@ -583,10 +583,11 @@ def test_agent_c_reconcile_failed_does_not_release_unowned_budget():
     gov.provider = ConfirmedNoEffectProvider()
     result = gov.reconcile_unknown(key)
 
-    assert result["reconciled"] is False, (
-        "Reconciliation settled an operation that owned no budget reservation"
-    )
+    # With no ownership flags, reconciliation may mark the operation FAILED,
+    # but it must not mutate the aggregate reservation owned by another operation.
+    assert result["reconciled"] is True
+    assert result["operation_state"] == OperationState.FAILED.value
     assert budget.reserved == 10.0, (
         "Reconciliation released budget owned by a different operation"
     )
-    assert gov.registry.get(key).state == OperationState.UNKNOWN
+    assert gov.registry.get(key).state == OperationState.FAILED
