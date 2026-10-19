@@ -1154,3 +1154,99 @@ def test_subprocess_confirm_and_proven_fail_serialize_durable_budget(tmp_path):
         assert final_state.reserved == Decimal("0")
     else:
         raise AssertionError(f"Unexpected terminal race result: {final_record.state}")
+
+
+
+def test_recovery_fails_closed_when_backend_reservation_amount_is_ambiguous(tmp_path, monkeypatch):
+    """Provider confirmation must not override a mismatched durable reservation."""
+    from types import SimpleNamespace
+
+    provider = MockProvider(
+        behavior="timeout",
+        reconcile_outcome=ProviderOutcome.CONFIRMED,
+    )
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
+    passage, _result = _adjudicate_durable_budget(gov)
+    key = passage.idempotency_key
+    assert gov.dispatch_and_execute(key, "budget", 10.0)["operation_state"] in (
+        OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
+    )
+
+    original_get_state = backend.get_state
+
+    def mismatched_state(resource_id):
+        state = original_get_state(resource_id)
+        state.reservations = [
+            {**item, "amount": "11.0"} if item.get("key") == key else item
+            for item in state.reservations
+        ]
+        return state
+
+    monkeypatch.setattr(backend, "get_state", mismatched_state)
+    result = gov.reconcile_unknown(key)
+    record = gov.registry.get(key)
+    state = original_get_state("budget")
+
+    assert result["reconciled"] is False
+    assert result.get("recommendation") == "human_review"
+    assert record.state in (OperationState.UNKNOWN, OperationState.DISPATCHING)
+    assert record.budget_committed is False
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("10.0")
+
+
+def test_recovery_replays_after_refund_and_ownership_flags_before_terminal_transition(tmp_path, monkeypatch):
+    """A crash after durable refund + registry flags must replay without double settlement."""
+    from tenir_governance.operations.registry import DurableOperationRegistry
+
+    provider = MockProvider(
+        behavior="timeout",
+        reconcile_outcome=ProviderOutcome.FAILED,
+    )
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
+    registry_path = str(tmp_path / "replay-after-flags-operations.json")
+    gov.registry = DurableOperationRegistry(registry_path)
+    gov.hold_manager.registry = gov.registry
+    passage, _result = _adjudicate_durable_budget(gov)
+    key = passage.idempotency_key
+
+    dispatched = gov.dispatch_and_execute(key, "budget", 10.0)
+    assert dispatched["operation_state"] in (
+        OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
+    )
+
+    original_transition = gov.registry.transition_to
+
+    def crash_before_failed_terminal(idempotency_key, target_state):
+        if target_state == OperationState.FAILED:
+            raise _SimulatedProcessCrash("crash after compensation and flags")
+        return original_transition(idempotency_key, target_state)
+
+    monkeypatch.setattr(gov.registry, "transition_to", crash_before_failed_terminal)
+    with pytest.raises(_SimulatedProcessCrash):
+        gov.reconcile_unknown(key)
+
+    # Re-open both durable stores to model process restart.
+    reopened_backend = SingleHostLockBackend(str(tmp_path))
+    reopened_registry = DurableOperationRegistry(registry_path)
+    gov.consensus_backend = reopened_backend
+    gov.registry = reopened_registry
+    gov.hold_manager.registry = reopened_registry
+
+    intermediate = reopened_registry.get(key)
+    intermediate_budget = reopened_backend.get_state("budget")
+    assert intermediate.state in (OperationState.UNKNOWN, OperationState.DISPATCHING)
+    assert intermediate.budget_reserved is False
+    assert intermediate.budget_committed is False
+    assert intermediate_budget.reserved == Decimal("0")
+    assert intermediate_budget.committed == Decimal("0")
+
+    replay = gov.reconcile_unknown(key)
+    final_record = reopened_registry.get(key)
+    final_budget = reopened_backend.get_state("budget")
+    assert replay["reconciled"] is True
+    assert final_record.state == OperationState.FAILED
+    assert final_record.budget_reserved is False
+    assert final_record.budget_committed is False
+    assert final_budget.reserved == Decimal("0")
+    assert final_budget.committed == Decimal("0")
