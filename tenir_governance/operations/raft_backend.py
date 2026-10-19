@@ -39,7 +39,7 @@ import os
 import threading
 import time
 import uuid
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -59,6 +59,25 @@ from tenir_governance.operations.consensus_backend import (
     ReconciliationResult,
     ConsensusState,
 )
+
+
+def _decimal_precision(*values: Decimal) -> int:
+    """Choose enough precision to preserve exact finite Decimal arithmetic."""
+    highest_adjusted = max((value.adjusted() for value in values if value), default=0)
+    lowest_exponent = min((value.as_tuple().exponent for value in values), default=0)
+    return max(28, highest_adjusted - lowest_exponent + 2)
+
+
+def _decimal_add(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = _decimal_precision(left, right)
+        return left + right
+
+
+def _decimal_subtract(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = _decimal_precision(left, right)
+        return left - right
 
 
 MAX_AMOUNT = Decimal("1000000000000000000")
@@ -119,7 +138,7 @@ class _RaftStateMachine(SyncObj):
         }
         if any(value is None for value in values.values()):
             return False
-        if values["reserved"] + values["committed"] > values["capacity"]:
+        if _decimal_add(values["reserved"], values["committed"]) > values["capacity"]:
             return False
         resource.update(values)
         return True
@@ -180,7 +199,7 @@ class _RaftStateMachine(SyncObj):
         # Fail closed if any stored accounting value is invalid.
         if not self._normalize_resource_values(res):
             return ("CORRUPT_RESOURCE_STATE", None, None)
-        if res["reserved"] + res["committed"] + normalized > res["capacity"]:
+        if _decimal_add(_decimal_add(res["reserved"], res["committed"]), normalized) > res["capacity"]:
             return ("INSUFFICIENT_BUDGET", None, None)
         if reservation_id in self._reservations:
             return ("RESERVATION_ID_CONFLICT", None, None)
@@ -189,7 +208,7 @@ class _RaftStateMachine(SyncObj):
             "state": "RESERVED", "created_at_logical": self._tick_logical(),
         }
         self._key_index[key] = reservation_id
-        res["reserved"] += normalized
+        res["reserved"] = _decimal_add(res["reserved"], normalized)
         return ("RESERVED", reservation_id, normalized)
 
     @replicated
@@ -211,8 +230,8 @@ class _RaftStateMachine(SyncObj):
             return "CORRUPT_RESOURCE_STATE"
         if res["reserved"] < amount:
             return "INCONSISTENT_RESERVED_AMOUNT"
-        res["reserved"] -= amount
-        res["committed"] += amount
+        res["reserved"] = _decimal_subtract(res["reserved"], amount)
+        res["committed"] = _decimal_add(res["committed"], amount)
         rec["state"] = "COMMITTED"
         rec["committed_at_logical"] = self._tick_logical()
         return "COMMITTED"
@@ -325,7 +344,7 @@ class _RaftStateMachine(SyncObj):
             committed = Decimal(str(res["committed"]))
             if not all(v.is_finite() and v >= 0 for v in (capacity, reserved, committed)):
                 raise InvalidOperation
-            if reserved + committed > capacity:
+            if _decimal_add(reserved, committed) > capacity:
                 raise InvalidOperation
             normalized_reservations = [
                 {**record, "amount": Decimal(str(record["amount"]))}
@@ -334,7 +353,7 @@ class _RaftStateMachine(SyncObj):
         except (InvalidOperation, ValueError, TypeError, KeyError) as exc:
             raise RuntimeError("Corrupt persisted Raft accounting state") from exc
         return {
-            "available": capacity - reserved - committed,
+            "available": _decimal_subtract(_decimal_subtract(capacity, reserved), committed),
             "reserved": reserved,
             "committed": committed,
             "capacity": capacity,
