@@ -552,3 +552,41 @@ class TestRecoveryWithProvider:
         unknown_entries = [r for r in recovery["unresolved"] if r["state"] == "unknown"]
         assert len(unknown_entries) >= 1
         assert unknown_entries[0]["recommendation"] == "reconcile"
+
+def test_agent_c_reconcile_failed_does_not_release_unowned_budget():
+    """A FAILED provider result must not release another operation's reservation."""
+    gov, state = _setup_governor()
+    budget = state.resources["budget"]
+    assert budget.reserve(10.0)  # Owned by a different operation, not this record.
+
+    key = "agent-c-unowned-reconcile"
+    record = OperationRecord(
+        idempotency_key=key,
+        passage_id="p-agent-c-unowned-reconcile",
+        agent_id="alice",
+        action_type="payment",
+        amount=10.0,
+        resource_id="budget",
+        state=OperationState.UNKNOWN,
+        budget_reserved=False,
+        budget_committed=False,
+    )
+    assert gov.registry.register(record)
+
+    class ConfirmedNoEffectProvider:
+        def reconcile(self, **kwargs):
+            return ReconciliationResult(
+                resolved=True,
+                outcome=ProviderOutcome.FAILED,
+            )
+
+    gov.provider = ConfirmedNoEffectProvider()
+    result = gov.reconcile_unknown(key)
+
+    assert result["reconciled"] is False, (
+        "Reconciliation settled an operation that owned no budget reservation"
+    )
+    assert budget.reserved == 10.0, (
+        "Reconciliation released budget owned by a different operation"
+    )
+    assert gov.registry.get(key).state == OperationState.UNKNOWN
