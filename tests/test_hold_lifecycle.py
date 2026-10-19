@@ -459,6 +459,32 @@ class TestGovernorHoldLifecycle:
         assert r2["hold_resolved"] is True
         assert r2["operation_state"] == OperationState.RESERVED.value
 
+    def test_hard_veto_hold_does_not_release_another_operations_budget(self):
+        gov, state = _setup_governor()
+        assert state.resources["budget"].reserve(10.0)
+        from tenir_governance.operations import OperationRecord
+        key = "op-hold-no-reservation"
+        rec = OperationRecord(
+            idempotency_key=key, passage_id="p-hold-no-reservation",
+            agent_id="alice", action_type="payment", amount=10.0,
+            resource_id="budget",
+        )
+        gov.registry.register(rec)
+        gov.hold_manager.enter_hold(key, tau_k_seconds=300)
+        passage = Passage(
+            agent_id="alice", action_type="payment", amount=10.0,
+            idempotency_key=key,
+        )
+        result = gov.resolve_hold(
+            key, passage=passage,
+            pressure=0.2, velocity=0.2, capacity=0.9,
+            authority=0.0, context_fit=0.9, evidence_quality=0.9,
+            resource_id="budget", amount=10.0,
+        )
+        assert result["composed_decision"] == Decision.HARD_VETO.value
+        assert state.resources["budget"].reserved == 10.0
+        assert state.resources["budget"].consumed == 0.0
+
     def test_governor_resolve_hold_rejects_changed_amount(self):
         gov, state = _setup_governor()
         from tenir_governance.operations import OperationRecord
