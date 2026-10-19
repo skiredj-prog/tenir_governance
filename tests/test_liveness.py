@@ -52,6 +52,27 @@ class TestLivenessTermination:
         assert state.reserved == 0.1
         assert state.available == 0.9
 
+    def test_replay_preserves_terminal_state_and_resource_identity(self, tmp_path):
+        """An idempotency key cannot revive a released or cross-resource reservation."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("identity-budget-a", 10)
+        backend.register_resource("identity-budget-b", 10)
+
+        first = backend.reserve("identity-key", 4, "identity-budget-a")
+        assert first.status == "RESERVED"
+        assert backend.release(first.reservation_id).status == "RELEASED"
+
+        replay = backend.reserve("identity-key", 4, "identity-budget-a")
+        assert replay.status == "RELEASED"
+        assert replay.reservation_id == first.reservation_id
+
+        cross_resource_replay = backend.reserve(
+            "identity-key", 4, "identity-budget-b"
+        )
+        assert cross_resource_replay.status == "DUPLICATE_KEY"
+        assert backend.get_state("identity-budget-a").reserved == 0
+        assert backend.get_state("identity-budget-b").reserved == 0
+
     def test_reserve_persistence_failure_compensates_budget(self, tmp_path, monkeypatch):
         """A failed reservation-registry write must not leak reserved capacity."""
         backend = SingleHostLockBackend(str(tmp_path))
