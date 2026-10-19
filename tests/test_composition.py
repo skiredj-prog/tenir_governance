@@ -478,6 +478,51 @@ class TestDualKernelGovernor:
         assert recovery["unresolved"][0]["recommendation"] == "reconcile"
 
 
+    @pytest.mark.parametrize("amount", [-1.0, float("nan"), float("inf"), float("-inf")])
+    def test_invalid_amount_fails_closed_before_reservation(self, amount):
+        gov, state = self._setup()
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        result = gov.adjudicate(
+            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            resource_id="budget", amount=amount,
+        )
+        assert result["composed_decision"] == Decision.HARD_VETO.value
+        assert result["execution_status"] == "blocked"
+        assert gov.registry.get(p.idempotency_key) is None
+        assert state.resources["budget"].reserved == 0.0
+
+    def test_dispatch_rejects_amount_mismatch_without_committing(self):
+        gov, state = self._setup()
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        result = gov.adjudicate(
+            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            resource_id="budget", amount=10.0,
+        )
+        assert result["operation_state"] == OperationState.RESERVED.value
+        dispatched = gov.dispatch(p.idempotency_key, resource_id="budget", amount=5.0)
+        assert dispatched["dispatched"] is False
+        assert "does not match" in dispatched["reason"]
+        assert gov.registry.get(p.idempotency_key).state == OperationState.RESERVED
+        assert state.resources["budget"].reserved == 10.0
+        assert state.resources["budget"].consumed == 0.0
+
+    def test_quarantine_blocks_previously_reserved_dispatch(self):
+        gov, state = self._setup()
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        result = gov.adjudicate(
+            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            resource_id="budget", amount=10.0,
+        )
+        assert result["operation_state"] == OperationState.RESERVED.value
+        state.lock_quarantine("test")
+        dispatched = gov.dispatch(p.idempotency_key, resource_id="budget", amount=10.0)
+        assert dispatched["dispatched"] is False
+        assert "QUARANTINE_LOCK" in dispatched["reason"]
+        assert gov.registry.get(p.idempotency_key).state == OperationState.RESERVED
+        assert state.resources["budget"].reserved == 10.0
+        assert state.resources["budget"].consumed == 0.0
+
+
 class TestScoringKernelAdapter:
     """Tests for the TenirKernel bridge adapter."""
 
