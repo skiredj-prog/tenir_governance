@@ -216,7 +216,7 @@ class TestDualKernelGovernor:
         kwargs.setdefault("authority", 0.9)
         kwargs.setdefault("context_fit", 1.0)
         kwargs.setdefault("evidence_quality", 1.0)
-        return self._adjudicate(gov, passage, **kwargs)
+        return gov.adjudicate(passage, **kwargs)
 
     def _setup(self, budget_capacity=100.0, policy=None):
         state = MembraneState()
