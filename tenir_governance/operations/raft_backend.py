@@ -111,6 +111,26 @@ class _RaftStateMachine(SyncObj):
             "previous_state": previous_state, "logical_time": self._tick_logical(),
         })
 
+    def _normalize_resource_values(self, resource):
+        """Normalize accounting values restored from pre-Decimal journals."""
+        values = {
+            name: _validated_amount(resource.get(name), allow_zero=True)
+            for name in ("capacity", "reserved", "committed")
+        }
+        if any(value is None for value in values.values()):
+            return False
+        if values["reserved"] + values["committed"] > values["capacity"]:
+            return False
+        resource.update(values)
+        return True
+
+    def _normalize_reservation_amount(self, record):
+        amount = _validated_amount(record.get("amount"), allow_zero=True)
+        if amount is None:
+            return None
+        record["amount"] = amount
+        return amount
+
     @replicated
     def register_resource(self, resource_id, capacity):
         """Register once; never reset an existing resource's accounting."""
@@ -158,13 +178,9 @@ class _RaftStateMachine(SyncObj):
             return ("UNKNOWN_RESOURCE", None, None)
         # Normalize persisted pre-Decimal state before arithmetic after upgrade.
         # Fail closed if any stored accounting value is invalid.
-        capacity = _validated_amount(res.get("capacity"), allow_zero=True)
-        reserved = _validated_amount(res.get("reserved"), allow_zero=True)
-        committed = _validated_amount(res.get("committed"), allow_zero=True)
-        if capacity is None or reserved is None or committed is None:
+        if not self._normalize_resource_values(res):
             return ("CORRUPT_RESOURCE_STATE", None, None)
-        res["capacity"], res["reserved"], res["committed"] = capacity, reserved, committed
-        if reserved + committed + normalized > capacity:
+        if res["reserved"] + res["committed"] + normalized > res["capacity"]:
             return ("INSUFFICIENT_BUDGET", None, None)
         if reservation_id in self._reservations:
             return ("RESERVATION_ID_CONFLICT", None, None)
@@ -181,14 +197,18 @@ class _RaftStateMachine(SyncObj):
         if reservation_id not in self._reservations:
             return "NOT_FOUND"
         rec = self._reservations[reservation_id]
+        amount = self._normalize_reservation_amount(rec)
+        if amount is None:
+            return "CORRUPT_RESERVATION_STATE"
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
         if rec["state"] != "RESERVED":
             return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
-        amount = rec["amount"]
         if res is None:
             return "ERROR"
+        if not self._normalize_resource_values(res):
+            return "CORRUPT_RESOURCE_STATE"
         if res["reserved"] < amount:
             return "INCONSISTENT_RESERVED_AMOUNT"
         res["reserved"] -= amount
@@ -202,14 +222,18 @@ class _RaftStateMachine(SyncObj):
         if reservation_id not in self._reservations:
             return "NOT_FOUND"
         rec = self._reservations[reservation_id]
+        amount = self._normalize_reservation_amount(rec)
+        if amount is None:
+            return "CORRUPT_RESERVATION_STATE"
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
         if rec["state"] not in ("RESERVED", "UNKNOWN"):
             return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
-        amount = rec["amount"]
         if res is None:
             return "ERROR"
+        if not self._normalize_resource_values(res):
+            return "CORRUPT_RESOURCE_STATE"
         if rec["state"] == "RESERVED":
             if res["reserved"] < amount:
                 return "INCONSISTENT_RESERVED_AMOUNT"
@@ -223,6 +247,9 @@ class _RaftStateMachine(SyncObj):
         if reservation_id not in self._reservations:
             return "NOT_FOUND"
         rec = self._reservations[reservation_id]
+        amount = self._normalize_reservation_amount(rec)
+        if amount is None:
+            return "CORRUPT_RESERVATION_STATE"
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
         if rec["state"] != "RESERVED":
@@ -231,9 +258,10 @@ class _RaftStateMachine(SyncObj):
                 return "RECONCILE_CONFLICT"
             return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
-        amount = rec["amount"]
         if res is None:
             return "ERROR"
+        if not self._normalize_resource_values(res):
+            return "CORRUPT_RESOURCE_STATE"
         if res["reserved"] < amount:
             self._record_incident("RESERVED_AMOUNT_MISSING", reservation_id, rec["state"])
             return "INCONSISTENT_RESERVED_AMOUNT"
@@ -248,6 +276,9 @@ class _RaftStateMachine(SyncObj):
         if reservation_id not in self._reservations:
             return "NOT_FOUND"
         rec = self._reservations[reservation_id]
+        amount = self._normalize_reservation_amount(rec)
+        if amount is None:
+            return "CORRUPT_RESERVATION_STATE"
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
         if rec["state"] == "RELEASED":
@@ -257,7 +288,8 @@ class _RaftStateMachine(SyncObj):
         res = self._resources.get(rec["resource_id"])
         if res is None:
             return "ERROR"
-        amount = rec["amount"]
+        if not self._normalize_resource_values(res):
+            return "CORRUPT_RESOURCE_STATE"
         if rec["state"] == "RESERVED":
             if res["reserved"] < amount:
                 return "INCONSISTENT_RESERVED_AMOUNT"
@@ -297,9 +329,8 @@ class _RaftStateMachine(SyncObj):
                 {**record, "amount": Decimal(str(record["amount"]))}
                 for record in reservations
             ]
-        except (InvalidOperation, ValueError, TypeError, KeyError):
-            return {"available": Decimal("0"), "reserved": Decimal("0"), "committed": Decimal("0"),
-                    "capacity": Decimal("0"), "reservations": [], "error": "CORRUPT_STATE"}
+        except (InvalidOperation, ValueError, TypeError, KeyError) as exc:
+            raise RuntimeError("Corrupt persisted Raft accounting state") from exc
         return {
             "available": capacity - reserved - committed,
             "reserved": reserved,
