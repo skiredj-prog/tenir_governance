@@ -1098,11 +1098,25 @@ class TestSchemaAdapter:
         assert t["ledger_entries"] == 3
         assert t["ledger_valid"] is True
 
-    def test_principal_failure_mode_for_hold(self):
+    def test_hold_does_not_infer_principal_failure_mode(self):
         result = conform_to_schema(self._make_result(
             composed="HOLD", scoring=None, membrane="HOLD"
         ))
-        assert result["synthesis"]["principal_failure_mode"] is not None
+        assert result["synthesis"]["principal_failure_mode"] is None
+
+    def test_explicit_principal_failure_mode_is_preserved(self):
+        source = self._make_result(composed="HOLD")
+        source["canonical_context"]["synthesis"]["principal_failure_mode"] = (
+            "evidence-backed-test-cause"
+        )
+        result = conform_to_schema(source)
+        assert result["synthesis"]["principal_failure_mode"] == "evidence-backed-test-cause"
+
+    def test_malformed_principal_failure_mode_fails_closed(self):
+        source = self._make_result(composed="HOLD")
+        source["principal_failure_mode"] = ["unverified-cause"]
+        with pytest.raises(ValueError, match="principal_failure_mode"):
+            conform_to_schema(source)
 
     def test_principal_failure_mode_none_for_pass(self):
         result = conform_to_schema(self._make_result(composed="PASS"))
