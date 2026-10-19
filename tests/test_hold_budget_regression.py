@@ -1250,3 +1250,49 @@ def test_recovery_replays_after_refund_and_ownership_flags_before_terminal_trans
     assert final_record.budget_committed is False
     assert final_budget.reserved == Decimal("0")
     assert final_budget.committed == Decimal("0")
+
+
+
+def test_recovery_refuses_ambiguous_unknown_backend_reservation_state(tmp_path, monkeypatch):
+    """An UNKNOWN backend reservation must not be guessed to be releasable."""
+    provider = MockProvider(
+        behavior="timeout",
+        reconcile_outcome=ProviderOutcome.FAILED,
+    )
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
+    passage, _result = _adjudicate_durable_budget(gov)
+    key = passage.idempotency_key
+    dispatched = gov.dispatch_and_execute(key, "budget", 10.0)
+    assert dispatched["operation_state"] in (
+        OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
+    )
+
+    original_get_state = backend.get_state
+    original_release = backend.release
+    release_calls = []
+
+    def ambiguous_state(resource_id):
+        state = original_get_state(resource_id)
+        state.reservations = [
+            {**item, "state": "UNKNOWN"} if item.get("key") == key else item
+            for item in state.reservations
+        ]
+        return state
+
+    def tracked_release(reservation_id):
+        release_calls.append(reservation_id)
+        return original_release(reservation_id)
+
+    monkeypatch.setattr(backend, "get_state", ambiguous_state)
+    monkeypatch.setattr(backend, "release", tracked_release)
+
+    result = gov.reconcile_unknown(key)
+    record = gov.registry.get(key)
+    actual_backend_state = original_get_state("budget")
+
+    assert result["reconciled"] is False
+    assert result.get("recommendation") == "human_review"
+    assert record.state in (OperationState.UNKNOWN, OperationState.DISPATCHING)
+    assert release_calls == []
+    assert actual_backend_state.reserved == Decimal("10.0")
+    assert actual_backend_state.committed == Decimal("0")
