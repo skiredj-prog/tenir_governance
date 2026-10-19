@@ -944,11 +944,11 @@ class DualKernelGovernor:
         self,
         idempotency_key: str,
     ) -> dict[str, Any]:
-        """Reconcile an operation in UNKNOWN state with the provider.
+        """Reconcile UNKNOWN or interrupted DISPATCHING with the provider.
 
-        Per doctrine v7.1: UNKNOWN means the outcome is uncertain after
-        reconciliation. This method calls the provider's reconcile() to
-        determine whether the external effect occurred.
+        DISPATCHING is included because a process may crash after claiming
+        dispatch but before recording the external outcome. The provider's
+        reconcile() determines whether the external effect occurred.
 
         If the provider resolves the outcome:
         - CONFIRMED → transition to CONFIRMED
