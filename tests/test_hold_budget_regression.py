@@ -700,3 +700,20 @@ def test_resume_reserved_requires_live_durable_reservation(tmp_path):
     assert resumed["action"] != "dispatch"
     assert resumed["operation_state"] == OperationState.RESERVED.value
     assert "durable" in resumed["reason"].lower() or "reconcil" in resumed["reason"].lower()
+
+
+def test_direct_provider_failure_refunds_durable_commit(tmp_path):
+    provider = MockProvider(behavior="failed")
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
+    passage, _result = _adjudicate_durable_budget(gov)
+
+    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    record = gov.registry.get(passage.idempotency_key)
+    state = backend.get_state("budget")
+
+    assert result["operation_state"] == OperationState.FAILED.value
+    assert record.state == OperationState.FAILED
+    assert record.budget_reserved is False
+    assert record.budget_committed is False
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("0")
