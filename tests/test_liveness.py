@@ -155,6 +155,13 @@ class TestLivenessTermination:
             with pytest.raises(ValueError, match="finite and non-negative"):
                 backend.register_resource("invalid-capacity", capacity)
 
+    @pytest.mark.parametrize("value", ["1e-129", "1e999999", "0e-999999", "1" + "2" * 128])
+    def test_budget_rejects_pathological_decimal_precision(self, tmp_path, value):
+        backend = SingleHostLockBackend(str(tmp_path))
+        with pytest.raises(ValueError, match="finite and non-negative"):
+            backend.register_resource("pathological-capacity", Decimal(value))
+
+
     def test_replay_preserves_terminal_state_and_resource_identity(self, tmp_path):
         """An idempotency key cannot revive a released or cross-resource reservation."""
         backend = SingleHostLockBackend(str(tmp_path))
