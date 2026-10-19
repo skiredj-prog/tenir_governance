@@ -208,6 +208,9 @@ class OperationRecord:
     action_type: str
     amount: float = 0.0
     resource_id: str = ""
+    # Durable SingleHostLockBackend reservation owning this operation budget.
+    # Empty only for legacy records or operations without a budget reservation.
+    reservation_id: str = ""
     state: OperationState = OperationState.CREATED
     created_at: str = ""
     updated_at: str = ""
