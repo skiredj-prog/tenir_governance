@@ -139,10 +139,26 @@ class SingleHostLockBackend:
         self._lock = threading.Lock()
 
     def register_resource(self, resource_id: str, capacity: int | float | Decimal):
-        """Register a resource with the backend."""
+        """Register a resource without resetting any existing budget counters."""
+        if isinstance(capacity, bool):
+            raise ValueError("Resource capacity must be finite and non-negative.")
+        try:
+            normalized_capacity = float(capacity)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("Resource capacity must be finite and non-negative.") from exc
+        if not math.isfinite(normalized_capacity) or normalized_capacity < 0:
+            raise ValueError("Resource capacity must be finite and non-negative.")
+
+        existing = self._coordinator.get_state(resource_id)
+        if existing is not None:
+            if float(existing["capacity"]) != normalized_capacity:
+                raise ValueError(
+                    f"Resource {resource_id!r} is already registered with a different capacity."
+                )
+            return
         resource = type("Resource", (), {
             "resource_id": resource_id,
-            "capacity": float(capacity),
+            "capacity": normalized_capacity,
             "reserved": 0.0,
             "consumed": 0.0,
         })()
