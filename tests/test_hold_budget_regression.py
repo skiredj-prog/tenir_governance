@@ -457,3 +457,34 @@ def test_fail_rechecks_state_under_budget_lock_before_compensating(monkeypatch):
     assert record.budget_committed is True
     assert budget.consumed == 10.0
     assert budget.reserved == 0.0
+
+
+def test_fail_refuses_dispatching_without_confirmed_provider_outcome():
+    """DISPATCHING is uncertain unless the provider explicitly reports FAILED."""
+    gov, state = _setup_governor(budget_capacity=100.0)
+    budget = state.resources["budget"]
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    result = gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    assert result["operation_state"] == OperationState.RESERVED.value
+    assert gov.dispatch(passage.idempotency_key, "budget", 10.0)["dispatched"] is True
+    assert gov.registry.get(passage.idempotency_key).state == OperationState.DISPATCHING
+    assert budget.reserved == 0.0
+    assert budget.consumed == 10.0
+
+    assert gov.fail(passage.idempotency_key) is False
+    record = gov.registry.get(passage.idempotency_key)
+    assert record.state == OperationState.DISPATCHING
+    assert record.budget_committed is True
+    assert budget.consumed == 10.0
+
+    # The same path is allowed only when the provider explicitly establishes
+    # that no external effect occurred (the dispatch implementation passes it).
+    assert gov.fail(
+        passage.idempotency_key,
+        _provider_confirmed_no_effect=True,
+    ) is True
+    assert gov.registry.get(passage.idempotency_key).state == OperationState.FAILED
+    assert budget.consumed == 0.0
