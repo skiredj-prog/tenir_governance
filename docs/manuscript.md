@@ -12,7 +12,7 @@ AI agents that take real-world actions — payments, transfers, API calls, infra
 
 The architecture rests on a fundamental distinction: **admissibility governs whether an action may proceed; post-execution assessment measures what happened and what value was preserved. Neither can substitute for evidence of the other.** This separation is structural, not contingent, and it shapes every component of the system.
 
-We present the implemented system (669 passing tests, published on PyPI as `tenir-governance` v5.4.3), its doctrine, and the explicit boundary of its guarantees. The manuscript distinguishes throughout between what is doctrinally claimed, what is implemented and tested, and what is experimentally demonstrated — and is explicit about what remains unproven.
+We present the implemented system (733 passing tests, published on PyPI as `tenir-governance` v5.4.4), its doctrine, and the explicit boundary of its guarantees. The manuscript distinguishes throughout between what is doctrinally claimed, what is implemented and tested, and what is experimentally demonstrated — and is explicit about what remains unproven.
 
 ---
 
@@ -352,7 +352,7 @@ The architecture publishes its guarantee boundary in three explicit tiers:
 **Locally guaranteed (within the model and stated assumptions):**
 - Deterministic gate composition and fail-closed behavior under missing evidence
 - The conditional refinement theorem holds where transition obligations and assumptions are satisfied
-- 669 passing tests covering composition, membrane, registry, provider, HOLD lifecycle, τ⁻¹, EVP, assessor, and package integrity
+- 733 passing tests covering composition, membrane, registry, provider, HOLD lifecycle, τ⁻¹, EVP, assessor, and package integrity
 
 **Requires distributed infrastructure:**
 - Safety under unconstrained asynchronous concurrency — not established
@@ -422,7 +422,7 @@ The following are identified as subsequent research tracks, not prerequisites fo
 
 ## 12. Conclusion
 
-TENIR-Gov is a working governance middleware that composes a continuous risk monitor with a stateful invariant enforcer to govern autonomous agent actions at the execution boundary. It is published on PyPI, tested with 669 passing tests, and demonstrated through a 10-minute buyer-facing demo.
+TENIR-Gov is a working governance middleware that composes a continuous risk monitor with a stateful invariant enforcer to govern autonomous agent actions at the execution boundary. It is published on PyPI, tested with 733 passing tests, and demonstrated through a 10-minute buyer-facing demo.
 
 The system's value proposition is not that it solves all governance problems — it does not. Its value is that it **makes the boundary explicit**: between authorization and execution, between admissibility and value, between what is guaranteed and what is not. It governs the gap that other systems ignore, and it does so with an honest account of what it can and cannot prove.
 
@@ -465,7 +465,7 @@ This is the foundation for a commercial product: not a claim of universal safety
 | `test_policy_governance_guarantees.py` | ~6 | Determinism guarantee, boundary determinism, legacy coverage |
 | `test_regression_corpus.py` | ~43 | Policy engine contract, membrane invariants, nomenclature, validator CI gate, golden corpus regression |
 | `test_sprints_9_10_11.py` | ~32 | Polymorphic surface, two-glass bridge, opacity map, copy-lint, ledger migration |
-| **Total** | **669** | **0 failures, 0 regressions** |
+| **Total** | **733** | **0 failures, 0 regressions** |
 
 ## Appendix C: Doctrine References
 

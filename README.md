@@ -21,7 +21,7 @@ It does not replace an LLM, an identity system, an observability stack, a policy
 
 1. **Problem:** Models reason and agents propose actions — but a consequential action needs a runtime decision about whether it is admissible before execution.
 2. **Solution:** TENIR-Gov provides a deterministic execution-control layer at the decision → action boundary, with explicit policy thresholds and fail-closed defaults.
-3. **Proof:** The v5.4.2 package includes a two-kernel composition layer (continuous risk monitor + discrete invariant enforcer), a HOLD lifecycle for governed suspension of agency, a dispatch provider abstraction, post-execution assessment (τ⁻¹ and EVP), a hardened I8 aggregate budget invariant with governor-owned reservation, automated validation (669 tests), and hash-chained decision records.
+3. **Proof:** The v5.4.2 package includes a two-kernel composition layer (continuous risk monitor + discrete invariant enforcer), a HOLD lifecycle for governed suspension of agency, a dispatch provider abstraction, post-execution assessment (τ⁻¹ and EVP), a hardened I8 aggregate budget invariant with governor-owned reservation, automated validation (733 tests across `tests/` and `r4/tests/`), and hash-chained decision records.
 
 ---
 
@@ -387,8 +387,9 @@ v5.3.0 contains separate validation scopes.
 | Suite            | Count | Scope                                           |
 | ---------------- | ----: | ----------------------------------------------- |
 | Kernel           |     8 | Core formula, policy, ledger and API validation |
-| Full middleware  |   669 | `tenir_governance` unit/integration coverage    |
-| Repository total |   669 | Published v5.4.2 validation set                 |
+| Full middleware  |   672 | `tenir_governance` unit/integration coverage (`tests/`) |
+| R4 operational  |    61 | `r4/tests/` wired UAT lane                              |
+| Repository total |   733 | Published v5.4.4 validation set (`tests/` + `r4/tests/`) |
 
 The reported coverage figure is:
 

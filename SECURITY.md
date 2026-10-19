@@ -15,7 +15,7 @@ Only the latest patch release within a supported minor line receives security up
 Install from PyPI with an explicit version pin in production:
 
 ```bash
-pip install "tenir-governance==5.4.3"
+pip install "tenir-governance==5.4.4"
 # or with extras
 pip install "tenir-governance[api]==5.4.3"
 pip install "tenir-governance[r5]==5.4.3"
@@ -150,7 +150,7 @@ No claim is made of resistance to a privileged attacker who can modify process m
 
 ## Deployment Recommendations
 
-1. **Pin versions** — Always install a specific release from PyPI (`tenir-governance==5.4.3`).
+1. **Pin versions** — Always install a specific release from PyPI (`tenir-governance==5.4.4`).
 2. **Network isolation** — Bind to localhost or a private interface; terminate TLS at a reverse proxy.
 3. **Secrets management** — Inject tokens and secrets via a secrets manager; never hard-code.
 4. **Least privilege** — Run under a dedicated low-privilege user; restrict filesystem permissions on ledger and registry store.
@@ -159,7 +159,7 @@ No claim is made of resistance to a privileged attacker who can modify process m
 7. **Multi-host** — Replace the file-backed registry and in-process budget coordinator with a transactional store that provides cross-host atomicity.
 8. **Supply-chain hygiene** — Use lock files / hash pinning, monitor advisories for core and optional dependencies, prefer Trusted Publishing for releases.
 
-## Guarantee Boundary Summary (v5.4.3)
+## Guarantee Boundary Summary (v5.4.4)
 
 | Guarantee                                      | Level                                      |
 |------------------------------------------------|--------------------------------------------|

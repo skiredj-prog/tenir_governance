@@ -10,10 +10,10 @@ abstract: >
   deterministic admissibility computation (S = K / (P × V + ε)), and
   cryptographically verifiable Merkle-based audit logging to provide
   model-independent governance for AI-enabled operational systems.
-  Release 5.4.3 extends the R5 governance middleware with a dependency-light
+  Release 5.4.4 extends the R5 governance middleware with a dependency-light
   schema 1.2 execution kernel, runtime constraint geometry, connectors, and
   security hardening. Validation is performed through the repository CI gate.
-version: "5.4.3"
+version: "5.4.4"
 date-released: "2026-10-19"
 license: Apache-2.0
 repository-code: "https://github.com/skiredj-prog/tenir-governance"

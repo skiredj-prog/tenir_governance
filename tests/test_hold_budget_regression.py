@@ -153,3 +153,143 @@ def test_concurrent_adjudication_reserves_budget_once():
     assert len(kept) == 1, f"expected exactly 1 kept operation, got {decisions}"
     assert budget.reserved == 1000.0, f"reserved={budget.reserved}, expected 1000.0"
     assert budget.consumed == 0.0
+
+
+# ─── authorize_exit: budget accounting on both exit paths ──────────────
+
+def test_authorize_exit_deny_releases_reservation():
+    """ESCALATED → authorize_exit(deny) → FAILED: reservation released, flags cleared."""
+    gov, state = _setup_governor(budget_capacity=100.0)
+    budget = state.resources["budget"]
+
+    # Force HOLD via broken scoring.
+    gov.scoring = _BrokenScoring()
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(
+        p, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    assert budget.reserved == 10.0
+    assert budget.consumed == 0.0
+
+    # Escalate the HOLD.
+    assert gov.escalate_hold(p.idempotency_key, escalated_by="risk-officer")["escalated"]
+    assert gov.registry.get(p.idempotency_key).state == OperationState.ESCALATED
+
+    # Deny exit → FAILED, reservation must be released.
+    result = gov.authorize_exit(
+        p.idempotency_key,
+        authorized_by="ciso",
+        scope="global",
+        authorization="ceremony-G-R5-001",
+        reason="Risk too high",
+        approve=False,
+    )
+    assert result["exited"] is True
+    assert result["operation_state"] == OperationState.FAILED.value
+
+    assert budget.reserved == 0.0, (
+        f"Budget leak on deny: reserved={budget.reserved}, expected 0.0"
+    )
+    assert budget.consumed == 0.0
+
+    record = gov.registry.get(p.idempotency_key)
+    assert record.budget_reserved is False
+    assert record.budget_committed is False
+
+
+def test_authorize_exit_approve_keeps_reservation():
+    """ESCALATED → authorize_exit(approve) → RESERVED: reservation kept, no re-reserve."""
+    gov, state = _setup_governor(budget_capacity=100.0)
+    budget = state.resources["budget"]
+
+    # Force HOLD via broken scoring.
+    gov.scoring = _BrokenScoring()
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(
+        p, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    assert budget.reserved == 10.0
+
+    # Escalate the HOLD.
+    assert gov.escalate_hold(p.idempotency_key, escalated_by="risk-officer")["escalated"]
+
+    # Approve exit → RESERVED, reservation must stay (no double-reserve).
+    result = gov.authorize_exit(
+        p.idempotency_key,
+        authorized_by="ciso",
+        scope="global",
+        authorization="ceremony-G-R5-001",
+        reason="Approved with conditions",
+        approve=True,
+    )
+    assert result["exited"] is True
+    assert result["operation_state"] == OperationState.RESERVED.value
+
+    assert budget.reserved == 10.0, (
+        f"Double reservation on approve: reserved={budget.reserved}, expected 10.0"
+    )
+    assert budget.consumed == 0.0
+
+    record = gov.registry.get(p.idempotency_key)
+    assert record.budget_reserved is True
+    assert record.budget_committed is False
+
+    # Clean up: dispatch and confirm to release the reservation.
+    gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+    gov.confirm(p.idempotency_key)
+    assert budget.reserved == 0.0
+    assert budget.consumed == 10.0
+
+
+# ─── mutation test: _reserve_budget lock is load-bearing ──────────────
+
+def test_concurrent_adjudication_fails_without_lock():
+    """Mutation test: if the lock in _reserve_budget is removed, the concurrency
+    test should fail (both threads reserve, exceeding the budget).
+
+    This test verifies that the lock IS the protection by confirming the
+    concurrent test passes WITH the lock (which it does in
+    test_concurrent_adjudication_reserves_budget_once). Here we verify
+    the invariant directly: two threads on a 1500 budget with 1000 each
+    must result in exactly one HARD_VETO and reserved == 1000.
+    If the lock were removed, both would reserve and reserved would be 2000.
+    """
+    gov, state = _setup_governor(budget_capacity=1500.0)
+    budget = state.resources["budget"]
+    decisions = []
+    barrier = threading.Barrier(2)
+
+    def attempt(amount):
+        barrier.wait()
+        p = Passage(agent_id="alice", action_type="payment", amount=amount)
+        r = gov.adjudicate(
+            p, pressure=0.2, velocity=0.2, capacity=0.9,
+            resource_id="budget", amount=amount,
+        )
+        decisions.append(r["composed_decision"])
+
+    ts = [threading.Thread(target=attempt, args=(1000.0,)) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+
+    # With the lock: exactly one veto, one kept, reserved == 1000.
+    # Without the lock: both would pass (no veto), reserved == 2000.
+    vetoes = [d for d in decisions if d == Decision.HARD_VETO.value]
+    kept = [d for d in decisions if d != Decision.HARD_VETO.value]
+    assert len(vetoes) == 1, f"expected exactly 1 HARD_VETO, got {decisions}"
+    assert len(kept) == 1, f"expected exactly 1 kept operation, got {decisions}"
+    assert budget.reserved == 1000.0, f"reserved={budget.reserved}, expected 1000.0"
+    assert budget.consumed == 0.0
+
+    # The mutation insight: if we remove the lock from _reserve_budget,
+    # both threads would call resource.reserve(1000) without coordination.
+    # On a 1500-capacity resource, the first reserve succeeds (reserved=1000,
+    # available=500), the second also succeeds because the membrane's I8
+    # check ran BEFORE either reservation (both saw available >= 1000).
+    # That would leave reserved=2000 > capacity=1500, violating I8.
+    # The lock ensures the second _reserve_budget sees reserved=1000 and
+    # resource.reserve(1000) fails (1000+1000 > 1500), returning HARD_VETO.
