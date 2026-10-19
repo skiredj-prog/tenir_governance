@@ -18,6 +18,7 @@
 - Prevent live resource replacement from orphaning reservations or swapping the resource lock; correct the sequential oracle so COMMITTED cannot follow RELEASED, bind concrete reservation IDs across replay/commit, and exercise the actual concurrent Raft history.
 - Normalize Decimal input before the single-host backend persists reservation JSON; add regressions for Decimal idempotency, HOLD identity preservation, and preventing a HOLD veto from releasing another operation’s reservation.
 - Replace fixed leader-failover sleeps with bounded polling across the three- and five-node tests; release reserved accounting when an UNKNOWN reservation is explicitly reconciled as non-executed.
+- Allow recovery reconciliation to start from DISPATCHING after a crash; normalize indeterminate outcomes to UNKNOWN and check terminal transition success before reporting reconciliation.
 
 ### Test perimeter
 - Reproduction: `python -m pip install -e ".[test]" "pysyncobj==0.3.17" && pytest -q tests/test_raft_backend.py`
