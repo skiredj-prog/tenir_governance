@@ -48,6 +48,7 @@ class TestLivenessTermination:
         assert first.status == "RESERVED"
         replay = backend.reserve("decimal-key", Decimal("0.1"), "decimal-budget")
         assert replay.status == "RESERVED"
+        assert replay.reservation_id == first.reservation_id
         state = backend.get_state("decimal-budget")
         assert state.reserved == 0.1
         assert state.available == 0.9
