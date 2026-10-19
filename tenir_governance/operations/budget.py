@@ -160,7 +160,10 @@ def _decimal_precision(*values: Decimal) -> int:
     """Choose enough precision to add/subtract finite Decimals without rounding."""
     if not values:
         return 28
-    highest_adjusted = max(value.adjusted() for value in values if value)
+    nonzero_values = [value for value in values if value]
+    # Decimal(0).adjusted() is not useful for sizing precision, and all-zero
+    # operands are common in initial budget state/invariant checks.
+    highest_adjusted = max((value.adjusted() for value in nonzero_values), default=0)
     lowest_exponent = min(value.as_tuple().exponent for value in values)
     return max(28, highest_adjusted - lowest_exponent + 2)
 
