@@ -817,3 +817,34 @@ def test_durable_commit_error_does_not_terminalize_uncompensated_operation(tmp_p
     assert provider.calls == []
     assert state.reserved == Decimal("10.0")
     assert state.committed == Decimal("0")
+
+
+def test_reconcile_confirmed_fails_closed_when_durable_reservation_identity_missing(tmp_path):
+    provider = MockProvider(
+        behavior="timeout",
+        reconcile_outcome=ProviderOutcome.CONFIRMED,
+    )
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
+    passage, _result = _adjudicate_durable_budget(gov)
+    record = gov.registry.get(passage.idempotency_key)
+    assert record.reservation_id
+
+    # Simulate a crash after dispatch/commit but before the registry persisted
+    # the durable reservation identity and committed ownership flags.
+    assert backend.commit(record.reservation_id).status in ("COMMITTED", "ALREADY_COMMITTED")
+    assert gov.registry.set_budget_flags(
+        passage.idempotency_key,
+        budget_reserved=False,
+        budget_committed=False,
+        reservation_id="",
+    )
+    assert gov.registry.transition_to(
+        passage.idempotency_key, OperationState.DISPATCHING,
+    )[0]
+
+    result = gov.reconcile_unknown(passage.idempotency_key)
+    latest = gov.registry.get(passage.idempotency_key)
+
+    assert result["reconciled"] is False
+    assert latest.state in (OperationState.DISPATCHING, OperationState.UNKNOWN)
+    assert backend.get_state("budget").committed == Decimal("10.0")
