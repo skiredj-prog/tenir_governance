@@ -1118,7 +1118,8 @@ class DualKernelGovernor:
             }
         elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
             committed = record.budget_committed
-            if record.resource_id and record.amount > 0:
+            owns_budget = record.budget_reserved or record.budget_committed
+            if record.resource_id and record.amount > 0 and owns_budget:
                 resource = self.membrane.state.resources.get(record.resource_id)
                 if resource is None:
                     return {
