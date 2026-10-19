@@ -202,14 +202,19 @@ class SingleHostLockBackend:
                 # Check for existing reservation with this key
                 for rid, rec in reservations.items():
                     if rec.get("key") == key:
-                        if rec["amount"] == amount:
+                        # Idempotency binds the key to the full immutable
+                        # reservation identity and returns its actual lifecycle
+                        # state; replay must never revive a terminal reservation.
+                        if (
+                            rec.get("amount") == amount
+                            and rec.get("resource_id") == resource_id
+                        ):
                             return ReservationResult(
-                                status="RESERVED",
+                                status=rec.get("state", "ERROR"),
                                 reservation_id=rid,
                                 amount_reserved=amount,
                             )
-                        else:
-                            return ReservationResult(status="DUPLICATE_KEY")
+                        return ReservationResult(status="DUPLICATE_KEY")
 
                 # Attempt budget reservation
                 if not self._coordinator.reserve(resource_id, float(amount)):
