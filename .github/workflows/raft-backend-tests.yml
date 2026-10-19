@@ -9,6 +9,7 @@ on:
       - "tests/test_raft_backend.py"
       - "tests/test_composition.py"
       - "tests/test_provider.py"
+      - "tests/test_linearizability_checker.py"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
   push:
@@ -41,3 +42,5 @@ jobs:
         run: pytest -q tests/test_composition.py
       - name: Run provider reconciliation regressions
         run: pytest -q tests/test_provider.py
+      - name: Run linearizability checker regressions
+        run: pytest -q tests/test_linearizability_checker.py
