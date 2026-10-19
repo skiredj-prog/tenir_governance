@@ -928,7 +928,78 @@ class TestSchemaAdapter:
     """Tests for the TENIR 2.0 schema 1.2 conformance adapter."""
 
     def _make_result(self, composed="PASS", scoring="PASS", membrane="PASS"):
+        # Explicit test evidence/context: production callers must supply real
+        # values rather than relying on the adapter to fabricate them.
+        canonical_context = {
+            "rubric_version": "test-fixture-1",
+            "timestamp_utc": "2026-10-19T00:00:00Z",
+            "identity": {
+                "unit_name": "test-unit",
+                "entity_class": "organization",
+                "declared_scale": "team",
+            },
+            "tau": {
+                "tau_hypothesis": "Preserve accountable human authority.",
+                "tau_integrity": "intact",
+            },
+            "epistemic": {
+                "status": "ok",
+                "evidence_quality": 1.0,
+                "manipulation_risk": 0.0,
+                "drift": 0.0,
+                "epistemic_surrender_risk": 0.0,
+                "confidence_ceiling": "high",
+            },
+            "scores": {
+                "pressure": 0.2,
+                "velocity": 0.3,
+                "capacity": 1.0,
+                "option_space": 0.8,
+                "stability": 1.0,
+                "cooperative_control_score": 1.0,
+                "trajectory_risk_score": 0.0,
+                "irreversible_pathway_materiality": 0.0,
+            },
+            "collapse_flags": [],
+            "active_profiles": ["agentic-governance-profile-v1.0.0"],
+            "suppressed_profiles": [],
+            "profile_conflicts": [],
+            "narrative_distortion_summary": {},
+            "irreversible_pathway_assessment": {
+                "materially_affects_irreversible_pathway": False,
+                "raw_data_human_verification_required": False,
+                "human_verified_raw_data": False,
+            },
+            "assumptions": [],
+            "constraint_geometry": {
+                "geometry_id": "tenir-2.0-reference",
+                "coordinates": {
+                    "authority": 1.0,
+                    "context_fit": 1.0,
+                    "authority_source": "explicit test evidence",
+                    "context_source": "explicit test evidence",
+                },
+            },
+            "trace": {"trace_id": "fixture-trace", "stages": []},
+            "synthesis": {
+                "structural_core": {
+                    "pressure": 0.2,
+                    "velocity": 0.3,
+                    "capacity": 1.0,
+                    "option_space": 0.8,
+                    "tau_integrity": "intact",
+                    "stability": 1.0,
+                },
+                "epistemic_state": {"status": "ok"},
+                "final_posture": "NORMAL",
+                "rationale": ["Explicit test fixture."],
+                "degraded_inputs": [],
+            },
+            "schema_version": "1.2",
+            "degraded_mode": ["none"],
+        }
         return {
+            "canonical_context": canonical_context,
             "composed_decision": composed,
             "scoring_decision": scoring,
             "scoring_rationale": "test",
@@ -950,7 +1021,7 @@ class TestSchemaAdapter:
         assert result["posture"] == "NORMAL"
         assert result["execution_disposition"] == "allow"
         assert result["execution_allowed"] is True
-        assert result["degraded_mode"] is False
+        assert result["degraded_mode"] == ["none"]
 
     def test_flag_maps_to_caution_posture(self):
         result = conform_to_schema(self._make_result(composed="FLAG"))
@@ -964,7 +1035,7 @@ class TestSchemaAdapter:
         assert result["posture"] == "HOLDING-FIRST"
         assert result["execution_disposition"] == "hold"
         assert result["execution_allowed"] is False
-        assert result["degraded_mode"] is True
+        assert result["degraded_mode"] == ["sparse_ingress"]
 
     def test_hard_veto_maps_to_holding_first_posture(self):
         result = conform_to_schema(self._make_result(composed="HARD_VETO"))
@@ -1033,9 +1104,11 @@ class TestSchemaAdapter:
         result = conform_to_schema(self._make_result(composed="PASS"))
         assert result["synthesis"]["principal_failure_mode"] is None
 
-    def test_does_not_infer_human_verification_from_score_presence(self):
-        result = conform_to_schema(self._make_result())
-        assert "irreversible_pathway_assessment" not in result
+    def test_missing_irreversible_assessment_fails_closed(self):
+        source = self._make_result()
+        source["canonical_context"].pop("irreversible_pathway_assessment")
+        with pytest.raises(ValueError, match="irreversible_pathway_assessment"):
+            conform_to_schema(source)
 
     def test_preserves_explicit_irreversible_pathway_assessment(self):
         source = self._make_result()
