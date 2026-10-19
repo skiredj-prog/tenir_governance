@@ -782,3 +782,14 @@ def test_fail_recovers_reservation_identity_after_crash_before_registry_flags(tm
     assert record.budget_reserved is False
     assert state.reserved == Decimal("0")
     assert state.committed == Decimal("0")
+
+
+def test_operation_record_reservation_id_preserves_legacy_positional_fields():
+    from tenir_governance.operations.registry import OperationRecord
+
+    record = OperationRecord(
+        "legacy-key", "legacy-passage", "alice", "payment",
+        10.0, "budget", OperationState.RESERVED,
+    )
+    assert record.state == OperationState.RESERVED
+    assert record.reservation_id == ""
