@@ -819,7 +819,7 @@ def test_durable_commit_error_does_not_terminalize_uncompensated_operation(tmp_p
     assert state.committed == Decimal("0")
 
 
-def test_reconcile_confirmed_fails_closed_when_durable_reservation_identity_missing(tmp_path):
+def test_reconcile_confirmed_recovers_missing_durable_reservation_identity(tmp_path):
     provider = MockProvider(
         behavior="timeout",
         reconcile_outcome=ProviderOutcome.CONFIRMED,
@@ -829,8 +829,8 @@ def test_reconcile_confirmed_fails_closed_when_durable_reservation_identity_miss
     record = gov.registry.get(passage.idempotency_key)
     assert record.reservation_id
 
-    # Simulate a crash after dispatch/commit but before the registry persisted
-    # the durable reservation identity and committed ownership flags.
+    # Simulate a crash after backend commit but before the registry persisted
+    # reservation identity and committed ownership flags.
     assert backend.commit(record.reservation_id).status in ("COMMITTED", "ALREADY_COMMITTED")
     assert gov.registry.set_budget_flags(
         passage.idempotency_key,
@@ -845,6 +845,9 @@ def test_reconcile_confirmed_fails_closed_when_durable_reservation_identity_miss
     result = gov.reconcile_unknown(passage.idempotency_key)
     latest = gov.registry.get(passage.idempotency_key)
 
-    assert result["reconciled"] is False
-    assert latest.state in (OperationState.DISPATCHING, OperationState.UNKNOWN)
+    assert result["reconciled"] is True
+    assert latest.state == OperationState.CONFIRMED
+    assert latest.reservation_id
+    assert latest.budget_reserved is False
+    assert latest.budget_committed is True
     assert backend.get_state("budget").committed == Decimal("10.0")
