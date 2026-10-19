@@ -55,8 +55,17 @@ class MembraneState:
         self.agents[agent.agent_id] = agent
 
     def register_resource(self, resource: Resource) -> None:
+        """Register once; replacing a live resource would orphan its budget and lock."""
+        existing = self.resources.get(resource.resource_id)
+        if existing is not None:
+            if existing is resource:
+                return
+            raise ValueError(
+                f"Resource {resource.resource_id!r} is already registered; "
+                "resource replacement is prohibited because it can reset accounting."
+            )
         self.resources[resource.resource_id] = resource
-        self._locks[resource.resource_id] = threading.Lock()
+        self._locks.setdefault(resource.resource_id, threading.Lock())
 
     def register_trajectory(self, trajectory: Trajectory) -> None:
         self.trajectories[trajectory.trajectory_id] = trajectory
