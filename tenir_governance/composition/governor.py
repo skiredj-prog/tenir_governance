@@ -1565,8 +1565,8 @@ class DualKernelGovernor:
             # Otherwise an illegal confirm from RESERVED could consume budget
             # even though the registry correctly rejects CONFIRMED.
             return False
-        if self.consensus_backend is not None and record.resource_id and record.amount > 0:
-            if not record.reservation_id:
+        if self.consensus_backend is not None and record.amount > 0:
+            if not record.resource_id or not record.reservation_id:
                 return False
             try:
                 state = self.consensus_backend.get_state(record.resource_id)
