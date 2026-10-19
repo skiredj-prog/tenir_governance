@@ -993,9 +993,8 @@ class DualKernelGovernor:
             }
         elif prov_result.outcome == ProviderOutcome.FAILED:
             try:
-                self.fail(
-                    idempotency_key, resource_id, amount,
-                    _provider_confirmed_no_effect=True,
+                self._fail_after_provider_no_effect(
+                    idempotency_key, resource_id, amount, prov_result.outcome,
                 )
             finally:
                 with self._active_dispatches_lock:
@@ -1093,7 +1092,10 @@ class DualKernelGovernor:
         except Exception as e:
             current = self.registry.get(idempotency_key)
             if current is not None and current.state == OperationState.DISPATCHING:
-                self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+                self.registry.transition_to(
+                    idempotency_key, OperationState.UNKNOWN,
+                    expected_states={OperationState.DISPATCHING},
+                )
                 current = self.registry.get(idempotency_key)
             return {
                 "reconciled": False,
@@ -1104,7 +1106,10 @@ class DualKernelGovernor:
             }
 
         if recon.resolved and recon.outcome == ProviderOutcome.CONFIRMED:
-            success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
+            success, _prev = self.registry.transition_to(
+                idempotency_key, OperationState.CONFIRMED,
+                expected_states={record.state},
+            )
             if not success:
                 current = self.registry.get(idempotency_key)
                 return {
@@ -1170,7 +1175,10 @@ class DualKernelGovernor:
                                 "recommendation": "human_review",
                                 "reason": "Could not persist budget ownership release; budget unchanged.",
                             }
-                    success, _ = self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                    success, _ = self.registry.transition_to(
+                        idempotency_key, OperationState.FAILED,
+                        expected_states={current.state},
+                    )
                     if not success:
                         # Restore the ownership flags if the terminal transition
                         # lost a race. No accounting mutation has happened yet.
@@ -1194,7 +1202,10 @@ class DualKernelGovernor:
                     else:
                         resource.release(record.amount)
             else:
-                success, _ = self.registry.transition_to(idempotency_key, OperationState.FAILED)
+                success, _ = self.registry.transition_to(
+                    idempotency_key, OperationState.FAILED,
+                    expected_states={record.state},
+                )
                 if not success:
                     current = self.registry.get(idempotency_key)
                     return {
@@ -1214,7 +1225,10 @@ class DualKernelGovernor:
             # it must not remain mislabeled DISPATCHING after reconciliation.
             current = self.registry.get(idempotency_key)
             if current is not None and current.state == OperationState.DISPATCHING:
-                self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+                self.registry.transition_to(
+                    idempotency_key, OperationState.UNKNOWN,
+                    expected_states={OperationState.DISPATCHING},
+                )
                 current = self.registry.get(idempotency_key)
             return {
                 "reconciled": False,
@@ -1236,21 +1250,38 @@ class DualKernelGovernor:
         idempotency_key: str,
         resource_id: str | None = None,
         amount: float = 0.0,
-        *,
-        _provider_confirmed_no_effect: bool = False,
     ) -> bool:
         """Mark FAILED only when non-execution is established.
 
-        The provider execution path may set ``_provider_confirmed_no_effect``
-        only after receiving an explicit FAILED outcome. DISPATCHING by itself
-        is uncertain and must be reconciled, just like UNKNOWN.
+        Public callers cannot authorize a DISPATCHING failure by supplying a
+        boolean. A provider's explicit FAILED result is handled by the
+        dedicated internal dispatch path below.
         """
+        return self._fail_impl(idempotency_key, resource_id, amount, allow_dispatching=False)
+
+    def _fail_after_provider_no_effect(
+        self, idempotency_key: str, resource_id: str | None, amount: float, outcome,
+    ) -> bool:
+        """Internal dispatch path for an explicit provider FAILED outcome."""
+        from ..operations.provider import ProviderOutcome
+        if outcome is not ProviderOutcome.FAILED:
+            return False
+        return self._fail_impl(idempotency_key, resource_id, amount, allow_dispatching=True)
+
+    def _fail_impl(
+        self,
+        idempotency_key: str,
+        resource_id: str | None = None,
+        amount: float = 0.0,
+        *,
+        allow_dispatching: bool,
+    ) -> bool:
         record = self.registry.get(idempotency_key)
         if record is None or record.state == OperationState.UNKNOWN:
             # UNKNOWN is not proof of non-execution. Require reconciliation
             # before transitioning to FAILED or compensating committed spend.
             return False
-        if record.state == OperationState.DISPATCHING and not _provider_confirmed_no_effect:
+        if record.state == OperationState.DISPATCHING and not allow_dispatching:
             return False
         recorded_resource = record.resource_id or None
         if resource_id is None:
@@ -1281,7 +1312,7 @@ class DualKernelGovernor:
                     OperationState.UNKNOWN,
                 ) or (
                     current.state == OperationState.DISPATCHING
-                    and not _provider_confirmed_no_effect
+                    and not allow_dispatching
                 ):
                     return False
                 accounted = resource.consumed if committed else resource.reserved
