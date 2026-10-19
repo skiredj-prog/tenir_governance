@@ -316,8 +316,11 @@ class TransitionMembrane:
             resource = self.state.resources.get(resource_id)
             if resource is None:
                 return
+            # A coordinator already bound to a different object for this ID
+            # must not be silently replaced or allowed to commit against the
+            # wrong accounting state. Fail closed without advancing passage.
             if self.budget_coordinator.get_resource(resource_id) is not resource:
-                self.budget_coordinator.register(resource)
+                return
             if not self.budget_coordinator.commit(resource_id, amount, reservation_id=reservation_id):
                 return
         passage.execution_status = PassageStatus.DISPATCHED
