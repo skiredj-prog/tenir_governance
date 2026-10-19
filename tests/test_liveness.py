@@ -733,3 +733,32 @@ def test_crash_after_refund_budget_write_recovers_without_double_refund(
     final_state = reopened.get_state("refund-budget")
     assert final_state.reserved == Decimal("0")
     assert final_state.committed == Decimal("0")
+
+
+def test_operation_record_persists_backend_reservation_identity(tmp_path):
+    """Recovery must bind registry ownership to one durable backend reservation."""
+    from tenir_governance.operations.registry import (
+        DurableOperationRegistry,
+        OperationRecord,
+        OperationState,
+    )
+
+    registry = DurableOperationRegistry(str(tmp_path / "operations.json"))
+    record = OperationRecord(
+        idempotency_key="op-ownership-1",
+        passage_id="passage-1",
+        agent_id="agent-1",
+        action_type="transfer",
+        amount=10.0,
+        resource_id="refund-budget",
+        state=OperationState.RESERVED,
+        budget_reserved=True,
+        reservation_id="backend-reservation-123",
+    )
+    assert registry.register(record)
+
+    reopened = DurableOperationRegistry(str(tmp_path / "operations.json"))
+    recovered = reopened.get("op-ownership-1")
+    assert recovered is not None
+    assert recovered.reservation_id == "backend-reservation-123"
+    assert recovered.budget_reserved is True
