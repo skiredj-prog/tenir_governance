@@ -69,7 +69,6 @@ from tenir_governance.operations.consensus_backend import (
 MAX_AMOUNT = Decimal("1000000000000000000")
 
 
-undefinedMAX_AMOUNT = Decimal("1000000000000000000")
 
 
 def _validated_amount(value, *, allow_zero=False):
