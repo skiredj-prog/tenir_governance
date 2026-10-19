@@ -93,6 +93,11 @@ def _validated_amount(value, *, allow_zero=False):
         return None
     if not amount.is_finite() or amount < 0 or (amount == 0 and not allow_zero):
         return None
+    parts = amount.as_tuple()
+    # Keep replicated arithmetic bounded; tiny scientific-notation values can
+    # otherwise force extreme Decimal precision despite being below MAX_AMOUNT.
+    if len(parts.digits) > 128 or abs(parts.exponent) > 128:
+        return None
     if amount > MAX_AMOUNT:
         return None
     return amount
