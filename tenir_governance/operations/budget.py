@@ -439,3 +439,23 @@ class DurableBudgetCoordinator:
             finally:
                 if flock:
                     flock.close()
+
+    def get_state_exact(self, resource_id: str) -> dict | None:
+        """Return exact Decimal counters for durable transaction recovery."""
+        with self._lock:
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                r = self._resources.get(resource_id)
+                if r is None:
+                    return None
+                return {
+                    "available": r["capacity"] - r["reserved"] - r["consumed"],
+                    "reserved": r["reserved"],
+                    "consumed": r["consumed"],
+                    "capacity": r["capacity"],
+                }
+            finally:
+                if flock:
+                    flock.close()
