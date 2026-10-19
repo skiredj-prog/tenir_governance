@@ -325,6 +325,8 @@ class _RaftStateMachine(SyncObj):
             committed = Decimal(str(res["committed"]))
             if not all(v.is_finite() and v >= 0 for v in (capacity, reserved, committed)):
                 raise InvalidOperation
+            if reserved + committed > capacity:
+                raise InvalidOperation
             normalized_reservations = [
                 {**record, "amount": Decimal(str(record["amount"]))}
                 for record in reservations
