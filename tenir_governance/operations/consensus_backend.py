@@ -67,6 +67,11 @@ class ReleaseResult:
 
 
 @dataclass
+class RefundResult:
+    status: str  # REFUNDED | NOT_FOUND | ALREADY_REFUNDED | NOT_COMMITTED | ERROR
+
+
+@dataclass
 class ReconciliationResult:
     status: str  # CONFIRMED | FAILED | UNRESOLVED | NOT_FOUND | RECONCILE_CONFLICT | ERROR
     effect_observed: bool | None = None
@@ -102,6 +107,54 @@ class ConsensusBackend(Protocol):
     def release(self, reservation_id: str) -> ReleaseResult:
         """Libérer une réservation non commitée."""
         ...
+
+    def refund(self, reservation_id: str) -> RefundResult:
+        """Refund a committed reservation exactly once using the durable journal.
+
+        Call only after authoritative evidence establishes that no external
+        effect occurred. A replay never mutates budget counters twice.
+        """
+        with self._lock:
+            flock = self._lock_file()
+            try:
+                reservations = self._load_reservations()
+                if reservation_id not in reservations:
+                    return RefundResult(status="NOT_FOUND")
+
+                rec = reservations[reservation_id]
+                if rec["state"] == "REFUNDED":
+                    return RefundResult(status="ALREADY_REFUNDED")
+                if rec["state"] != "COMMITTED":
+                    return RefundResult(status="NOT_COMMITTED")
+
+                amount = Decimal(str(rec["amount"]))
+                before = self._snapshot(rec["resource_id"])
+                if Decimal(before["consumed"]) < amount:
+                    return RefundResult(status="ERROR")
+                after = dict(before)
+                after["consumed"] = str(
+                    _decimal_subtract(Decimal(before["consumed"]), amount)
+                )
+                updated = dict(rec)
+                updated["state"] = "REFUNDED"
+                updated["refunded_at"] = time.time()
+                self._persist_transaction({
+                    "operation": "refund",
+                    "reservation_id": reservation_id,
+                    "record": updated,
+                    "before": before,
+                    "after": after,
+                })
+                if not self._coordinator.refund(rec["resource_id"], amount):
+                    self._clear_transaction()
+                    return RefundResult(status="ERROR")
+                reservations[reservation_id] = updated
+                self._persist_reservations(reservations)
+                self._clear_transaction()
+                return RefundResult(status="REFUNDED")
+            finally:
+                if flock:
+                    flock.close()
 
     def reconcile(self, key: str) -> ReconciliationResult:
         """Réconcilier une opération en état UNKNOWN."""
@@ -241,7 +294,7 @@ class SingleHostLockBackend:
                 # Validate the journal's operation and structure before replay.
                 # Unknown/corrupted operations must fail closed, never be treated
                 # as a generic commit/release mutation.
-                if tx["operation"] not in {"reserve", "commit", "release"}:
+                if tx["operation"] not in {"reserve", "commit", "release", "refund"}:
                     raise ValueError("unknown transaction operation")
                 if not isinstance(tx["reservation_id"], str) or not tx["reservation_id"]:
                     raise ValueError("invalid transaction reservation_id")
@@ -273,7 +326,11 @@ class SingleHostLockBackend:
                     if existing is None:
                         raise RuntimeError("Transaction journal references a missing reservation.")
                     existing["state"] = record["state"]
-                    state_key = {"commit": "committed_at", "release": "released_at"}.get(tx["operation"])
+                    state_key = {
+                        "commit": "committed_at",
+                        "release": "released_at",
+                        "refund": "refunded_at",
+                    }.get(tx["operation"])
                     if state_key:
                         existing[state_key] = record[state_key]
                 self._persist_reservations(reservations)
