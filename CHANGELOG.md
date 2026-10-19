@@ -1,5 +1,28 @@
 # Changelog
 
+## [5.6.1] — Pending verification — Patch: Budget safety and deterministic Raft state
+
+### Corrected in this branch
+- Reject `reconcile_commit()` unless the reservation is `RESERVED`; repeated commits remain idempotent, while a late effect after `RELEASED` returns `RECONCILE_CONFLICT` and records a deterministic incident.
+- Replace replicated wall-clock timestamps with a replicated logical clock.
+- Validate finite, positive reservation amounts and non-negative finite capacities; preserve decimal arithmetic in the replicated budget and fractional values in read results.
+- Return the actual reservation state on idempotent replay.
+- Make resource registration non-destructive; reject implicit capacity changes.
+
+### Test perimeter
+- Command: `pytest -q tests/test_raft_backend.py`
+- Included: local `pysyncobj` Raft integration tests, I8 regressions, invalid-amount cases, idempotent replay, resource re-registration, logical-clock replication and fractional-budget accounting.
+- Environment: test cluster nodes use `localhost` and separate ports; this is not a physical multi-host network test.
+- Excluded: Byzantine tolerance, hardened peer transport/authentication, third-party attestation, and proof of exactly-once external effects.
+- Exact collected/passed/failed/skipped counts must be taken from the CI run for this commit before publishing the release; previous aggregate counts are not carried forward as evidence.
+
+### Status
+- Release status: not released by this change; do not infer a PyPI publication from this changelog entry.
+- `admissible_structural` describes catalog coherence only and does not imply `effective_guarantee_demonstrated`.
+
+---
+
+
 All notable changes to TENIR-Gov are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
