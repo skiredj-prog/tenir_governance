@@ -436,9 +436,13 @@ class DurableOperationRegistry:
         This lock is single-host only, matching the file-backed registry model.
         """
         if not self._store_path:
-            # In-memory registries cannot be shared durably across instances.
-            yield
-            return
+            # Budget settlement spans registry state and a separate durable
+            # backend. Without a persistent registry, another governor/process
+            # cannot observe this operation's terminal state, so a local lock
+            # would create a false impression of cross-instance safety.
+            raise RuntimeError(
+                "Durable budget settlement requires a persistent operation registry."
+            )
         if fcntl is None:
             raise RuntimeError(
                 "Cross-process settlement requires fcntl; refusing unsafe settlement."
