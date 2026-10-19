@@ -39,6 +39,7 @@ import os
 import threading
 import time
 import uuid
+from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -51,6 +52,11 @@ except ImportError:
     FAIL_REASON = None
 
 # Re-use the result types from consensus_backend for interface compatibility
+from tenir_governance.operations.budget import (
+    _decimal_add,
+    _decimal_subtract,
+    _decimal_precision,
+)
 from tenir_governance.operations.consensus_backend import (
     ReservationResult,
     CommitResult,
@@ -58,6 +64,31 @@ from tenir_governance.operations.consensus_backend import (
     ReconciliationResult,
     ConsensusState,
 )
+
+
+MAX_AMOUNT = Decimal("1000000000000000000")
+
+
+
+
+def _validated_amount(value, *, allow_zero=False):
+    """Return a finite, bounded Decimal or None; reject bool and malformed input."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if not amount.is_finite() or amount < 0 or (amount == 0 and not allow_zero):
+        return None
+    parts = amount.as_tuple()
+    # Keep replicated arithmetic bounded; tiny scientific-notation values can
+    # otherwise force extreme Decimal precision despite being below MAX_AMOUNT.
+    if len(parts.digits) > 128 or abs(parts.exponent) > 128:
+        return None
+    if amount > MAX_AMOUNT:
+        return None
+    return amount
 
 
 class _RaftStateMachine(SyncObj):
@@ -69,7 +100,7 @@ class _RaftStateMachine(SyncObj):
 
     The state machine maintains:
     - _resources: {resource_id: {capacity, reserved, committed}}
-    - _reservations: {reservation_id: {key, amount, resource_id, state, created_at, ...}}
+    - _reservations: {reservation_id: {key, amount, resource_id, state, logical timestamps, ...}}
     - _key_index: {key: reservation_id} for fast idempotency lookup
     """
 
@@ -78,160 +109,205 @@ class _RaftStateMachine(SyncObj):
         self._resources = {}
         self._reservations = {}
         self._key_index = {}
+        self._logical_clock = 0
+        self._incidents = []
+
+    def _tick_logical(self):
+        """Advance the replicated logical clock deterministically."""
+        self._logical_clock += 1
+        return self._logical_clock
+
+    def _record_incident(self, code, reservation_id, previous_state):
+        self._incidents.append({
+            "code": code, "reservation_id": reservation_id,
+            "previous_state": previous_state, "logical_time": self._tick_logical(),
+        })
+
+    def _normalize_resource_values(self, resource):
+        """Normalize accounting values restored from pre-Decimal journals."""
+        values = {
+            name: _validated_amount(resource.get(name), allow_zero=True)
+            for name in ("capacity", "reserved", "committed")
+        }
+        if any(value is None for value in values.values()):
+            return False
+        if _decimal_add(values["reserved"], values["committed"]) > values["capacity"]:
+            return False
+        resource.update(values)
+        return True
+
+    def _normalize_reservation_amount(self, record):
+        amount = _validated_amount(record.get("amount"), allow_zero=True)
+        if amount is None:
+            return None
+        record["amount"] = amount
+        return amount
 
     @replicated
     def register_resource(self, resource_id, capacity):
-        """Register a resource with a capacity ceiling."""
-        if resource_id not in self._resources:
-            self._resources[resource_id] = {
-                "capacity": float(capacity),
-                "reserved": 0.0,
-                "committed": 0.0,
-            }
-        return True
+        """Register once; never reset an existing resource's accounting."""
+        normalized = _validated_amount(capacity, allow_zero=True)
+        if normalized is None:
+            return "INVALID_CAPACITY"
+        existing = self._resources.get(resource_id)
+        if existing is not None:
+            return "ALREADY_REGISTERED" if existing["capacity"] == normalized else "RESOURCE_CONFLICT"
+        self._resources[resource_id] = {"capacity": normalized, "reserved": Decimal("0"), "committed": Decimal("0")}
+        return "REGISTERED"
 
     @replicated
-    def reserve(self, key, amount, resource_id, reservation_id, timestamp):
+    def reserve(self, key, amount, resource_id, reservation_id, _legacy_timestamp=None):
         """Reserve budget for an idempotency key.
 
-        reservation_id and timestamp are generated client-side and passed as
-        arguments to ensure deterministic replication (Raft requires all
-        state machine commands to be deterministic).
+        The optional legacy timestamp preserves replay compatibility with
+        journals written by the previous five-argument command. New calls do
+        not use wall-clock timestamps; logical time is assigned on replication.
 
         Returns: (status, reservation_id, amount_reserved)
         - RESERVED: reservation created or existing returned (idempotent)
         - INSUFFICIENT_BUDGET: not enough budget
         - DUPLICATE_KEY: key exists with different amount
         """
-        # Check for existing reservation with this key
+        normalized = _validated_amount(amount)
+        if normalized is None:
+            return ("INVALID_AMOUNT", None, None)
         if key in self._key_index:
             rid = self._key_index[key]
-            rec = self._reservations[rid]
-            if rec["amount"] == amount:
-                return ("RESERVED", rid, amount)
-            else:
-                return ("DUPLICATE_KEY", None, None)
-
-        # Check I8: reserved + committed + amount <= capacity
+            rec = self._reservations.get(rid)
+            if rec is None:
+                return ("IDEMPOTENCY_INDEX_CORRUPTED", None, None)
+            # Old journals may contain float accounting values. Normalize via
+            # str() to avoid importing binary float artifacts into Decimal math.
+            old_amount = _validated_amount(rec.get("amount"), allow_zero=True)
+            if old_amount is None:
+                return ("CORRUPT_RESERVATION_STATE", None, None)
+            rec["amount"] = old_amount
+            if old_amount == normalized and rec["resource_id"] == resource_id:
+                return (rec["state"], rid, normalized)
+            return ("DUPLICATE_KEY", None, None)
         res = self._resources.get(resource_id)
         if res is None:
-            return ("ERROR", None, None)
-
-        if res["reserved"] + res["committed"] + float(amount) > res["capacity"]:
+            return ("UNKNOWN_RESOURCE", None, None)
+        # Normalize persisted pre-Decimal state before arithmetic after upgrade.
+        # Fail closed if any stored accounting value is invalid.
+        if not self._normalize_resource_values(res):
+            return ("CORRUPT_RESOURCE_STATE", None, None)
+        if _decimal_add(_decimal_add(res["reserved"], res["committed"]), normalized) > res["capacity"]:
             return ("INSUFFICIENT_BUDGET", None, None)
-
-        # Create reservation with client-provided deterministic ID
+        if reservation_id in self._reservations:
+            return ("RESERVATION_ID_CONFLICT", None, None)
         self._reservations[reservation_id] = {
-            "key": key,
-            "amount": amount,
-            "resource_id": resource_id,
-            "state": "RESERVED",
-            "created_at": timestamp,
+            "key": key, "amount": normalized, "resource_id": resource_id,
+            "state": "RESERVED", "created_at_logical": self._tick_logical(),
         }
         self._key_index[key] = reservation_id
-        res["reserved"] += float(amount)
-
-        return ("RESERVED", reservation_id, amount)
+        res["reserved"] = _decimal_add(res["reserved"], normalized)
+        return ("RESERVED", reservation_id, normalized)
 
     @replicated
     def commit(self, reservation_id):
-        """Commit a reservation: transfer from reserved to committed.
-
-        Returns: status string
-        - COMMITTED: successfully committed
-        - NOT_FOUND: reservation doesn't exist
-        - ALREADY_COMMITTED: already committed
-        - ERROR: invalid state
-        """
         if reservation_id not in self._reservations:
             return "NOT_FOUND"
-
         rec = self._reservations[reservation_id]
+        amount = self._normalize_reservation_amount(rec)
+        if amount is None:
+            return "CORRUPT_RESERVATION_STATE"
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
         if rec["state"] != "RESERVED":
-            return "ERROR"
-
+            return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
         if res is None:
             return "ERROR"
-
-        # Transfer from reserved to committed
-        res["reserved"] -= float(rec["amount"])
-        res["committed"] += float(rec["amount"])
+        if not self._normalize_resource_values(res):
+            return "CORRUPT_RESOURCE_STATE"
+        if res["reserved"] < amount:
+            return "INCONSISTENT_RESERVED_AMOUNT"
+        res["reserved"] = _decimal_subtract(res["reserved"], amount)
+        res["committed"] = _decimal_add(res["committed"], amount)
         rec["state"] = "COMMITTED"
-        rec["committed_at"] = time.time()
-
+        rec["committed_at_logical"] = self._tick_logical()
         return "COMMITTED"
 
     @replicated
     def release(self, reservation_id):
-        """Release a non-committed reservation.
-
-        Returns: status string
-        """
         if reservation_id not in self._reservations:
             return "NOT_FOUND"
-
         rec = self._reservations[reservation_id]
+        amount = self._normalize_reservation_amount(rec)
+        if amount is None:
+            return "CORRUPT_RESERVATION_STATE"
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
         if rec["state"] not in ("RESERVED", "UNKNOWN"):
-            return "ERROR"
-
+            return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
         if res is None:
             return "ERROR"
-
-        res["reserved"] -= float(rec["amount"])
+        if not self._normalize_resource_values(res):
+            return "CORRUPT_RESOURCE_STATE"
+        if rec["state"] in ("RESERVED", "UNKNOWN"):
+            if res["reserved"] < amount:
+                return "INCONSISTENT_RESERVED_AMOUNT"
+            res["reserved"] = _decimal_subtract(res["reserved"], amount)
         rec["state"] = "RELEASED"
-        rec["released_at"] = time.time()
-
+        rec["released_at_logical"] = self._tick_logical()
         return "RELEASED"
 
     @replicated
     def reconcile_commit(self, reservation_id):
-        """Reconcile by committing (provider confirmed effect)."""
         if reservation_id not in self._reservations:
             return "NOT_FOUND"
-
         rec = self._reservations[reservation_id]
+        amount = self._normalize_reservation_amount(rec)
+        if amount is None:
+            return "CORRUPT_RESERVATION_STATE"
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
-
+        if rec["state"] != "RESERVED":
+            if rec["state"] == "RELEASED":
+                self._record_incident("LATE_EFFECT_AFTER_RELEASE", reservation_id, "RELEASED")
+                return "RECONCILE_CONFLICT"
+            return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
         if res is None:
             return "ERROR"
-
-        if rec["state"] == "RESERVED":
-            res["reserved"] -= float(rec["amount"])
+        if not self._normalize_resource_values(res):
+            return "CORRUPT_RESOURCE_STATE"
+        if res["reserved"] < amount:
+            self._record_incident("RESERVED_AMOUNT_MISSING", reservation_id, rec["state"])
+            return "INCONSISTENT_RESERVED_AMOUNT"
+        res["reserved"] = _decimal_subtract(res["reserved"], amount)
+        res["committed"] = _decimal_add(res["committed"], amount)
         rec["state"] = "COMMITTED"
-        rec["committed_at"] = time.time()
-        res["committed"] += float(rec["amount"])
-
+        rec["committed_at_logical"] = self._tick_logical()
         return "COMMITTED"
 
     @replicated
     def reconcile_release(self, reservation_id):
-        """Reconcile by releasing (provider confirmed no effect)."""
         if reservation_id not in self._reservations:
             return "NOT_FOUND"
-
         rec = self._reservations[reservation_id]
+        amount = self._normalize_reservation_amount(rec)
+        if amount is None:
+            return "CORRUPT_RESERVATION_STATE"
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
         if rec["state"] == "RELEASED":
             return "RELEASED"
-
+        if rec["state"] not in ("RESERVED", "UNKNOWN"):
+            return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
         if res is None:
             return "ERROR"
-
-        if rec["state"] == "RESERVED":
-            res["reserved"] -= float(rec["amount"])
+        if not self._normalize_resource_values(res):
+            return "CORRUPT_RESOURCE_STATE"
+        if rec["state"] in ("RESERVED", "UNKNOWN"):
+            if res["reserved"] < amount:
+                return "INCONSISTENT_RESERVED_AMOUNT"
+            res["reserved"] = _decimal_subtract(res["reserved"], amount)
         rec["state"] = "RELEASED"
-        rec["released_at"] = time.time()
-
+        rec["released_at_logical"] = self._tick_logical()
         return "RELEASED"
 
     # --- Read-only methods (local, not replicated) ---
@@ -246,19 +322,35 @@ class _RaftStateMachine(SyncObj):
             {
                 "reservation_id": rid,
                 "key": rec["key"],
-                "amount": rec["amount"],
+                "amount": _validated_amount(rec["amount"], allow_zero=True),
                 "state": rec["state"],
             }
             for rid, rec in self._reservations.items()
             if rec.get("resource_id") == resource_id
         ]
 
+        # Expose exact decimal values; float conversion loses precision for
+        # large capacities (e.g. 1e18 with a 0.1 reservation).
+        try:
+            capacity = Decimal(str(res["capacity"]))
+            reserved = Decimal(str(res["reserved"]))
+            committed = Decimal(str(res["committed"]))
+            if not all(v.is_finite() and v >= 0 for v in (capacity, reserved, committed)):
+                raise InvalidOperation
+            if _decimal_add(reserved, committed) > capacity:
+                raise InvalidOperation
+            normalized_reservations = [
+                {**record, "amount": Decimal(str(record["amount"]))}
+                for record in reservations
+            ]
+        except (InvalidOperation, ValueError, TypeError, KeyError) as exc:
+            raise RuntimeError("Corrupt persisted Raft accounting state") from exc
         return {
-            "available": int(res["capacity"] - res["reserved"] - res["committed"]),
-            "reserved": int(res["reserved"]),
-            "committed": int(res["committed"]),
-            "capacity": int(res["capacity"]),
-            "reservations": reservations,
+            "available": _decimal_subtract(_decimal_subtract(capacity, reserved), committed),
+            "reserved": reserved,
+            "committed": committed,
+            "capacity": capacity,
+            "reservations": normalized_reservations,
         }
 
     def find_by_key(self, key):
@@ -354,8 +446,11 @@ class RaftConsensusBackend:
         return self._raft.getStatus()
 
     def register_resource(self, resource_id, capacity):
-        """Register a resource with the backend (replicated)."""
-        self._raft.register_resource(resource_id, capacity, sync=True, timeout=5.0)
+        """Register without overwriting existing accounting state."""
+        normalized = _validated_amount(capacity, allow_zero=True)
+        if normalized is None:
+            return "INVALID_CAPACITY"
+        return self._raft.register_resource(resource_id, normalized, sync=True, timeout=5.0)
 
     def reserve(self, key, amount, resource_id) -> ReservationResult:
         """Reserve budget for an idempotency key (replicated via Raft).
@@ -367,11 +462,13 @@ class RaftConsensusBackend:
 
         I8 is enforced on the leader before the command is committed.
         """
+        normalized = _validated_amount(amount)
+        if normalized is None:
+            return ReservationResult(status="INVALID_AMOUNT")
         reservation_id = str(uuid.uuid4())
-        timestamp = time.time()
         try:
             result = self._raft.reserve(
-                key, amount, resource_id, reservation_id, timestamp,
+                key, normalized, resource_id, reservation_id,
                 sync=True, timeout=10.0
             )
             status, rid, amt = result
@@ -434,13 +531,10 @@ class RaftConsensusBackend:
             if rid is None or rec is None:
                 return ReconciliationResult(status="NOT_FOUND")
 
-            if rec["state"] in ("COMMITTED", "RELEASED"):
-                # Already resolved
-                if rec["state"] == "COMMITTED":
-                    return ReconciliationResult(status="CONFIRMED", effect_observed=True)
-                else:
-                    return ReconciliationResult(status="FAILED", effect_observed=False)
-
+            if rec["state"] == "COMMITTED":
+                return ReconciliationResult(status="CONFIRMED", effect_observed=True)
+            if rec["state"] == "RELEASED" and self._provider_reconcile is None:
+                return ReconciliationResult(status="FAILED", effect_observed=False)
             if self._provider_reconcile is None:
                 return ReconciliationResult(status="UNRESOLVED", effect_observed=None)
 
@@ -454,8 +548,9 @@ class RaftConsensusBackend:
                     status = self._raft.reconcile_commit(rid, sync=True, timeout=10.0)
                     if status in ("COMMITTED", "ALREADY_COMMITTED"):
                         return ReconciliationResult(status="CONFIRMED", effect_observed=True)
-                    else:
-                        return ReconciliationResult(status="ERROR", effect_observed=True)
+                    if status == "RECONCILE_CONFLICT":
+                        return ReconciliationResult(status="RECONCILE_CONFLICT", effect_observed=True)
+                    return ReconciliationResult(status="ERROR", effect_observed=True)
                 except Exception:
                     return ReconciliationResult(status="ERROR", effect_observed=True)
 

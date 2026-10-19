@@ -9,18 +9,21 @@ Covers:
 
 These tests require pysyncobj (pip install pysyncobj).
 """
+import ast
+import inspect
 import os
 import sys
 import time
 import tempfile
 import threading
+from decimal import Decimal
 
 import pytest
 
 # Skip all tests if pysyncobj is not installed
 pysyncobj = pytest.importorskip("pysyncobj")
 
-from tenir_governance.operations.raft_backend import RaftConsensusBackend
+from tenir_governance.operations.raft_backend import RaftConsensusBackend, _RaftStateMachine
 from tenir_governance.operations.consensus_backend import ConsensusState
 
 
@@ -49,6 +52,29 @@ def _get_leader(nodes):
         if node.is_leader():
             return node
     return None
+
+
+def _wait_for_leader(nodes, exclude=None, timeout=10.0, interval=0.1):
+    """Wait for leader election with a bounded timeout instead of a fixed sleep."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for node in nodes:
+            if node is exclude:
+                continue
+            if node.is_leader():
+                return node
+        time.sleep(interval)
+    return None
+
+
+def _wait_until(predicate, timeout=5.0, interval=0.05):
+    """Poll an eventual-consistency condition with a bounded timeout."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return bool(predicate())
 
 
 def _teardown(nodes):
@@ -102,6 +128,42 @@ class TestMultiNodeReserveCommitRelease:
         for i, node in enumerate(cluster):
             state = node.get_state("budget-A")
             assert state.reserved == 30, f"Node {i} has reserved={state.reserved}, expected 30"
+
+    def test_high_precision_decimal_capacity_is_preserved(self, cluster):
+        """Raft must not round budget counters at Decimal's default precision."""
+        leader = _get_leader(cluster)
+        assert leader is not None
+        amount = Decimal("1.234567890123456789012345678901234567")
+        assert leader.register_resource("precision-budget", amount) == "REGISTERED"
+        time.sleep(0.3)
+
+        result = leader.reserve("precision-key", amount, "precision-budget")
+        assert result.status == "RESERVED"
+        time.sleep(0.3)
+
+        for index, node in enumerate(cluster):
+            state = node.get_state("precision-budget")
+            assert state.capacity == amount, f"Node {index} rounded replicated capacity"
+            assert state.reserved == amount, f"Node {index} rounded replicated reservation"
+            assert state.available == Decimal("0"), f"Node {index} reported nonzero available budget"
+        over = leader.reserve(
+            "precision-overrun", Decimal("0.000000000000000000000000000000000001"),
+            "precision-budget",
+        )
+        assert over.status == "INSUFFICIENT_BUDGET"
+
+    def test_get_state_fails_closed_on_overcommitted_restored_state(self, cluster):
+        """A corrupt persisted total must not expose negative available budget."""
+        leader = _get_leader(cluster)
+        assert leader is not None
+        leader._raft._resources["corrupt-budget"] = {
+            "capacity": Decimal("1.0"),
+            "reserved": Decimal("0.8"),
+            "committed": Decimal("0.3"),
+        }
+
+        with pytest.raises(RuntimeError, match="Corrupt persisted Raft accounting state"):
+            leader.get_state("corrupt-budget")
 
     def test_commit_from_leader(self, cluster):
         """Commit from the leader and verify state transitions on all nodes."""
@@ -435,20 +497,11 @@ class TestLeaderFailover:
         leader.register_resource("budget-FO", 100)
         time.sleep(0.5)
 
-        # Crash the leader
+        # Crash the leader and poll for a bounded replacement election.
         leader.destroy()
-        time.sleep(2.0)  # Wait for election
+        new_leader = _wait_for_leader(cluster, exclude=leader, timeout=10.0)
 
-        # Find new leader among remaining nodes
-        new_leader = None
-        for node in cluster:
-            if node is leader:
-                continue
-            if node.is_leader():
-                new_leader = node
-                break
-
-        assert new_leader is not None, "No new leader elected after crash"
+        assert new_leader is not None, "No new leader elected within 10 seconds after crash"
 
         # Operations should work with new leader
         res = new_leader.reserve("key-1", 30, "budget-FO")
@@ -470,20 +523,11 @@ class TestLeaderFailover:
         assert leader.commit(res.reservation_id).status == "COMMITTED"
         time.sleep(0.5)
 
-        # Crash the leader
+        # Crash the leader and poll for a bounded replacement election.
         leader.destroy()
-        time.sleep(3.0)
+        new_leader = _wait_for_leader(cluster5, exclude=leader, timeout=10.0)
 
-        # Find new leader
-        new_leader = None
-        for node in cluster5:
-            if node is leader:
-                continue
-            if node.is_leader():
-                new_leader = node
-                break
-
-        assert new_leader is not None, "No new leader in 5-node cluster after crash"
+        assert new_leader is not None, "No new leader in 5-node cluster within 10 seconds"
 
         # I8 must still hold
         state = new_leader.get_state("budget-FO5")
@@ -511,20 +555,11 @@ class TestLeaderFailover:
         assert leader.commit(res.reservation_id).status == "COMMITTED"
         time.sleep(0.5)
 
-        # Crash leader
+        # Crash leader and wait for a bounded, observable election.
         leader.destroy()
-        time.sleep(2.0)
+        new_leader = _wait_for_leader(cluster, exclude=leader, timeout=10.0)
 
-        # Find new leader
-        new_leader = None
-        for node in cluster:
-            if node is leader:
-                continue
-            if node.is_leader():
-                new_leader = node
-                break
-
-        assert new_leader is not None
+        assert new_leader is not None, "no replacement leader elected within 10 seconds"
 
         # State should be preserved
         state = new_leader.get_state("budget-PRES")
@@ -750,8 +785,8 @@ class TestLinearizability:
         inv = Invocation(op="get_state", args=("budget-LIN",), client_id=0, event_id=eid)
         state = leader.get_state("budget-LIN")
         eid += 1
-        resp = Response(result={"reserved": state.reserved, "consumed": state.committed,
-                                 "capacity": state.capacity},
+        resp = Response(result={"available": state.available, "reserved": state.reserved,
+                                 "consumed": state.committed, "capacity": state.capacity},
                         client_id=0, event_id=eid)
         ops.append(Operation(invocation=inv, response=resp))
 
@@ -761,50 +796,71 @@ class TestLinearizability:
         assert result.linearizable, f"Sequential history should be linearizable: {result.reason}"
 
     def test_concurrent_history_linearizability(self, cluster):
-        """Concurrent operations from multiple nodes produce a linearizable history."""
+        """Check the actual concurrent history, not just the final budget."""
+        from tenir_governance.operations.linearizability_checker import (
+            LinearizabilityChecker, consensus_sequential_spec,
+            Operation, Invocation, Response,
+        )
+
         leader = _get_leader(cluster)
-        leader.register_resource("budget-LIN2", 100)
+        assert leader is not None
+        assert leader.register_resource("budget-LIN2", 100) == "REGISTERED"
         time.sleep(0.5)
 
         history = []
         history_lock = threading.Lock()
+        event_lock = threading.Lock()
+        event_id = 0
+
+        def next_event_id():
+            nonlocal event_id
+            with event_lock:
+                event_id += 1
+                return event_id
 
         def do_reserve(node, key, amount):
-            res = node.reserve(key, amount, "budget-LIN2")
+            client_id = threading.get_ident()
+            invocation_id = next_event_id()
+            result = node.reserve(key, amount, "budget-LIN2")
+            response_id = next_event_id()
+            operation = Operation(
+                invocation=Invocation(
+                    op="reserve", args=(key, amount, "budget-LIN2"),
+                    client_id=client_id, event_id=invocation_id,
+                ),
+                response=Response(
+                    result={"status": result.status, "reservation_id": result.reservation_id},
+                    client_id=client_id, event_id=response_id,
+                ),
+            )
             with history_lock:
-                history.append({
-                    "type": "reserve",
-                    "key": key,
-                    "amount": amount,
-                    "result": res.status,
-                    "reservation_id": res.reservation_id,
-                })
+                history.append(operation)
 
         threads = []
         for i in range(5):
             node = cluster[i % 3]
-            t = threading.Thread(target=do_reserve, args=(node, f"lin-{i}", 15))
-            threads.append(t)
-            t.start()
+            thread = threading.Thread(target=do_reserve, args=(node, f"lin-{i}", 15))
+            threads.append(thread)
+            thread.start()
 
-        for t in threads:
-            t.join(timeout=10.0)
+        for thread in threads:
+            thread.join(timeout=10.0)
 
-        time.sleep(0.5)
-
-        # All operations should have completed
+        assert all(not thread.is_alive() for thread in threads), "reserve worker timed out"
         assert len(history) == 5
 
-        # Count successful reservations
-        successful = [h for h in history if h["result"] == "RESERVED"]
-        # 5 * 15 = 75 <= 100, so all should succeed
+        checker = LinearizabilityChecker(consensus_sequential_spec)
+        result = checker.check(history)
+        assert result.linearizable, f"Concurrent Raft history is not linearizable: {result.reason}"
+
+        successful = [op for op in history if op.response.result["status"] == "RESERVED"]
         assert len(successful) == 5, (
             f"Expected 5 successful reserves, got {len(successful)}: "
-            f"{[h['result'] for h in history]}"
+            f"{[op.response.result['status'] for op in history]}"
         )
 
-        # I8 must hold
         state = leader.get_state("budget-LIN2")
+        assert state.reserved == 75
         assert state.reserved + state.committed <= state.capacity
 
     def test_mixed_ops_linearizability(self, cluster):
@@ -899,20 +955,25 @@ class TestLinearizability:
         assert leader.commit(r1.reservation_id).status == "COMMITTED"
         time.sleep(0.3)
 
-        # Crash leader
+        # Crash leader and wait for a bounded election window. A fixed
+        # 2-second sleep is shorter than a reliable failover guarantee on
+        # loaded CI runners and can sample the cluster during election.
         leader.destroy()
-        time.sleep(2.0)
+        new_leader = _wait_for_leader(cluster, exclude=leader, timeout=10.0)
 
-        # Find new leader
-        new_leader = None
-        for node in cluster:
-            if node is leader:
-                continue
-            if node.is_leader():
-                new_leader = node
-                break
-
-        assert new_leader is not None
+        if new_leader is None:
+            statuses = [
+                {
+                    "addr": getattr(node, "_self_addr", "<unknown>"),
+                    "status": node.get_status(),
+                }
+                for node in cluster
+                if node is not leader
+            ]
+            pytest.fail(
+                "No replacement Raft leader elected within 10 seconds; "
+                f"remaining node statuses: {statuses!r}"
+            )
 
         # Operations after failover
         r2 = new_leader.reserve("key-2", 30, "budget-LIN4")
@@ -982,3 +1043,237 @@ class TestLinearizability:
         assert state.committed == 30
         assert state.reserved == 20
         assert state.reserved + state.committed <= state.capacity
+
+# ---------------------------------------------------------------------------
+# List-1 regressions: I8, deterministic state, validation and idempotency
+# ---------------------------------------------------------------------------
+
+class TestListOneRegressions:
+    def test_reconcile_commit_after_release_cannot_overconsume_budget(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader is not None
+        assert leader.register_resource("budget-I8-L1", 100) == "REGISTERED"
+
+        a = leader.reserve("late-effect-A", 100, "budget-I8-L1")
+        assert a.status == "RESERVED"
+        assert leader.release(a.reservation_id).status == "RELEASED"
+        b = leader.reserve("active-B", 100, "budget-I8-L1")
+        assert b.status == "RESERVED"
+
+        leader._provider_reconcile = lambda key: True
+        result = leader.reconcile("late-effect-A")
+        assert result.status == "RECONCILE_CONFLICT"
+        assert result.effect_observed is True
+        assert _wait_until(lambda: all(
+            node.get_state("budget-I8-L1").reserved == 100
+            and node.get_state("budget-I8-L1").committed == 0
+            for node in cluster
+        )), "followers did not converge to the expected budget state"
+        for node in cluster:
+            state = node.get_state("budget-I8-L1")
+            assert state.reserved == 100
+            assert state.committed == 0
+            assert state.reserved + state.committed <= state.capacity
+            by_id = {r["reservation_id"]: r for r in state.reservations}
+            assert by_id[a.reservation_id]["state"] == "RELEASED"
+            assert by_id[b.reservation_id]["state"] == "RESERVED"
+
+    def test_idempotent_reserve_returns_actual_terminal_state(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-IDEM-L1", 100) == "REGISTERED"
+        first = leader.reserve("same-key", 25, "budget-IDEM-L1")
+        assert first.status == "RESERVED"
+        assert leader.commit(first.reservation_id).status == "COMMITTED"
+
+        replay = leader.reserve("same-key", 25, "budget-IDEM-L1")
+        assert replay.status == "COMMITTED"
+        assert replay.reservation_id == first.reservation_id
+        state = leader.get_state("budget-IDEM-L1")
+        assert state.reserved == 0
+        assert state.committed == 25
+        assert state.reserved + state.committed <= state.capacity
+
+    @pytest.mark.parametrize("amount", [0, -1, -0.01, float("nan"), float("inf"), float("-inf"), "abc", None, True, False, "1e10000"])
+    def test_invalid_amount_rejected_without_mutation(self, cluster, amount):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-AMOUNT-L1", 100) == "REGISTERED"
+        result = leader.reserve("invalid-amount", amount, "budget-AMOUNT-L1")
+        assert result.status == "INVALID_AMOUNT"
+        state = leader.get_state("budget-AMOUNT-L1")
+        assert state.reserved == 0
+        assert state.committed == 0
+
+    def test_resource_reregistration_preserves_accounting_and_capacity(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-REG-L1", 100) == "REGISTERED"
+        reservation = leader.reserve("held", 40, "budget-REG-L1")
+        assert reservation.status == "RESERVED"
+        assert leader.register_resource("budget-REG-L1", 100) == "ALREADY_REGISTERED"
+        assert leader.register_resource("budget-REG-L1", 50) == "RESOURCE_CONFLICT"
+        state = leader.get_state("budget-REG-L1")
+        assert state.capacity == 100
+        assert state.reserved == 40
+        assert state.committed == 0
+
+    def test_replicated_methods_do_not_use_local_clock_or_randomness(self):
+        source = inspect.getsource(_RaftStateMachine)
+        tree = ast.parse(source)
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_RaftStateMachine")
+        # Inspect both qualified names and their leaf names so common aliases
+        # (e.g. imported monotonic or uuid4) cannot evade this static guard.
+        forbidden_qualified = {
+            "time.time", "time.monotonic", "time.perf_counter", "datetime.now",
+            "datetime.utcnow", "uuid.uuid4", "random.random", "random.randint",
+            "random.choice", "os.urandom", "secrets.token_bytes",
+        }
+        forbidden_leaf = {
+            "time", "monotonic", "perf_counter", "now", "utcnow", "uuid4",
+            "random", "randint", "choice", "urandom", "token_bytes",
+        }
+        for method in cls.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not any(isinstance(dec, ast.Name) and dec.id == "replicated" for dec in method.decorator_list):
+                continue
+            calls = set()
+            for node in ast.walk(method):
+                if isinstance(node, ast.Call):
+                    fn = ast.unparse(node.func)
+                    leaf = node.func.attr if isinstance(node.func, ast.Attribute) else (
+                        node.func.id if isinstance(node.func, ast.Name) else ""
+                    )
+                    if fn in forbidden_qualified or leaf in forbidden_leaf:
+                        calls.add(fn)
+            assert not calls, f"non-deterministic calls in replicated {method.name}: {sorted(calls)}"
+    def test_fractional_amounts_are_preserved_in_budget_state(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-DECIMAL-L1", "0.30") == "REGISTERED"
+        first = leader.reserve("fraction-a", "0.1", "budget-DECIMAL-L1")
+        assert first.status == "RESERVED"
+        state = leader.get_state("budget-DECIMAL-L1")
+        assert state.reserved == Decimal("0.1")
+        assert state.available == Decimal("0.2")
+        second = leader.reserve("fraction-b", "0.2", "budget-DECIMAL-L1")
+        assert second.status == "RESERVED"
+        state = leader.get_state("budget-DECIMAL-L1")
+        assert state.reserved == Decimal("0.3")
+        assert state.committed == Decimal("0")
+        assert state.reserved + state.committed <= state.capacity
+    def test_logical_clock_and_transition_metadata_replicate_identically(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-CLOCK-L1", 100) == "REGISTERED"
+        reservation = leader.reserve("clock-key", 20, "budget-CLOCK-L1")
+        assert reservation.status == "RESERVED"
+        assert leader.commit(reservation.reservation_id).status == "COMMITTED"
+        assert _wait_until(lambda: all(
+            node._raft._logical_clock == cluster[0]._raft._logical_clock
+            and reservation.reservation_id in node._raft._reservations
+            for node in cluster
+        )), "replicated clock/reservation metadata did not converge"
+        states = [node._raft for node in cluster]
+        clocks = [sm._logical_clock for sm in states]
+        assert len(set(clocks)) == 1
+        records = [sm._reservations[reservation.reservation_id] for sm in states]
+        assert len({r["created_at_logical"] for r in records}) == 1
+        assert len({r["committed_at_logical"] for r in records}) == 1
+        assert all(r["committed_at_logical"] > r["created_at_logical"] for r in records)
+
+
+    def test_legacy_float_state_is_normalized_before_decimal_reserve(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-LEGACY-L1", 100) == "REGISTERED"
+        # Simulate every replica restoring state serialized by the pre-Decimal implementation.
+        for node in cluster:
+            node._raft._resources["budget-LEGACY-L1"] = {
+                "capacity": 100.0, "reserved": 0.1, "committed": 0.2,
+            }
+        result = leader.reserve("after-upgrade", "0.3", "budget-LEGACY-L1")
+        assert result.status == "RESERVED"
+        state = leader.get_state("budget-LEGACY-L1")
+        assert state.capacity == Decimal("100.0")
+        assert state.reserved == Decimal("0.4")
+        assert state.committed == Decimal("0.2")
+
+    @pytest.mark.parametrize("operation", ["release", "reconcile_release"])
+    def test_unknown_reservation_release_updates_budget_accounting(self, cluster, operation):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-UNKNOWN-RELEASE", 100) == "REGISTERED"
+        result = leader.reserve("unknown-release-key", 10, "budget-UNKNOWN-RELEASE")
+        assert result.status == "RESERVED"
+        reservation_id = result.reservation_id
+        assert _wait_until(lambda: all(
+            reservation_id in node._raft._reservations for node in cluster
+        )), "reservation did not converge to every replica"
+
+        # Model recovery restoring an unresolved operation whose budget remains reserved.
+        for node in cluster:
+            node._raft._reservations[reservation_id]["state"] = "UNKNOWN"
+
+        raw_result = getattr(leader._raft, operation)(
+            reservation_id, sync=True, timeout=10.0,
+        )
+        assert raw_result == "RELEASED"
+        state = leader.get_state("budget-UNKNOWN-RELEASE")
+        assert state.reserved == Decimal("0")
+        assert state.committed == Decimal("0")
+
+    @pytest.mark.parametrize(
+        ("operation", "expected_status", "expected_reserved", "expected_committed"),
+        [
+            ("commit", "COMMITTED", Decimal("0.0"), Decimal("0.1")),
+            ("release", "RELEASED", Decimal("0.0"), Decimal("0.0")),
+            ("reconcile_commit", "COMMITTED", Decimal("0.0"), Decimal("0.1")),
+            ("reconcile_release", "RELEASED", Decimal("0.0"), Decimal("0.0")),
+        ],
+    )
+    def test_legacy_float_reservation_transitions_after_upgrade(
+        self, cluster, operation, expected_status, expected_reserved, expected_committed
+    ):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-LEGACY-COMMIT", 100) == "REGISTERED"
+        # Simulate a pre-Decimal journal restored consistently on all replicas.
+        for node in cluster:
+            node._raft._resources["budget-LEGACY-COMMIT"] = {
+                "capacity": 100.0, "reserved": 0.1, "committed": 0.0,
+            }
+            node._raft._reservations["legacy-reservation"] = {
+                "key": "legacy-key", "amount": 0.1,
+                "resource_id": "budget-LEGACY-COMMIT", "state": "RESERVED",
+            }
+            node._raft._key_index["legacy-key"] = "legacy-reservation"
+        raw_status = getattr(leader._raft, operation)(
+            "legacy-reservation", sync=True, timeout=10.0,
+        )
+        assert raw_status == expected_status
+        state = leader.get_state("budget-LEGACY-COMMIT")
+        assert state.reserved == expected_reserved
+        assert state.committed == expected_committed
+        assert state.reserved + state.committed <= state.capacity
+
+    def test_legacy_five_argument_reserve_command_remains_callable(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-LEGACY-CMD", 100) == "REGISTERED"
+        # Old replicated journals supplied a fifth wall-clock timestamp.
+        result = leader._raft.reserve(
+            "legacy-command-key", Decimal("10"), "budget-LEGACY-CMD",
+            "legacy-command-reservation", 1700000000.0, sync=True, timeout=10.0,
+        )
+        assert result[0] == "RESERVED"
+        assert result[1] == "legacy-command-reservation"
+
+    @pytest.mark.parametrize("amount", ["1e-129", "1e999999", "0e-999999"])
+    def test_pathological_decimal_exponents_are_rejected(self, cluster, amount):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-DECIMAL-BOUNDS", 10) == "REGISTERED"
+        result = leader.reserve("bounded-key-" + amount, amount, "budget-DECIMAL-BOUNDS")
+        assert result.status == "INVALID_AMOUNT"
+        assert leader.get_state("budget-DECIMAL-BOUNDS").reserved == Decimal("0")
+
+    def test_large_capacity_preserves_fractional_available_value(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-LARGE-DECIMAL", "1000000000000000000") == "REGISTERED"
+        reservation = leader.reserve("small-fraction", "0.1", "budget-LARGE-DECIMAL")
+        assert reservation.status == "RESERVED"
+        state = leader.get_state("budget-LARGE-DECIMAL")
+        assert state.available == Decimal("999999999999999999.9")
+        assert state.reserved == Decimal("0.1")

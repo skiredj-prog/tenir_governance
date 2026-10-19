@@ -1,5 +1,39 @@
 # Changelog
 
+## [5.6.1] — Pending release — Patch: Budget safety and deterministic Raft state
+
+### Corrected in this branch
+- Reject `reconcile_commit()` unless the reservation is `RESERVED`; repeated commits remain idempotent, while a late effect after `RELEASED` returns `RECONCILE_CONFLICT` and records a deterministic incident.
+- Replace replicated wall-clock timestamps with a replicated logical clock.
+- Validate finite, positive reservation amounts and non-negative finite capacities; preserve decimal arithmetic in the replicated budget and fractional values in read results.
+- Return the actual reservation state on idempotent replay.
+- Make resource registration non-destructive; reject implicit capacity changes.
+
+### Additional safety corrections under review
+- Preserve compatibility with five-argument legacy Raft reserve commands and normalize restored float accounting before Decimal arithmetic.
+- Preserve exact Decimal values in Raft state reads and fractional values in the shared consensus state contract.
+- Validate governor amounts before budget gating; bind dispatch resource and amount to the adjudicated durable record; block dispatch under QUARANTINE_LOCK and serialize quarantine transitions against dispatch/provider execution.
+- Add regression tests for legacy state/journal compatibility, large-capacity decimal precision, invalid amounts, dispatch identity mismatch, pre-reserved operations under quarantine, empty Stripe search, concurrent reconciliation, and linearizability-checker branch isolation.
+- Keep Stripe reconciliation UNKNOWN when search returns no result; an empty search is not proof of non-execution. Serialize reconciliation state transitions with budget release/refund to prevent duplicate refunds.
+- Prevent live resource replacement from orphaning reservations or swapping the resource lock; correct the sequential oracle so COMMITTED cannot follow RELEASED, bind concrete reservation IDs across replay/commit, and exercise the actual concurrent Raft history.
+- Normalize Decimal input before the single-host backend persists reservation JSON; add regressions for Decimal idempotency, HOLD identity preservation, and preventing a HOLD veto from releasing another operation’s reservation.
+- Replace fixed leader-failover sleeps with bounded polling across the three- and five-node tests; release reserved accounting when an UNKNOWN reservation is explicitly reconciled as non-executed.
+- Allow recovery reconciliation to start from DISPATCHING after a crash; normalize indeterminate outcomes to UNKNOWN and check terminal transition success before reporting reconciliation.
+
+### Test perimeter
+- Reproduction: `python -m pip install -e ".[test]" "pysyncobj==0.3.17" && pytest -q tests/test_raft_backend.py`
+- Included: local `pysyncobj` Raft integration tests, I8 regressions, invalid-amount cases, idempotent replay, resource re-registration, logical-clock replication and fractional-budget accounting.
+- Environment: test cluster nodes use `localhost` and separate ports; this is not a physical multi-host network test.
+- Excluded: Byzantine tolerance, hardened peer transport/authentication, third-party attestation, and proof of exactly-once external effects.
+- Raft regression suite result for the original implementation snapshot: **46 collected, 46 passed, 0 failed, 0 skipped** in 119.01 s on GitHub Actions `ubuntu-latest`, Python 3.11.17, pytest 8.4.2, `pysyncobj` 0.3.17. Tested implementation commit: `82037052556c5bfd731bd59fe958cf4df61d21b6`; CI run: [#39205580977](https://github.com/skiredj-prog/tenir_governance/actions/runs/39205580977). For current-branch validation, first install the dependencies shown in the reproduction command above, then run `pytest -q tests/test_raft_backend.py`.
+
+### Status
+- Release status: not released by this change; do not infer a PyPI publication from this changelog entry.
+- `admissible_structural` describes catalog coherence only and does not imply `effective_guarantee_demonstrated`.
+
+---
+
+
 All notable changes to TENIR-Gov are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).

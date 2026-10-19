@@ -17,7 +17,7 @@ Governance Branch:    tenir_governance/
 ├── copy_lint.py             — Sprint 9: public-safe lexicon enforcement
 └── ledger_migrate.py        — Sprint 11: legacy label migration
 
-Version: 5.4.4 (TENIR 2.0 runtime kernel)
+Version: 5.6.1 (TENIR 2.0 runtime kernel)
 Policy: tenir-canonical-v1.0.0
 Policy fingerprint: d083e0b82a16c04d0
 """
@@ -126,7 +126,7 @@ from .assessment import (
     AssessmentReport,
 )
 
-__version__ = "5.5.0"
+__version__ = "5.6.1"
 __policy_version__ = "tenir-canonical-v1.0.0"
 __profile_version__ = "agentic-governance-profile-v1.0.0"
 __schema_version__ = "1.2"

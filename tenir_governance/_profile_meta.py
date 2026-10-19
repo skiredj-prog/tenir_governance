@@ -27,7 +27,7 @@ class ProfileDisclosure:
     # Schema version these modules conform to
     schema_version: str = "1.2"
     # Platform version these modules ship with
-    platform_version: str = "5.3.0"
+    platform_version: str = "5.6.1"
     # Profile/module version (separate from platform version per §2.3)
     profile_version: str = "agentic-governance-profile-v1.0.0"
     # Compliance class per KB3

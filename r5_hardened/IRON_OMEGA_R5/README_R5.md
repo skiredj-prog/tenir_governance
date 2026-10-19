@@ -194,16 +194,27 @@ deterministically. No GPU, no Ollama, no network required.
 ## Distributed Multi-Node Deployment
 
 ```bash
+# Before starting any node, provision TENIR_API_TOKEN from your secret manager.
+# It must be at least 32 characters and the SAME shared peer credential on all
+# nodes; do not generate a different token per node or commit it to source control.
+# The examples assume the secret manager injects TENIR_API_TOKEN into each process.
+#
 # Node 1
-export PEER_NODES=http://node2:8000,http://node3:8000
+# PEER_NODES must point to HTTPS endpoints backed by valid certificates.
+# Peer validation traffic carries bearer credentials and therefore requires HTTPS
+# with certificate verification. Terminate TLS at a trusted proxy or configure
+# a TLS-enabled peer endpoint; the HTTP API examples above are local API examples,
+# not valid PEER_NODES values.
+
+export PEER_NODES=https://node2:8443,https://node3:8443
 uvicorn r5_server:app --host 0.0.0.0 --port 8000
 
 # Node 2
-export PEER_NODES=http://node1:8000,http://node3:8000
+export PEER_NODES=https://node1:8443,https://node3:8443
 uvicorn r5_server:app --host 0.0.0.0 --port 8000
 
 # Node 3
-export PEER_NODES=http://node1:8000,http://node2:8000
+export PEER_NODES=https://node1:8443,https://node2:8443
 uvicorn r5_server:app --host 0.0.0.0 --port 8000
 ```
 

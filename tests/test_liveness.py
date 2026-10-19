@@ -24,6 +24,7 @@ import threading
 import time
 
 import pytest
+from decimal import Decimal, localcontext
 
 from tenir_governance.operations.consensus_backend import (
     SingleHostLockBackend,
@@ -39,6 +40,288 @@ class TestLivenessTermination:
     """Verify that operations terminate within T_max under quorum."""
 
     T_MAX = 5.0  # 5 seconds — generous for single-host file-lock
+
+    def test_decimal_reservation_is_json_safe_and_idempotent(self, tmp_path):
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("decimal-budget", 1)
+        first = backend.reserve("decimal-key", Decimal("0.1"), "decimal-budget")
+        assert first.status == "RESERVED"
+        replay = backend.reserve("decimal-key", Decimal("0.1"), "decimal-budget")
+        assert replay.status == "RESERVED"
+        assert replay.reservation_id == first.reservation_id
+        state = backend.get_state("decimal-budget")
+        assert state.reserved == Decimal("0.1")
+        assert state.available == Decimal("0.9")
+
+    def test_decimal_budget_accepts_exact_capacity_without_float_drift(self, tmp_path):
+        """Decimal reservations may consume an exact decimal capacity fully."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("exact-decimal-budget", Decimal("0.3"))
+
+        first = backend.reserve("exact-decimal-key-1", Decimal("0.1"), "exact-decimal-budget")
+        second = backend.reserve("exact-decimal-key-2", Decimal("0.2"), "exact-decimal-budget")
+        over = backend.reserve("exact-decimal-key-3", Decimal("0.0000001"), "exact-decimal-budget")
+
+        assert first.status == "RESERVED"
+        assert second.status == "RESERVED"
+        assert over.status == "INSUFFICIENT_BUDGET"
+        state = backend.get_state("exact-decimal-budget")
+        assert state.reserved == Decimal("0.3")
+        assert state.available == Decimal("0.0")
+        assert state.reserved + state.committed <= state.capacity
+
+    def test_high_precision_decimal_reservation_survives_restart(self, tmp_path):
+        amount = Decimal("0.123456789012345678901")
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("precision-budget", amount)
+        first = backend.reserve("precision-key", amount, "precision-budget")
+        assert first.status == "RESERVED"
+
+        # The durable reservation record must preserve the decimal spelling,
+        # not round it through a JSON float.
+        import json
+        record = json.loads((tmp_path / "reservations.json").read_text())
+        persisted = next(iter(record.values()))
+        assert persisted["amount"] == str(amount)
+
+        reopened = SingleHostLockBackend(str(tmp_path))
+        replay = reopened.reserve("precision-key", amount, "precision-budget")
+        assert replay.status == "RESERVED"
+        assert replay.reservation_id == first.reservation_id
+        assert reopened.commit(first.reservation_id).status == "COMMITTED"
+        assert reopened.reserve(
+            "precision-overrun", Decimal("0.000000000000000000001"), "precision-budget"
+        ).status == "INSUFFICIENT_BUDGET"
+
+    def test_decimal_accounting_exceeds_default_context_precision(self, tmp_path):
+        """I8 accounting must not round exact values at Decimal's default precision."""
+        amount = Decimal("1.234567890123456789012345678901234567")
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("long-decimal-budget", amount)
+        result = backend.reserve("long-decimal-key", amount, "long-decimal-budget")
+        assert result.status == "RESERVED"
+
+        # Reopening validates the durable I8 invariant using the exact counters.
+        reopened = SingleHostLockBackend(str(tmp_path))
+        exact = reopened._coordinator.get_state_exact("long-decimal-budget")
+        assert exact["reserved"] == amount
+        assert exact["capacity"] == amount
+        assert exact["available"] == Decimal("0")
+        assert reopened.reserve(
+            "long-decimal-overrun", Decimal("0.000000000000000000000000000000000001"),
+            "long-decimal-budget",
+        ).status == "INSUFFICIENT_BUDGET"
+
+    def test_corrupted_budget_store_fails_closed(self, tmp_path):
+        (tmp_path / "budget.json").write_text("{not-json")
+        with pytest.raises(RuntimeError, match="Corrupted durable budget store"):
+            SingleHostLockBackend(str(tmp_path))
+
+    def test_corrupted_reservation_registry_fails_closed(self, tmp_path):
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("corrupt-registry-budget", 1)
+        budget_path = tmp_path / "budget.json"
+        budget_before = budget_path.read_bytes()
+        (tmp_path / "reservations.json").write_text("{not-json")
+
+        with pytest.raises(RuntimeError, match="Corrupted durable reservation registry"):
+            backend.reserve("must-not-duplicate", 0.1, "corrupt-registry-budget")
+        # The budget file is untouched, and reads also fail closed while the
+        # registry cannot prove the operation state.
+        assert budget_path.read_bytes() == budget_before
+        with pytest.raises(RuntimeError, match="Corrupted durable reservation registry"):
+            backend.get_state("corrupt-registry-budget")
+
+    def test_resource_reregistration_preserves_accounting(self, tmp_path):
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("reregister-budget", 1)
+        first = backend.reserve("reregister-key", Decimal("0.4"), "reregister-budget")
+        assert first.status == "RESERVED"
+        assert backend.commit(first.reservation_id).status == "COMMITTED"
+
+        # Same-capacity registration is idempotent and must not reset counters.
+        backend.register_resource("reregister-budget", 1)
+        state = backend.get_state("reregister-budget")
+        assert state.reserved == 0
+        assert state.committed == Decimal("0.4")
+        assert state.available == Decimal("0.6")
+
+        with pytest.raises(ValueError, match="different capacity"):
+            backend.register_resource("reregister-budget", 2)
+
+    def test_resource_registration_rejects_invalid_capacity(self, tmp_path):
+        backend = SingleHostLockBackend(str(tmp_path))
+        for capacity in (-1, float("nan"), float("inf"), True):
+            with pytest.raises(ValueError, match="finite and non-negative"):
+                backend.register_resource("invalid-capacity", capacity)
+
+    def test_decimal_capacity_at_adjusted_boundary_remains_usable(self, tmp_path):
+        """A bounded 1E+128 capacity can still serve a small exact reservation."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        capacity = Decimal("1e128")
+        backend.register_resource("boundary-budget", capacity)
+
+        result = backend.reserve("boundary-key", Decimal("1"), "boundary-budget")
+        assert result.status == "RESERVED"
+
+        state = backend.get_state("boundary-budget")
+        assert state.capacity == capacity
+        assert state.reserved == Decimal("1")
+        # The default Decimal context (precision 28) rounds this expected
+        # value; compute the oracle at sufficient precision for 1E+128 - 1.
+        with localcontext() as context:
+            context.prec = 130
+            expected_available = capacity - Decimal("1")
+        assert state.available == expected_available
+
+
+    def test_zero_decimal_exponent_does_not_poison_internal_precision(self):
+        """A zero's scale is irrelevant to exact accounting arithmetic."""
+        from tenir_governance.operations.budget import _decimal_subtract
+
+        assert _decimal_subtract(Decimal("1e128"), Decimal("0e-129")) == Decimal("1e128")
+
+
+    @pytest.mark.parametrize("value", ["1e-129", "1e999999", "0e-999999", "1" + "2" * 128])
+    def test_budget_rejects_pathological_decimal_precision(self, tmp_path, value):
+        backend = SingleHostLockBackend(str(tmp_path))
+        with pytest.raises(ValueError, match="finite and non-negative"):
+            backend.register_resource("pathological-capacity", Decimal(value))
+
+
+    def test_replay_preserves_terminal_state_and_resource_identity(self, tmp_path):
+        """An idempotency key cannot revive a released or cross-resource reservation."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("identity-budget-a", 10)
+        backend.register_resource("identity-budget-b", 10)
+
+        first = backend.reserve("identity-key", 4, "identity-budget-a")
+        assert first.status == "RESERVED"
+        assert backend.release(first.reservation_id).status == "RELEASED"
+
+        replay = backend.reserve("identity-key", 4, "identity-budget-a")
+        assert replay.status == "RELEASED"
+        assert replay.reservation_id == first.reservation_id
+
+        cross_resource_replay = backend.reserve(
+            "identity-key", 4, "identity-budget-b"
+        )
+        assert cross_resource_replay.status == "DUPLICATE_KEY"
+        assert backend.get_state("identity-budget-a").reserved == 0
+        assert backend.get_state("identity-budget-b").reserved == 0
+
+    class SimulatedProcessCrash(BaseException):
+        """Bypass ordinary exception compensation to model abrupt process death."""
+
+    def test_crash_after_budget_reserve_is_recoverable(self, tmp_path, monkeypatch):
+        """A process crash after budget mutation must not orphan reserved capacity."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("crash-reserve-budget", Decimal("1"))
+
+        def crash_before_registry_durability(_reservations):
+            raise self.SimulatedProcessCrash("crash after budget write")
+
+        monkeypatch.setattr(backend, "_persist_reservations", crash_before_registry_durability)
+        with pytest.raises(self.SimulatedProcessCrash):
+            backend.reserve("crash-reserve-key", Decimal("0.1"), "crash-reserve-budget")
+
+        # The journal completes the operation when the budget mutation is
+        # durable, then restores the matching registry record on restart.
+        reopened = SingleHostLockBackend(str(tmp_path))
+        state = reopened.get_state("crash-reserve-budget")
+        registry = reopened._load_reservations()
+        assert state.reserved == Decimal("0.1")
+        assert state.available == Decimal("0.9")
+        assert len(registry) == 1
+        recovered_id, recovered_record = next(iter(registry.items()))
+        assert recovered_record["state"] == "RESERVED"
+        replay = reopened.reserve(
+            "crash-reserve-key", Decimal("0.1"), "crash-reserve-budget"
+        )
+        assert replay.status == "RESERVED"
+        assert replay.reservation_id == recovered_id
+
+    def test_crash_after_budget_commit_is_recoverable(self, tmp_path, monkeypatch):
+        """A crash between budget commit and registry write must reconcile on restart."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("crash-commit-budget", Decimal("1"))
+        reservation = backend.reserve(
+            "crash-commit-key", Decimal("0.1"), "crash-commit-budget"
+        )
+        assert reservation.status == "RESERVED"
+
+        def crash_after_budget_commit(_reservations):
+            raise self.SimulatedProcessCrash("crash after budget commit")
+
+        monkeypatch.setattr(backend, "_persist_reservations", crash_after_budget_commit)
+        with pytest.raises(self.SimulatedProcessCrash):
+            backend.commit(reservation.reservation_id)
+
+        reopened = SingleHostLockBackend(str(tmp_path))
+        state = reopened.get_state("crash-commit-budget")
+        registry = reopened._load_reservations()
+        assert registry[reservation.reservation_id]["state"] == "COMMITTED"
+        assert state.reserved == 0
+        assert Decimal(str(state.committed)) == Decimal("0.1")
+
+    def test_crash_after_budget_release_is_recoverable(self, tmp_path, monkeypatch):
+        """A crash between budget release and registry write must be idempotently recoverable."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("crash-release-budget", Decimal("1"))
+        reservation = backend.reserve(
+            "crash-release-key", Decimal("0.1"), "crash-release-budget"
+        )
+        assert reservation.status == "RESERVED"
+        other = backend.reserve(
+            "crash-release-other-key", Decimal("0.2"), "crash-release-budget"
+        )
+        assert other.status == "RESERVED"
+
+        def crash_after_budget_release(_reservations):
+            raise self.SimulatedProcessCrash("crash after budget release")
+
+        monkeypatch.setattr(backend, "_persist_reservations", crash_after_budget_release)
+        with pytest.raises(self.SimulatedProcessCrash):
+            backend.release(reservation.reservation_id)
+
+        reopened = SingleHostLockBackend(str(tmp_path))
+        state = reopened.get_state("crash-release-budget")
+        registry = reopened._load_reservations()
+        assert registry[reservation.reservation_id]["state"] == "RELEASED"
+        assert registry[other.reservation_id]["state"] == "RESERVED"
+        # Recovery must not apply the release twice or consume another
+        # reservation's aggregate budget on the same resource.
+        assert Decimal(str(state.reserved)) == Decimal("0.2")
+        assert state.committed == 0
+
+    def test_reserve_persistence_failure_compensates_budget(self, tmp_path, monkeypatch):
+        """A failed reservation-registry write must not leak reserved capacity."""
+        backend = SingleHostLockBackend(str(tmp_path))
+        backend.register_resource("persist-failure-budget", 1)
+
+        def fail_persist(_reservations):
+            raise OSError("simulated disk write failure")
+
+        monkeypatch.setattr(backend, "_persist_reservations", fail_persist)
+        failed = backend.reserve(
+            "persist-failure-key", Decimal("0.1"), "persist-failure-budget"
+        )
+        assert failed.status == "ERROR"
+
+        state = backend.get_state("persist-failure-budget")
+        assert state.reserved == 0
+        assert state.committed == 0
+        assert state.available == 1
+
+        # Once persistence recovers, the same key can reserve exactly once.
+        monkeypatch.undo()
+        retried = backend.reserve(
+            "persist-failure-key", Decimal("0.1"), "persist-failure-budget"
+        )
+        assert retried.status == "RESERVED"
+        state = backend.get_state("persist-failure-budget")
+        assert state.reserved == Decimal("0.1")
+        assert state.reserved + state.committed <= state.capacity
 
     def test_reserve_terminates_within_T_max(self, tmp_path):
         """reserve() must complete within T_max."""
@@ -159,6 +442,66 @@ class TestLivenessTermination:
 
 class TestReconciliationLiveness:
     """Verify that reconciliation terminates (C2.3)."""
+
+    def test_reconcile_commit_crash_recovers_budget_and_registry(self, tmp_path, monkeypatch):
+        class SimulatedCrash(BaseException):
+            pass
+
+        backend = SingleHostLockBackend(
+            str(tmp_path), provider_reconcile=lambda key: True
+        )
+        backend.register_resource("reconcile-commit-budget", Decimal("1"))
+        reservation = backend.reserve(
+            "reconcile-commit-key", Decimal("0.1"), "reconcile-commit-budget"
+        )
+        assert reservation.status == "RESERVED"
+
+        def crash_before_registry_write(_reservations):
+            raise SimulatedCrash("crash after reconciliation budget commit")
+
+        monkeypatch.setattr(backend, "_persist_reservations", crash_before_registry_write)
+        with pytest.raises(SimulatedCrash):
+            backend.reconcile("reconcile-commit-key")
+
+        reopened = SingleHostLockBackend(str(tmp_path))
+        state = reopened.get_state("reconcile-commit-budget")
+        record = reopened._load_reservations()[reservation.reservation_id]
+        assert record["state"] == "COMMITTED"
+        assert state.reserved == 0
+        assert Decimal(str(state.committed)) == Decimal("0.1")
+        assert not (tmp_path / "transaction.json").exists()
+
+    def test_reconcile_release_crash_recovers_without_double_release(self, tmp_path, monkeypatch):
+        class SimulatedCrash(BaseException):
+            pass
+
+        backend = SingleHostLockBackend(
+            str(tmp_path), provider_reconcile=lambda key: False
+        )
+        backend.register_resource("reconcile-release-budget", Decimal("1"))
+        reservation = backend.reserve(
+            "reconcile-release-key", Decimal("0.1"), "reconcile-release-budget"
+        )
+        other = backend.reserve(
+            "reconcile-release-other-key", Decimal("0.2"), "reconcile-release-budget"
+        )
+        assert reservation.status == other.status == "RESERVED"
+
+        def crash_before_registry_write(_reservations):
+            raise SimulatedCrash("crash after reconciliation budget release")
+
+        monkeypatch.setattr(backend, "_persist_reservations", crash_before_registry_write)
+        with pytest.raises(SimulatedCrash):
+            backend.reconcile("reconcile-release-key")
+
+        reopened = SingleHostLockBackend(str(tmp_path))
+        state = reopened.get_state("reconcile-release-budget")
+        registry = reopened._load_reservations()
+        assert registry[reservation.reservation_id]["state"] == "RELEASED"
+        assert registry[other.reservation_id]["state"] == "RESERVED"
+        assert Decimal(str(state.reserved)) == Decimal("0.2")
+        assert state.committed == 0
+        assert not (tmp_path / "transaction.json").exists()
 
     def test_reconcile_confirmed_terminates(self, tmp_path):
         """reconcile() with provider returning True must terminate."""

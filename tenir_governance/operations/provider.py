@@ -521,11 +521,13 @@ class StripeProvider:
                     limit=1,
                 )
                 if not intents.data:
-                    # No intent found — the payment likely never reached Stripe
+                    # Stripe search is not authoritative proof of non-execution:
+                    # indexing may lag, so releasing/refunding here could permit
+                    # a duplicate external effect. Keep the operation UNKNOWN.
                     return ReconciliationResult(
-                        resolved=True,
-                        outcome=ProviderOutcome.FAILED,
-                        error="No PaymentIntent found for idempotency key",
+                        resolved=False,
+                        outcome=ProviderOutcome.UNKNOWN,
+                        error="No PaymentIntent visible yet; absence from search does not prove non-execution",
                     )
                 intent = intents.data[0]
 

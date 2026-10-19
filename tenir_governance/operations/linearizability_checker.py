@@ -19,6 +19,7 @@ Reference:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 from typing import Any, Callable
 import itertools
 
@@ -104,9 +105,12 @@ class LinearizabilityChecker:
         # (op1 completed before op2 started)
         # AND they are from different clients
         precedence = self._build_precedence(completed)
+        # Preserve stable operation identities across recursive removal from
+        # the remaining list; list indices are not stable during search.
+        self._original_indices = {id(op): i for i, op in enumerate(completed)}
 
         # Try to find a linearization
-        result = self._search([], completed, precedence, None)
+        result = self._search([], completed, precedence, None, set(), {})
         return result
 
     def _build_precedence(self, operations: list) -> dict:
@@ -120,14 +124,15 @@ class LinearizabilityChecker:
                     continue
                 # op_i precedes op_j if op_i completed before op_j started
                 # AND they are from different clients
-                if (operations[i].response.event_id < operations[j].invocation.event_id
-                        and operations[i].invocation.client_id != operations[j].invocation.client_id):
+                if operations[i].response.event_id < operations[j].invocation.event_id:
                     precedence[j].add(i)
 
         return precedence
 
     def _search(self, linearized: list, remaining: list,
-                precedence: dict, state: Any) -> LinearizabilityResult:
+                precedence: dict, state: Any,
+                linearized_indices: set[int],
+                reservation_aliases: dict[str, str]) -> LinearizabilityResult:
         """Recursively search for a valid linearization (Wing-Gong)."""
         if not remaining:
             return LinearizabilityResult(
@@ -136,34 +141,43 @@ class LinearizabilityChecker:
             )
 
         for i, op in enumerate(remaining):
-            # Check if all predecessors of this op are already linearized
-            op_idx = self._find_orig_idx(op, remaining, i, precedence, linearized)
-            if op_idx is not None and not all(
-                p in [self._find_in_linearized(linearized, remaining, p)]
-                for p in precedence.get(op_idx, set())
-            ):
-                continue  # Not all predecessors are linearized yet
+            op_idx = self._original_indices[id(op)]
+            if not precedence.get(op_idx, set()).issubset(linearized_indices):
+                continue
 
-            # Try this operation next
+            # Each candidate branch gets its own state snapshot. Sequential
+            # specs commonly mutate state; a rejected candidate must not leak
+            # mutations into sibling search branches.
             try:
-                new_state, expected_result = self._spec(
-                    op.op, state if state is not None else self._initial_state(),
-                    op.invocation.args,
-                )
+                working_state = deepcopy(state if state is not None else self._initial_state())
+            except Exception:
+                # A state that cannot be isolated cannot safely be used as a
+                # candidate branch; reject this candidate without aborting the
+                # whole history check.
+                continue
+            args = op.invocation.args
+            # reconcile() is keyed by idempotency key, not reservation ID.
+            if op.op in {"commit", "release", "reconcile_commit", "reconcile_release"} and args:
+                args = (reservation_aliases.get(args[0], args[0]), *args[1:])
+            try:
+                new_state, expected_result = self._spec(op.op, working_state, args)
             except Exception:
                 continue
 
-            # Check if the result matches
-            if not self._results_match(expected_result, op.response.result):
+            # Bind concrete backend reservation IDs to model IDs and enforce
+            # one-to-one identity across replays and later commit/release calls.
+            branch_aliases = reservation_aliases.copy()
+            if not self._results_match(expected_result, op.response.result, branch_aliases):
                 continue
 
-            # Recurse
             new_remaining = remaining[:i] + remaining[i + 1:]
             result = self._search(
                 linearized + [op],
                 new_remaining,
                 precedence,
                 new_state,
+                linearized_indices | {op_idx},
+                branch_aliases,
             )
             if result.linearizable:
                 return result
@@ -177,10 +191,30 @@ class LinearizabilityChecker:
         """Initial state for the sequential specification."""
         return {"capacity": 100, "reserved": 0, "consumed": 0, "reservations": {}}
 
-    def _results_match(self, expected: Any, actual: Any) -> bool:
-        """Check if two results match (with tolerance for dict comparisons)."""
+    def _results_match(
+        self, expected: Any, actual: Any,
+        reservation_aliases: dict[str, str] | None = None,
+    ) -> bool:
+        """Compare all expected result fields and bind opaque reservation IDs."""
         if isinstance(expected, dict) and isinstance(actual, dict):
-            return expected.get("status") == actual.get("status")
+            for key, value in expected.items():
+                if key == "reservation_id":
+                    actual_id = actual.get(key)
+                    if not isinstance(actual_id, str) or not actual_id:
+                        return False
+                    if reservation_aliases is not None:
+                        existing_model_id = reservation_aliases.get(actual_id)
+                        if existing_model_id is not None and existing_model_id != value:
+                            return False
+                        # One model reservation must map to exactly one concrete ID.
+                        if any(model_id == value and concrete_id != actual_id
+                               for concrete_id, model_id in reservation_aliases.items()):
+                            return False
+                        reservation_aliases[actual_id] = value
+                    continue
+                if key not in actual or actual[key] != value:
+                    return False
+            return True
         if isinstance(expected, (list, tuple)) and isinstance(actual, (list, tuple)):
             return expected == actual
         return expected == actual
@@ -234,6 +268,8 @@ def consensus_sequential_spec(op_name: str, state: dict, args: tuple) -> tuple:
             return state, {"status": "NOT_FOUND"}
         if rec["state"] == "COMMITTED":
             return state, {"status": "ALREADY_COMMITTED"}
+        if rec["state"] != "RESERVED":
+            return state, {"status": "INVALID_STATE"}
         state["reserved"] -= rec["amount"]
         state["consumed"] += rec["amount"]
         rec["state"] = "COMMITTED"
@@ -246,6 +282,8 @@ def consensus_sequential_spec(op_name: str, state: dict, args: tuple) -> tuple:
             return state, {"status": "NOT_FOUND"}
         if rec["state"] == "COMMITTED":
             return state, {"status": "ALREADY_COMMITTED"}
+        if rec["state"] != "RESERVED":
+            return state, {"status": "INVALID_STATE"}
         state["reserved"] -= rec["amount"]
         rec["state"] = "RELEASED"
         return state, {"status": "RELEASED"}

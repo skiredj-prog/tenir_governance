@@ -28,14 +28,18 @@ Limitations:
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
 import uuid
+from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from tenir_governance.operations.budget import DurableBudgetCoordinator
+from tenir_governance.operations.budget import (
+    DurableBudgetCoordinator, _decimal_add, _decimal_subtract,
+)
 
 try:
     import fcntl
@@ -49,7 +53,7 @@ except ImportError:
 class ReservationResult:
     status: str  # RESERVED | INSUFFICIENT_BUDGET | DUPLICATE_KEY | ERROR
     reservation_id: str | None = None
-    amount_reserved: int | None = None
+    amount_reserved: int | float | Decimal | None = None
 
 
 @dataclass
@@ -64,16 +68,16 @@ class ReleaseResult:
 
 @dataclass
 class ReconciliationResult:
-    status: str  # CONFIRMED | FAILED | UNRESOLVED | NOT_FOUND | ERROR
+    status: str  # CONFIRMED | FAILED | UNRESOLVED | NOT_FOUND | RECONCILE_CONFLICT | ERROR
     effect_observed: bool | None = None
 
 
 @dataclass
 class ConsensusState:
-    available: int
-    reserved: int
-    committed: int
-    capacity: int
+    available: int | float | Decimal
+    reserved: int | float | Decimal
+    committed: int | float | Decimal
+    capacity: int | float | Decimal
     reservations: list = field(default_factory=list)
 
 
@@ -87,7 +91,7 @@ class ConsensusBackend(Protocol):
     C1/C2/C3/I8 (consensus-contract-v1.md) est conforme.
     """
 
-    def reserve(self, key: str, amount: int, resource_id: str) -> ReservationResult:
+    def reserve(self, key: str, amount: int | float | Decimal, resource_id: str) -> ReservationResult:
         """Réserver un montant budgétaire pour une clé d'idempotence."""
         ...
 
@@ -135,12 +139,26 @@ class SingleHostLockBackend:
         self._coordinator = DurableBudgetCoordinator(self._budget_store)
         self._provider_reconcile = provider_reconcile
         self._lock = threading.Lock()
+        self._transaction_store = os.path.join(store_dir, "transaction.json")
+        self._recover_pending_transaction()
 
-    def register_resource(self, resource_id: str, capacity: int):
-        """Register a resource with the backend."""
+    def register_resource(self, resource_id: str, capacity: int | float | Decimal):
+        """Register a resource without resetting any existing budget counters."""
+        if isinstance(capacity, bool):
+            raise ValueError("Resource capacity must be finite and non-negative.")
+        try:
+            normalized_capacity = capacity if isinstance(capacity, Decimal) else Decimal(str(capacity))
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            raise ValueError("Resource capacity must be finite and non-negative.") from exc
+        if not normalized_capacity.is_finite() or normalized_capacity < 0:
+            raise ValueError("Resource capacity must be finite and non-negative.")
+
+        # Delegate both idempotent re-registration and corruption checks to
+        # the coordinator under its own durable lock; never short-circuit a
+        # potentially corrupt persisted state here.
         resource = type("Resource", (), {
             "resource_id": resource_id,
-            "capacity": float(capacity),
+            "capacity": normalized_capacity,
             "reserved": 0.0,
             "consumed": 0.0,
         })()
@@ -152,9 +170,19 @@ class SingleHostLockBackend:
             return {}
         try:
             with open(self._reservations_store, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, ValueError):
-            return {}
+                reservations = json.load(f)
+            if not isinstance(reservations, dict):
+                raise ValueError("reservation registry root must be an object")
+            for reservation_id, record in reservations.items():
+                if not isinstance(record, dict):
+                    raise ValueError(f"invalid reservation record {reservation_id!r}")
+                if not {"key", "amount", "resource_id", "state"}.issubset(record):
+                    raise ValueError(f"incomplete reservation record {reservation_id!r}")
+            return reservations
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            # A damaged idempotency registry cannot safely be treated as empty:
+            # doing so could duplicate an existing reservation after restart.
+            raise RuntimeError("Corrupted durable reservation registry; refusing operation.") from exc
 
     def _persist_reservations(self, reservations: dict):
         """Persist reservation registry atomically."""
@@ -164,6 +192,99 @@ class SingleHostLockBackend:
             f.flush()
             os.fsync(f.fileno())
         os.rename(tmp, self._reservations_store)
+
+    def _persist_transaction(self, transaction: dict) -> None:
+        """Durably record a single in-flight budget/registry transaction."""
+        tmp = self._transaction_store + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(transaction, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self._transaction_store)
+        dir_fd = os.open(self._store_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    def _clear_transaction(self) -> None:
+        try:
+            os.unlink(self._transaction_store)
+        except FileNotFoundError:
+            return
+        dir_fd = os.open(self._store_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    def _snapshot(self, resource_id: str) -> dict:
+        state = self._coordinator.get_state_exact(resource_id)
+        if state is None:
+            raise RuntimeError(f"Cannot transact against unknown resource {resource_id!r}.")
+        return {name: str(state[name]) for name in ("reserved", "consumed", "capacity")}
+
+    def _recover_pending_transaction(self) -> None:
+        """Replay the sole interrupted operation by comparing exact durable snapshots."""
+        if not os.path.exists(self._transaction_store):
+            return
+        flock = self._lock_file()
+        try:
+            if not os.path.exists(self._transaction_store):
+                return
+            try:
+                with open(self._transaction_store, "r") as f:
+                    tx = json.load(f)
+                required = {"operation", "reservation_id", "record", "before", "after"}
+                if not isinstance(tx, dict) or not required.issubset(tx):
+                    raise ValueError("incomplete transaction journal")
+                # Validate the journal's operation and structure before replay.
+                # Unknown/corrupted operations must fail closed, never be treated
+                # as a generic commit/release mutation.
+                if tx["operation"] not in {"reserve", "commit", "release"}:
+                    raise ValueError("unknown transaction operation")
+                if not isinstance(tx["reservation_id"], str) or not tx["reservation_id"]:
+                    raise ValueError("invalid transaction reservation_id")
+                if not isinstance(tx["record"], dict) or not isinstance(tx["record"].get("resource_id"), str):
+                    raise ValueError("invalid transaction record/resource_id")
+                for snapshot_name in ("before", "after"):
+                    snapshot = tx[snapshot_name]
+                    if not isinstance(snapshot, dict) or set(snapshot) != {"reserved", "consumed", "capacity"}:
+                        raise ValueError(f"invalid {snapshot_name} budget snapshot")
+                    for value in snapshot.values():
+                        if not isinstance(value, str):
+                            raise ValueError(f"invalid {snapshot_name} snapshot value")
+                        parsed = Decimal(value)
+                        if not parsed.is_finite() or parsed < 0:
+                            raise ValueError(f"invalid {snapshot_name} snapshot amount")
+                resource_id = tx["record"]["resource_id"]
+                current = self._snapshot(resource_id)
+            except (OSError, ValueError, TypeError, KeyError, ArithmeticError, json.JSONDecodeError) as exc:
+                raise RuntimeError("Corrupted transaction journal; refusing recovery.") from exc
+
+            if current == tx["after"]:
+                reservations = self._load_reservations()
+                rid = tx["reservation_id"]
+                record = dict(tx["record"])
+                if tx["operation"] == "reserve":
+                    reservations[rid] = record
+                else:
+                    existing = reservations.get(rid)
+                    if existing is None:
+                        raise RuntimeError("Transaction journal references a missing reservation.")
+                    existing["state"] = record["state"]
+                    state_key = {"commit": "committed_at", "release": "released_at"}.get(tx["operation"])
+                    if state_key:
+                        existing[state_key] = record[state_key]
+                self._persist_reservations(reservations)
+            elif current != tx["before"]:
+                raise RuntimeError(
+                    "Budget state matches neither side of the pending transaction; manual reconciliation required."
+                )
+            self._clear_transaction()
+        finally:
+            if flock:
+                flock.close()
 
     def _lock_file(self):
         """Acquire cross-process exclusive lock on reservations store."""
@@ -177,12 +298,21 @@ class SingleHostLockBackend:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         return f
 
-    def reserve(self, key: str, amount: int, resource_id: str) -> ReservationResult:
+    def reserve(self, key: str, amount: int | float | Decimal, resource_id: str) -> ReservationResult:
         """Reserve budget for an idempotency key.
 
-        Idempotent: if key already reserved with same amount, returns existing.
-        If key already reserved with different amount, returns DUPLICATE_KEY.
+        Amounts remain Decimal internally and are stored as decimal strings
+        in JSON so neither persistence nor idempotency checks round through
+        binary floating-point.
         """
+        if isinstance(amount, bool):
+            return ReservationResult(status="INVALID_AMOUNT")
+        try:
+            amount = amount if isinstance(amount, Decimal) else Decimal(str(amount))
+        except (TypeError, ValueError, ArithmeticError):
+            return ReservationResult(status="INVALID_AMOUNT")
+        if not amount.is_finite() or amount <= 0:
+            return ReservationResult(status="INVALID_AMOUNT")
         with self._lock:
             flock = self._lock_file()
             try:
@@ -191,29 +321,50 @@ class SingleHostLockBackend:
                 # Check for existing reservation with this key
                 for rid, rec in reservations.items():
                     if rec.get("key") == key:
-                        if rec["amount"] == amount:
+                        # Idempotency binds the key to the full immutable
+                        # reservation identity and returns its actual lifecycle
+                        # state; replay must never revive a terminal reservation.
+                        if (
+                            Decimal(str(rec.get("amount"))) == amount
+                            and rec.get("resource_id") == resource_id
+                        ):
                             return ReservationResult(
-                                status="RESERVED",
+                                status=rec.get("state", "ERROR"),
                                 reservation_id=rid,
                                 amount_reserved=amount,
                             )
-                        else:
-                            return ReservationResult(status="DUPLICATE_KEY")
+                        return ReservationResult(status="DUPLICATE_KEY")
 
-                # Attempt budget reservation
-                if not self._coordinator.reserve(resource_id, float(amount)):
-                    return ReservationResult(status="INSUFFICIENT_BUDGET")
-
-                # Create reservation record
                 reservation_id = str(uuid.uuid4())
-                reservations[reservation_id] = {
+                record = {
                     "key": key,
-                    "amount": amount,
+                    "amount": str(amount),
                     "resource_id": resource_id,
                     "state": "RESERVED",
                     "created_at": time.time(),
                 }
-                self._persist_reservations(reservations)
+                before = self._snapshot(resource_id)
+                after = dict(before)
+                after["reserved"] = str(_decimal_add(Decimal(before["reserved"]), amount))
+                self._persist_transaction({
+                    "operation": "reserve", "reservation_id": reservation_id,
+                    "record": record, "before": before, "after": after,
+                })
+                if not self._coordinator.reserve(resource_id, amount):
+                    self._clear_transaction()
+                    return ReservationResult(status="INSUFFICIENT_BUDGET")
+                reservations[reservation_id] = record
+                try:
+                    self._persist_reservations(reservations)
+                except Exception:
+                    reservations.pop(reservation_id, None)
+                    try:
+                        self._coordinator.release(resource_id, amount)
+                        self._clear_transaction()
+                    except Exception:
+                        return ReservationResult(status="ERROR")
+                    return ReservationResult(status="ERROR")
+                self._clear_transaction()
 
                 return ReservationResult(
                     status="RESERVED",
@@ -240,13 +391,26 @@ class SingleHostLockBackend:
                 if rec["state"] != "RESERVED":
                     return CommitResult(status="ERROR")
 
-                # Commit budget
-                if not self._coordinator.commit(rec["resource_id"], float(rec["amount"])):
+                amount = Decimal(str(rec["amount"]))
+                before = self._snapshot(rec["resource_id"])
+                if Decimal(before["reserved"]) < amount:
                     return CommitResult(status="ERROR")
-
-                rec["state"] = "COMMITTED"
-                rec["committed_at"] = time.time()
+                after = dict(before)
+                after["reserved"] = str(_decimal_subtract(Decimal(before["reserved"]), amount))
+                after["consumed"] = str(_decimal_add(Decimal(before["consumed"]), amount))
+                updated = dict(rec)
+                updated["state"] = "COMMITTED"
+                updated["committed_at"] = time.time()
+                self._persist_transaction({
+                    "operation": "commit", "reservation_id": reservation_id,
+                    "record": updated, "before": before, "after": after,
+                })
+                if not self._coordinator.commit(rec["resource_id"], amount):
+                    self._clear_transaction()
+                    return CommitResult(status="ERROR")
+                reservations[reservation_id] = updated
                 self._persist_reservations(reservations)
+                self._clear_transaction()
 
                 return CommitResult(status="COMMITTED")
             finally:
@@ -269,12 +433,23 @@ class SingleHostLockBackend:
                 if rec["state"] not in ("RESERVED", "UNKNOWN"):
                     return ReleaseResult(status="ERROR")
 
-                # Release budget
-                self._coordinator.release(rec["resource_id"], float(rec["amount"]))
-
-                rec["state"] = "RELEASED"
-                rec["released_at"] = time.time()
+                amount = Decimal(str(rec["amount"]))
+                before = self._snapshot(rec["resource_id"])
+                if Decimal(before["reserved"]) < amount:
+                    return ReleaseResult(status="ERROR")
+                after = dict(before)
+                after["reserved"] = str(_decimal_subtract(Decimal(before["reserved"]), amount))
+                updated = dict(rec)
+                updated["state"] = "RELEASED"
+                updated["released_at"] = time.time()
+                self._persist_transaction({
+                    "operation": "release", "reservation_id": reservation_id,
+                    "record": updated, "before": before, "after": after,
+                })
+                self._coordinator.release(rec["resource_id"], amount)
+                reservations[reservation_id] = updated
                 self._persist_reservations(reservations)
+                self._clear_transaction()
 
                 return ReleaseResult(status="RELEASED")
             finally:
@@ -318,21 +493,49 @@ class SingleHostLockBackend:
                 rec = reservations[reservation_id]
 
                 if effect_observed is True:
-                    # Effect confirmed — commit
-                    if self._coordinator.commit(rec["resource_id"], float(rec["amount"])):
-                        rec["state"] = "COMMITTED"
-                        rec["committed_at"] = time.time()
-                        self._persist_reservations(reservations)
-                        return ReconciliationResult(status="CONFIRMED", effect_observed=True)
-                    else:
+                    # Effect confirmed — journal the budget/registry transition
+                    # so a crash between the two durable writes is recoverable.
+                    amount = Decimal(str(rec["amount"]))
+                    before = self._snapshot(rec["resource_id"])
+                    if Decimal(before["reserved"]) < amount:
                         return ReconciliationResult(status="ERROR", effect_observed=True)
+                    after = dict(before)
+                    after["reserved"] = str(_decimal_subtract(Decimal(before["reserved"]), amount))
+                    after["consumed"] = str(_decimal_add(Decimal(before["consumed"]), amount))
+                    updated = dict(rec)
+                    updated["state"] = "COMMITTED"
+                    updated["committed_at"] = time.time()
+                    self._persist_transaction({
+                        "operation": "commit", "reservation_id": reservation_id,
+                        "record": updated, "before": before, "after": after,
+                    })
+                    if not self._coordinator.commit(rec["resource_id"], amount):
+                        self._clear_transaction()
+                        return ReconciliationResult(status="ERROR", effect_observed=True)
+                    reservations[reservation_id] = updated
+                    self._persist_reservations(reservations)
+                    self._clear_transaction()
+                    return ReconciliationResult(status="CONFIRMED", effect_observed=True)
 
                 elif effect_observed is False:
-                    # No effect — release
-                    self._coordinator.release(rec["resource_id"], float(rec["amount"]))
-                    rec["state"] = "RELEASED"
-                    rec["released_at"] = time.time()
+                    # No effect — journal the release so restart cannot double-release.
+                    amount = Decimal(str(rec["amount"]))
+                    before = self._snapshot(rec["resource_id"])
+                    if Decimal(before["reserved"]) < amount:
+                        return ReconciliationResult(status="ERROR", effect_observed=False)
+                    after = dict(before)
+                    after["reserved"] = str(_decimal_subtract(Decimal(before["reserved"]), amount))
+                    updated = dict(rec)
+                    updated["state"] = "RELEASED"
+                    updated["released_at"] = time.time()
+                    self._persist_transaction({
+                        "operation": "release", "reservation_id": reservation_id,
+                        "record": updated, "before": before, "after": after,
+                    })
+                    self._coordinator.release(rec["resource_id"], amount)
+                    reservations[reservation_id] = updated
                     self._persist_reservations(reservations)
+                    self._clear_transaction()
                     return ReconciliationResult(status="FAILED", effect_observed=False)
 
                 else:
@@ -346,16 +549,17 @@ class SingleHostLockBackend:
 
     def get_state(self, resource_id: str) -> ConsensusState:
         """Return current state (pure, no mutation)."""
-        state = self._coordinator.get_state(resource_id)
+        state = self._coordinator.get_state_exact(resource_id)
         if state is None:
-            return ConsensusState(available=0, reserved=0, committed=0, capacity=0)
+            return ConsensusState(available=Decimal("0"), reserved=Decimal("0"),
+                                  committed=Decimal("0"), capacity=Decimal("0"))
 
         reservations = self._load_reservations()
         res_list = [
             {
                 "reservation_id": rid,
                 "key": rec["key"],
-                "amount": rec["amount"],
+                "amount": Decimal(str(rec["amount"])),
                 "state": rec["state"],
             }
             for rid, rec in reservations.items()
@@ -363,10 +567,10 @@ class SingleHostLockBackend:
         ]
 
         return ConsensusState(
-            available=int(state["available"]),
-            reserved=int(state["reserved"]),
-            committed=int(state["consumed"]),
-            capacity=int(state["capacity"]),
+            available=state["available"],
+            reserved=state["reserved"],
+            committed=state["consumed"],
+            capacity=state["capacity"],
             reservations=res_list,
         )
 

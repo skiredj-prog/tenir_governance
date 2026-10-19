@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import Protocol, runtime_checkable
 
 
@@ -81,19 +82,35 @@ class InProcessBudgetCoordinator:
     def __init__(self):
         self._resources: dict[str, any] = {}
         self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
 
     def register(self, resource) -> None:
-        """Register a Resource object with this coordinator."""
+        """Register once without replacing live accounting or synchronization."""
+        existing = self._resources.get(resource.resource_id)
+        if existing is not None:
+            if existing is resource:
+                return
+            if float(existing.capacity) == float(resource.capacity):
+                # Keep the original object and lock: its counters may already
+                # represent live reservations or committed usage.
+                return
+            raise ValueError(
+                f"Resource {resource.resource_id!r} is already registered "
+                "with a different capacity."
+            )
         self._resources[resource.resource_id] = resource
-        self._locks[resource.resource_id] = threading.Lock()
+        self._locks.setdefault(resource.resource_id, threading.Lock())
 
     def get_resource(self, resource_id: str):
         return self._resources.get(resource_id)
 
     def get_lock(self, resource_id: str) -> threading.Lock:
-        if resource_id not in self._locks:
-            self._locks[resource_id] = threading.Lock()
-        return self._locks[resource_id]
+        # Protect the check-and-create sequence; concurrent first access must
+        # never hand out distinct locks for the same resource.
+        with self._locks_guard:
+            if resource_id not in self._locks:
+                self._locks[resource_id] = threading.Lock()
+            return self._locks[resource_id]
 
     def reserve(self, resource_id: str, amount: float) -> bool:
         resource = self._resources.get(resource_id)
@@ -133,6 +150,7 @@ class InProcessBudgetCoordinator:
             return (resource.consumed + resource.reserved) / resource.capacity
 
 import json
+import math
 import os
 import tempfile
 
@@ -140,6 +158,60 @@ try:
     import fcntl
 except ImportError:
     fcntl = None  # Windows fallback
+
+
+MAX_DECIMAL_DIGITS = 128
+MAX_DECIMAL_EXPONENT = 128
+MAX_DECIMAL_ADJUSTED = 128
+
+
+def _validate_decimal_bounds(value: Decimal) -> Decimal:
+    """Bound accounting inputs to prevent pathological Decimal exponents."""
+    parts = value.as_tuple()
+    if (
+        len(parts.digits) > MAX_DECIMAL_DIGITS
+        or abs(parts.exponent) > MAX_DECIMAL_EXPONENT
+        or (value and value.adjusted() > MAX_DECIMAL_ADJUSTED)
+    ):
+        raise ValueError("Decimal amount exceeds supported precision or exponent bounds.")
+    return value
+
+
+def _decimal_precision(*values: Decimal) -> int:
+    """Choose enough precision to add/subtract bounded finite Decimals exactly."""
+    if not values:
+        return 28
+    # Inputs are validated at the accounting boundary by _decimal(). Zero
+    # values carry no magnitude, so their representation exponent must not
+    # inflate precision requirements or make an otherwise valid operation
+    # fail (e.g. a persisted Decimal zero with exponent -129).
+    nonzero_values = [value for value in values if value]
+    # Do not apply the external-input digit-count limit to arithmetic results:
+    # exact subtraction near the supported magnitude boundary can legitimately
+    # create a temporary coefficient longer than MAX_DECIMAL_DIGITS. Keep the
+    # exponent/magnitude guards here to bound internal work; _decimal() remains
+    # the strict validation boundary for caller-supplied amounts and capacities.
+    for value in nonzero_values:
+        parts = value.as_tuple()
+        if abs(parts.exponent) > MAX_DECIMAL_EXPONENT or value.adjusted() > MAX_DECIMAL_ADJUSTED:
+            raise ValueError("Decimal operand exceeds supported exponent or magnitude bounds.")
+    highest_adjusted = max((value.adjusted() for value in nonzero_values), default=0)
+    lowest_exponent = min(
+        (value.as_tuple().exponent for value in nonzero_values), default=0
+    )
+    return max(28, highest_adjusted - lowest_exponent + 2)
+
+
+def _decimal_add(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = _decimal_precision(left, right)
+        return left + right
+
+
+def _decimal_subtract(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = _decimal_precision(left, right)
+        return left - right
 
 
 class DurableBudgetCoordinator:
@@ -169,19 +241,73 @@ class DurableBudgetCoordinator:
     def __init__(self, store_path: str | None = None):
         self._store_path = store_path
         self._lock = threading.Lock()
-        self._resources: dict[str, dict] = {}  # resource_id -> {capacity, reserved, consumed}
+        self._resources: dict[str, dict] = {}  # Decimal counters: capacity, reserved, consumed
         if store_path:
             self._load()
 
     def register(self, resource) -> None:
-        """Register a Resource object's capacity with this coordinator."""
+        """Register once; preserve accounting for already-known resources."""
+        capacity = getattr(resource, "capacity", None)
+        if isinstance(capacity, bool):
+            raise ValueError("Resource capacity must be finite and non-negative.")
+        try:
+            capacity = self._decimal(capacity)
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            raise ValueError("Resource capacity must be finite and non-negative.") from exc
+        if not capacity.is_finite() or capacity < 0:
+            raise ValueError("Resource capacity must be finite and non-negative.")
+
         with self._lock:
-            self._resources[resource.resource_id] = {
-                "capacity": resource.capacity,
-                "reserved": getattr(resource, "reserved", 0.0),
-                "consumed": getattr(resource, "consumed", 0.0),
-            }
-            self._persist()
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                existing = self._resources.get(resource.resource_id)
+                if existing is not None:
+                    try:
+                        old_capacity = self._decimal(existing["capacity"])
+                        reserved = self._decimal(existing["reserved"])
+                        consumed = self._decimal(existing["consumed"])
+                    except (KeyError, TypeError, ValueError, OverflowError, InvalidOperation) as exc:
+                        raise RuntimeError("Corrupt persisted budget state; registration refused.") from exc
+                    if (
+                        not all(v.is_finite() and v >= 0 for v in (old_capacity, reserved, consumed))
+                        or _decimal_add(reserved, consumed) > old_capacity
+                    ):
+                        raise RuntimeError("Corrupt persisted budget invariant; registration refused.")
+                    if old_capacity != capacity:
+                        raise ValueError(
+                            f"Resource {resource.resource_id!r} is already registered "
+                            "with a different capacity; explicit migration is required."
+                        )
+                    return
+
+                reserved = getattr(resource, "reserved", 0.0)
+                consumed = getattr(resource, "consumed", 0.0)
+                try:
+                    reserved, consumed = self._decimal(reserved), self._decimal(consumed)
+                except (TypeError, ValueError, InvalidOperation) as exc:
+                    raise ValueError("Initial resource counters must be finite and non-negative.") from exc
+                if (
+                    not reserved.is_finite() or not consumed.is_finite()
+                    or reserved < 0 or consumed < 0 or _decimal_add(reserved, consumed) > capacity
+                ):
+                    raise ValueError("Initial resource counters violate the budget invariant.")
+                self._resources[resource.resource_id] = {
+                    "capacity": capacity, "reserved": reserved, "consumed": consumed,
+                }
+                self._persist()
+            finally:
+                if flock:
+                    flock.close()
+
+    @staticmethod
+    def _decimal(value) -> Decimal:
+        """Parse bounded accounting values without binary-float rounding."""
+        if isinstance(value, bool):
+            raise InvalidOperation("boolean is not a budget amount")
+        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
+        return _validate_decimal_bounds(parsed)
 
     def get_resource(self, resource_id: str):
         """Return a lightweight view of the resource state."""
@@ -206,18 +332,44 @@ class DurableBudgetCoordinator:
             return
         try:
             with open(self._store_path, "r") as f:
-                self._resources = json.load(f)
-        except (json.JSONDecodeError, ValueError):
-            # Corrupted store — fail-closed: keep existing state or empty
-            pass
+                loaded = json.load(f)
+            if not isinstance(loaded, dict):
+                raise ValueError("budget store root must be an object")
+            normalized = {}
+            for resource_id, record in loaded.items():
+                if not isinstance(record, dict):
+                    raise ValueError(f"invalid record for resource {resource_id!r}")
+                try:
+                    capacity = self._decimal(record["capacity"])
+                    reserved = self._decimal(record["reserved"])
+                    consumed = self._decimal(record["consumed"])
+                except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError(f"invalid counters for resource {resource_id!r}") from exc
+                if (
+                    not all(v.is_finite() and v >= 0 for v in (capacity, reserved, consumed))
+                    or _decimal_add(reserved, consumed) > capacity
+                ):
+                    raise ValueError(f"budget invariant invalid for resource {resource_id!r}")
+                normalized[resource_id] = {
+                    "capacity": capacity, "reserved": reserved, "consumed": consumed,
+                }
+            self._resources = normalized
+        except (json.JSONDecodeError, ValueError, TypeError, InvalidOperation) as exc:
+            # Corrupt durable state is not equivalent to an empty budget.
+            # Refuse the operation so registration cannot silently reset it.
+            raise RuntimeError("Corrupted durable budget store; refusing operation.") from exc
 
     def _persist(self):
         """Persist budget state atomically (temp file, fsync, rename)."""
         if not self._store_path:
             return
         tmp = self._store_path + ".tmp"
+        serializable = {
+            resource_id: {key: str(value) for key, value in record.items()}
+            for resource_id, record in self._resources.items()
+        }
         with open(tmp, "w") as f:
-            json.dump(self._resources, f)
+            json.dump(serializable, f)
             f.flush()
             os.fsync(f.fileno())
         os.rename(tmp, self._store_path)
@@ -227,7 +379,7 @@ class DurableBudgetCoordinator:
         finally:
             os.close(dir_fd)
 
-    def _reload_and_check(self, resource_id: str, amount: float) -> bool:
+    def _reload_and_check(self, resource_id: str, amount: Decimal) -> bool:
         """Reload from disk under lock and check if amount is available.
         Returns True if available >= amount after reload.
         Does NOT mutate state — caller mutates after check passes.
@@ -237,7 +389,7 @@ class DurableBudgetCoordinator:
         r = self._resources.get(resource_id)
         if r is None:
             return False
-        available = r["capacity"] - r["reserved"] - r["consumed"]
+        available = _decimal_subtract(_decimal_subtract(r["capacity"], r["reserved"]), r["consumed"])
         return available >= amount
 
     def reserve(self, resource_id: str, amount: float) -> bool:
@@ -247,13 +399,19 @@ class DurableBudgetCoordinator:
         changed state), checks availability, mutates, and persists.
         I8: reserved + consumed <= capacity is maintained.
         """
+        try:
+            amount = self._decimal(amount)
+        except (TypeError, ValueError, InvalidOperation):
+            return False
+        if not amount.is_finite() or amount <= 0:
+            return False
         with self._lock:
             flock = self._lock_file()
             try:
                 if not self._reload_and_check(resource_id, amount):
                     return False
                 r = self._resources[resource_id]
-                r["reserved"] += amount
+                r["reserved"] = _decimal_add(r["reserved"], amount)
                 self._persist()
                 return True
             finally:
@@ -262,6 +420,12 @@ class DurableBudgetCoordinator:
 
     def commit(self, resource_id: str, amount: float) -> bool:
         """Move amount from reserved to consumed (cross-process atomic)."""
+        try:
+            amount = self._decimal(amount)
+        except (TypeError, ValueError, InvalidOperation):
+            return False
+        if not amount.is_finite() or amount <= 0:
+            return False
         with self._lock:
             flock = self._lock_file()
             try:
@@ -270,8 +434,8 @@ class DurableBudgetCoordinator:
                 r = self._resources.get(resource_id)
                 if r is None or r["reserved"] < amount:
                     return False
-                r["reserved"] -= amount
-                r["consumed"] += amount
+                r["reserved"] = _decimal_subtract(r["reserved"], amount)
+                r["consumed"] = _decimal_add(r["consumed"], amount)
                 self._persist()
                 return True
             finally:
@@ -280,6 +444,12 @@ class DurableBudgetCoordinator:
 
     def release(self, resource_id: str, amount: float) -> None:
         """Release a reservation (cross-process atomic)."""
+        try:
+            amount = self._decimal(amount)
+        except (TypeError, ValueError, InvalidOperation):
+            return
+        if not amount.is_finite() or amount <= 0:
+            return
         with self._lock:
             flock = self._lock_file()
             try:
@@ -288,7 +458,7 @@ class DurableBudgetCoordinator:
                 r = self._resources.get(resource_id)
                 if r is None:
                     return
-                r["reserved"] = max(0.0, r["reserved"] - amount)
+                r["reserved"] = max(Decimal("0"), _decimal_subtract(r["reserved"], amount))
                 self._persist()
             finally:
                 if flock:
@@ -304,7 +474,7 @@ class DurableBudgetCoordinator:
                 r = self._resources.get(resource_id)
                 if r is None or r["capacity"] <= 0:
                     return None
-                return (r["consumed"] + r["reserved"]) / r["capacity"]
+                return float(_decimal_add(r["consumed"], r["reserved"]) / r["capacity"])
             finally:
                 if flock:
                     flock.close()
@@ -320,7 +490,30 @@ class DurableBudgetCoordinator:
                 if r is None:
                     return None
                 return {
-                    "available": r["capacity"] - r["reserved"] - r["consumed"],
+                    # Preserve exact Decimal values at the state boundary. Callers
+                    # that need display floats should convert explicitly; accounting
+                    # and invariant checks must not silently round here.
+                    "available": _decimal_subtract(_decimal_subtract(r["capacity"], r["reserved"]), r["consumed"]),
+                    "reserved": r["reserved"],
+                    "consumed": r["consumed"],
+                    "capacity": r["capacity"],
+                }
+            finally:
+                if flock:
+                    flock.close()
+
+    def get_state_exact(self, resource_id: str) -> dict | None:
+        """Return exact Decimal counters for durable transaction recovery."""
+        with self._lock:
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                r = self._resources.get(resource_id)
+                if r is None:
+                    return None
+                return {
+                    "available": _decimal_subtract(_decimal_subtract(r["capacity"], r["reserved"]), r["consumed"]),
                     "reserved": r["reserved"],
                     "consumed": r["consumed"],
                     "capacity": r["capacity"],

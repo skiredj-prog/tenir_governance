@@ -49,13 +49,26 @@ class MembraneState:
     invariants: list[MissionInvariant] = field(default_factory=list)
     # Per-resource locks for atomic budget reservations
     _locks: dict[str, threading.Lock] = field(default_factory=dict)
+    _quarantine_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
 
     def register_agent(self, agent: Agent) -> None:
         self.agents[agent.agent_id] = agent
 
     def register_resource(self, resource: Resource) -> None:
-        self.resources[resource.resource_id] = resource
-        self._locks[resource.resource_id] = threading.Lock()
+        """Register once; replacing a live resource would orphan its budget and lock."""
+        # Serialize check-and-insert so concurrent first registrations cannot
+        # replace the resource object or the lock protecting its accounting.
+        with self._quarantine_lock:
+            existing = self.resources.get(resource.resource_id)
+            if existing is not None:
+                if existing is resource:
+                    return
+                raise ValueError(
+                    f"Resource {resource.resource_id!r} is already registered; "
+                    "resource replacement is prohibited because it can reset accounting."
+                )
+            self.resources[resource.resource_id] = resource
+            self._locks.setdefault(resource.resource_id, threading.Lock())
 
     def register_trajectory(self, trajectory: Trajectory) -> None:
         self.trajectories[trajectory.trajectory_id] = trajectory
@@ -64,12 +77,19 @@ class MembraneState:
         self.invariants.append(inv)
 
     def get_lock(self, resource_id: str) -> threading.Lock:
-        """Get the lock for a resource, creating one if needed."""
-        if resource_id not in self._locks:
-            self._locks[resource_id] = threading.Lock()
-        return self._locks[resource_id]
+        """Get the unique lock for a resource, creating it atomically."""
+        with self._quarantine_lock:
+            lock = self._locks.get(resource_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[resource_id] = lock
+            return lock
 
     def lock_quarantine(self, locked_by: str = "") -> None:
+        with self._quarantine_lock:
+            self._lock_quarantine_under_lock(locked_by)
+
+    def _lock_quarantine_under_lock(self, locked_by: str = "") -> None:
         """Activate QUARANTINE_LOCK — blocks all new admission and dispatch.
 
         Per v7.1 §6: QUARANTINE_LOCK blocks new attempt admission and
@@ -85,6 +105,16 @@ class MembraneState:
         self.quarantine_release_receipt = None
 
     def release_quarantine(
+        self,
+        authorized_by: str,
+        scope: str,
+        authorization: str,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        with self._quarantine_lock:
+            return self._release_quarantine_under_lock(authorized_by, scope, authorization, reason)
+
+    def _release_quarantine_under_lock(
         self,
         authorized_by: str,
         scope: str,

@@ -300,6 +300,43 @@ class TestMerkleTree(unittest.TestCase):
         self.assertEqual(r1, r2)
 
 
+class TestConsensusBroadcast(unittest.TestCase):
+    """Peer consensus transport must accept and send the configured API token."""
+
+    def test_plaintext_peer_url_is_rejected_before_sending_token(self):
+        from r5_distributed_crypto.merkle.distributed_ledger import (
+            ConsensusBroadcast, LedgerIntegrityError,
+        )
+
+        with patch("urllib.request.urlopen") as urlopen:
+            with self.assertRaisesRegex(LedgerIntegrityError, "must use HTTPS"):
+                ConsensusBroadcast._http_post(
+                    "http://peer.example/api/v1/ledger/validate_epoch",
+                    b'{"epoch_id": 1}',
+                    api_token="sensitive-token",
+                )
+            urlopen.assert_not_called()
+
+    def test_constructor_and_peer_request_support_bearer_token(self):
+        from r5_distributed_crypto.merkle.distributed_ledger import ConsensusBroadcast
+
+        broadcaster = ConsensusBroadcast([], api_token="x" * 32)
+        self.assertEqual(broadcaster.api_token, "x" * 32)
+
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"agrees": true}'
+        with patch("urllib.request.urlopen", return_value=response) as urlopen:
+            result = ConsensusBroadcast._http_post(
+                "https://peer.example/api/v1/ledger/validate_epoch",
+                b'{"epoch_id": 1}',
+                api_token="test-token",
+            )
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+        self.assertTrue(result["agrees"])
+
+
 class TestDistributedLedger(unittest.IsolatedAsyncioTestCase):
     """Tests for the append-only distributed ledger."""
 
