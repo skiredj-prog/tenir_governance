@@ -851,3 +851,29 @@ def test_reconcile_confirmed_recovers_missing_durable_reservation_identity(tmp_p
     assert latest.budget_reserved is False
     assert latest.budget_committed is True
     assert backend.get_state("budget").committed == Decimal("10.0")
+
+
+def test_reconcile_confirmed_refuses_terminal_state_without_durable_reservation(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    provider = MockProvider(
+        behavior="timeout",
+        reconcile_outcome=ProviderOutcome.CONFIRMED,
+    )
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
+    passage, _result = _adjudicate_durable_budget(gov)
+    record = gov.registry.get(passage.idempotency_key)
+    assert gov.registry.transition_to(
+        passage.idempotency_key, OperationState.DISPATCHING,
+    )[0]
+
+    monkeypatch.setattr(
+        backend, "get_state",
+        lambda resource_id: SimpleNamespace(reservations=[]),
+    )
+    result = gov.reconcile_unknown(passage.idempotency_key)
+    latest = gov.registry.get(passage.idempotency_key)
+
+    assert result["reconciled"] is False
+    assert latest.state == OperationState.DISPATCHING
+    assert latest.budget_committed is False
