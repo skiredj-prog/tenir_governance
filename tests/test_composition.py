@@ -1194,5 +1194,30 @@ class TestSchemaAdapter:
         assert result["engine_spec_version"] == "TENIR-2.0"
 
 
+    def test_canonical_trace_stages_are_preserved(self):
+        source = self._make_result()
+        canonical_stage = {
+            "stage": "external-audit",
+            "status": "warning",
+            "outputs_emitted": ["signed-evidence-ref"],
+            "summary": "Stage supplied by canonical context.",
+        }
+        source["canonical_context"]["trace"]["stages"] = [canonical_stage]
+        result = conform_to_schema(source)
+        assert result["trace"]["stages"] == [canonical_stage]
+
+    def test_failed_operation_trace_is_not_reported_as_ok(self):
+        source = self._make_result()
+        source["operation_state"] = "FAILED"
+        result = conform_to_schema(source)
+        operation_stage = next(stage for stage in result["trace"]["stages"]
+                               if stage["stage"] == "operation")
+        assert operation_stage["status"] == "failed"
+
+    def test_no_degradation_sentinel_is_not_reported_as_degraded_input(self):
+        result = conform_to_schema(self._make_result(composed="PASS"))
+        assert result["degraded_mode"] == ["none"]
+        assert result["synthesis"]["degraded_inputs"] == []
+
 # Import OperationState for the dispatch tests
 from tenir_governance.operations.registry import OperationState
