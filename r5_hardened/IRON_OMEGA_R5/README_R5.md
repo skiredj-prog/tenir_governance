@@ -195,8 +195,13 @@ deterministically. No GPU, no Ollama, no network required.
 
 ```bash
 # Node 1
-# PEER_NODES must point to HTTPS endpoints backed by valid certificates
-Peer validation traffic carries bearer credentials and therefore requires HTTPS with certificate verification. Terminate TLS at a trusted proxy or configure a TLS-enabled peer endpoint; the HTTP API examples above are local API examples, not valid PEER_NODES values.\n\nexport PEER_NODES=https://node2:8443,https://node3:8443
+# PEER_NODES must point to HTTPS endpoints backed by valid certificates.
+# Peer validation traffic carries bearer credentials and therefore requires HTTPS
+# with certificate verification. Terminate TLS at a trusted proxy or configure
+# a TLS-enabled peer endpoint; the HTTP API examples above are local API examples,
+# not valid PEER_NODES values.
+
+export PEER_NODES=https://node2:8443,https://node3:8443
 uvicorn r5_server:app --host 0.0.0.0 --port 8000
 
 # Node 2
