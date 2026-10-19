@@ -141,10 +141,11 @@ class TestMultiNodeReserveCommitRelease:
         assert result.status == "RESERVED"
         time.sleep(0.3)
 
-        state = leader.get_state("precision-budget")
-        assert state.capacity == amount
-        assert state.reserved == amount
-        assert state.available == Decimal("0")
+        for index, node in enumerate(cluster):
+            state = node.get_state("precision-budget")
+            assert state.capacity == amount, f"Node {index} rounded replicated capacity"
+            assert state.reserved == amount, f"Node {index} rounded replicated reservation"
+            assert state.available == Decimal("0"), f"Node {index} reported nonzero available budget"
         over = leader.reserve(
             "precision-overrun", Decimal("0.000000000000000000000000000000000001"),
             "precision-budget",
