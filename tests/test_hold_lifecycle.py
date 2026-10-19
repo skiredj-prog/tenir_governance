@@ -220,6 +220,7 @@ class TestHoldLifecycle:
         reg.register(rec)
         hm = HoldManager(reg)
         hm.enter_hold("op-hold-6", tau_k_seconds=300)
+        reg.get("op-hold-6").hold_record.hold_start = "2000-01-01T00:00:00+00:00"
         result = hm.expire_hold("op-hold-6")
         assert result["expired"] is True
         assert result["operation_state"] == OperationState.FAILED.value
@@ -578,9 +579,46 @@ class TestGovernorHoldLifecycle:
         )
         gov.registry.register(rec)
         gov.hold_manager.enter_hold("op-hold-test-4", tau_k_seconds=300)
+        gov.registry.get("op-hold-test-4").hold_record.hold_start = "2000-01-01T00:00:00+00:00"
         result = gov.expire_hold("op-hold-test-4")
         assert result["expired"] is True
         assert result["operation_state"] == OperationState.FAILED.value
+
+
+    def test_governor_expiry_preserves_budget_not_owned_by_hold(self):
+        """Expiring a HOLD without ownership flags must not release another reservation."""
+        gov, state = _setup_governor()
+        budget = state.resources["budget"]
+        assert budget.reserve(10.0)
+        rec = OperationRecord(
+            idempotency_key="op-hold-unowned-budget", passage_id="p-unowned",
+            agent_id="alice", action_type="payment", amount=10.0,
+            resource_id="budget", budget_reserved=False, budget_committed=False,
+        )
+        assert gov.registry.register(rec)
+        assert gov.hold_manager.enter_hold("op-hold-unowned-budget", tau_k_seconds=300)["entered"]
+        gov.registry.get("op-hold-unowned-budget").hold_record.hold_start = "2000-01-01T00:00:00+00:00"
+
+        result = gov.expire_hold("op-hold-unowned-budget")
+
+        assert result["expired"] is True
+        assert budget.reserved == 10.0
+        assert budget.consumed == 0.0
+
+    def test_governor_expiry_rejects_unelapsed_tau_k(self):
+        """A configured τ_K deadline cannot be bypassed by calling expire_hold directly."""
+        gov, _state = _setup_governor()
+        rec = OperationRecord(
+            idempotency_key="op-hold-premature-expiry", passage_id="p-premature",
+            agent_id="alice", action_type="payment",
+        )
+        assert gov.registry.register(rec)
+        assert gov.hold_manager.enter_hold("op-hold-premature-expiry", tau_k_seconds=3600)["entered"]
+
+        result = gov.expire_hold("op-hold-premature-expiry")
+
+        assert result["expired"] is False
+        assert gov.registry.get("op-hold-premature-expiry").state == OperationState.HOLD
 
     def test_governor_resume_existing_hold(self):
         """resume_existing() returns resolve_or_escalate for HOLD operations."""
