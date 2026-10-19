@@ -16,6 +16,7 @@ import sys
 import time
 import tempfile
 import threading
+from decimal import Decimal
 
 import pytest
 
@@ -51,6 +52,16 @@ def _get_leader(nodes):
         if node.is_leader():
             return node
     return None
+
+
+def _wait_until(predicate, timeout=5.0, interval=0.05):
+    """Poll an eventual-consistency condition with a bounded timeout."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return bool(predicate())
 
 
 def _teardown(nodes):
@@ -1005,7 +1016,11 @@ class TestListOneRegressions:
         result = leader.reconcile("late-effect-A")
         assert result.status == "RECONCILE_CONFLICT"
         assert result.effect_observed is True
-        time.sleep(0.4)
+        assert _wait_until(lambda: all(
+            node.get_state("budget-I8-L1").reserved == 100
+            and node.get_state("budget-I8-L1").committed == 0
+            for node in cluster
+        )), "followers did not converge to the expected budget state"
         for node in cluster:
             state = node.get_state("budget-I8-L1")
             assert state.reserved == 100
@@ -1056,7 +1071,17 @@ class TestListOneRegressions:
         source = inspect.getsource(_RaftStateMachine)
         tree = ast.parse(source)
         cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_RaftStateMachine")
-        forbidden = {"time.time", "time.monotonic", "datetime.now", "uuid.uuid4", "random.random"}
+        # Inspect both qualified names and their leaf names so common aliases
+        # (e.g. imported monotonic or uuid4) cannot evade this static guard.
+        forbidden_qualified = {
+            "time.time", "time.monotonic", "time.perf_counter", "datetime.now",
+            "datetime.utcnow", "uuid.uuid4", "random.random", "random.randint",
+            "random.choice", "os.urandom", "secrets.token_bytes",
+        }
+        forbidden_leaf = {
+            "time", "monotonic", "perf_counter", "now", "utcnow", "uuid4",
+            "random", "randint", "choice", "urandom", "token_bytes",
+        }
         for method in cls.body:
             if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -1066,7 +1091,10 @@ class TestListOneRegressions:
             for node in ast.walk(method):
                 if isinstance(node, ast.Call):
                     fn = ast.unparse(node.func)
-                    if fn in forbidden:
+                    leaf = node.func.attr if isinstance(node.func, ast.Attribute) else (
+                        node.func.id if isinstance(node.func, ast.Name) else ""
+                    )
+                    if fn in forbidden_qualified or leaf in forbidden_leaf:
                         calls.add(fn)
             assert not calls, f"non-deterministic calls in replicated {method.name}: {sorted(calls)}"
     def test_fractional_amounts_are_preserved_in_budget_state(self, cluster):
@@ -1075,13 +1103,13 @@ class TestListOneRegressions:
         first = leader.reserve("fraction-a", "0.1", "budget-DECIMAL-L1")
         assert first.status == "RESERVED"
         state = leader.get_state("budget-DECIMAL-L1")
-        assert state.reserved == 0.1
-        assert state.available == 0.2
+        assert state.reserved == Decimal("0.1")
+        assert state.available == Decimal("0.2")
         second = leader.reserve("fraction-b", "0.2", "budget-DECIMAL-L1")
         assert second.status == "RESERVED"
         state = leader.get_state("budget-DECIMAL-L1")
-        assert state.reserved == 0.3
-        assert state.committed == 0
+        assert state.reserved == Decimal("0.3")
+        assert state.committed == Decimal("0")
         assert state.reserved + state.committed <= state.capacity
     def test_logical_clock_and_transition_metadata_replicate_identically(self, cluster):
         leader = _get_leader(cluster)
@@ -1089,7 +1117,11 @@ class TestListOneRegressions:
         reservation = leader.reserve("clock-key", 20, "budget-CLOCK-L1")
         assert reservation.status == "RESERVED"
         assert leader.commit(reservation.reservation_id).status == "COMMITTED"
-        time.sleep(0.4)
+        assert _wait_until(lambda: all(
+            node._raft._logical_clock == cluster[0]._raft._logical_clock
+            and reservation.reservation_id in node._raft._reservations
+            for node in cluster
+        )), "replicated clock/reservation metadata did not converge"
         states = [node._raft for node in cluster]
         clocks = [sm._logical_clock for sm in states]
         assert len(set(clocks)) == 1
@@ -1097,3 +1129,38 @@ class TestListOneRegressions:
         assert len({r["created_at_logical"] for r in records}) == 1
         assert len({r["committed_at_logical"] for r in records}) == 1
         assert all(r["committed_at_logical"] > r["created_at_logical"] for r in records)
+
+
+    def test_legacy_float_state_is_normalized_before_decimal_reserve(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-LEGACY-L1", 100) == "REGISTERED"
+        # Simulate state serialized by the pre-Decimal implementation.
+        leader._raft._resources["budget-LEGACY-L1"] = {
+            "capacity": 100.0, "reserved": 0.1, "committed": 0.2,
+        }
+        result = leader.reserve("after-upgrade", "0.3", "budget-LEGACY-L1")
+        assert result.status == "RESERVED"
+        state = leader.get_state("budget-LEGACY-L1")
+        assert state.capacity == Decimal("100.0")
+        assert state.reserved == Decimal("0.4")
+        assert state.committed == Decimal("0.2")
+
+    def test_legacy_five_argument_reserve_command_remains_callable(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-LEGACY-CMD", 100) == "REGISTERED"
+        # Old replicated journals supplied a fifth wall-clock timestamp.
+        result = leader._raft.reserve(
+            "legacy-command-key", Decimal("10"), "budget-LEGACY-CMD",
+            "legacy-command-reservation", 1700000000.0, sync=True, timeout=10.0,
+        )
+        assert result[0] == "RESERVED"
+        assert result[1] == "legacy-command-reservation"
+
+    def test_large_capacity_preserves_fractional_available_value(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader.register_resource("budget-LARGE-DECIMAL", "1000000000000000000") == "REGISTERED"
+        reservation = leader.reserve("small-fraction", "0.1", "budget-LARGE-DECIMAL")
+        assert reservation.status == "RESERVED"
+        state = leader.get_state("budget-LARGE-DECIMAL")
+        assert state.available == Decimal("999999999999999999.9")
+        assert state.reserved == Decimal("0.1")
