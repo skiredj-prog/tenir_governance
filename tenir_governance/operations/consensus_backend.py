@@ -63,7 +63,7 @@ class CommitResult:
 
 @dataclass
 class ReleaseResult:
-    status: str  # RELEASED | NOT_FOUND | ALREADY_COMMITTED | ERROR
+    status: str  # RELEASED | ALREADY_RELEASED | NOT_FOUND | ALREADY_COMMITTED | ERROR
 
 
 @dataclass
@@ -443,6 +443,8 @@ class SingleHostLockBackend:
                 rec = reservations[reservation_id]
                 if rec["state"] == "COMMITTED":
                     return ReleaseResult(status="ALREADY_COMMITTED")
+                if rec["state"] == "RELEASED":
+                    return ReleaseResult(status="ALREADY_RELEASED")
                 if rec["state"] not in ("RESERVED", "UNKNOWN"):
                     return ReleaseResult(status="ERROR")
 
