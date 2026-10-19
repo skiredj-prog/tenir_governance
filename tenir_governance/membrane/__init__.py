@@ -77,10 +77,13 @@ class MembraneState:
         self.invariants.append(inv)
 
     def get_lock(self, resource_id: str) -> threading.Lock:
-        """Get the lock for a resource, creating one if needed."""
-        if resource_id not in self._locks:
-            self._locks[resource_id] = threading.Lock()
-        return self._locks[resource_id]
+        """Get the unique lock for a resource, creating it atomically."""
+        with self._quarantine_lock:
+            lock = self._locks.get(resource_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[resource_id] = lock
+            return lock
 
     def lock_quarantine(self, locked_by: str = "") -> None:
         with self._quarantine_lock:
