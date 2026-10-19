@@ -685,3 +685,18 @@ def test_direct_confirm_commits_durable_reservation_before_terminal_state(tmp_pa
     assert final_record.budget_committed is True
     assert state.reserved == Decimal("0")
     assert state.committed == Decimal("10.0")
+
+
+def test_resume_reserved_requires_live_durable_reservation(tmp_path):
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path)
+    passage, _result = _adjudicate_durable_budget(gov)
+    record = gov.registry.get(passage.idempotency_key)
+    assert record.reservation_id
+
+    released = backend.release(record.reservation_id)
+    assert released.status == "RELEASED"
+
+    resumed = gov.resume_existing(passage.idempotency_key)
+    assert resumed["action"] != "dispatch"
+    assert resumed["operation_state"] == OperationState.RESERVED.value
+    assert "durable" in resumed["reason"].lower() or "reconcil" in resumed["reason"].lower()
