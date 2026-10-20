@@ -790,6 +790,14 @@ class DualKernelGovernor:
                 "tau_k_expired": tau_status.get("expired", False),
             }
         elif state == OperationState.RESERVED:
+            if self._quarantine_blocks():
+                return {
+                    "idempotency_key": idempotency_key,
+                    "action": "await_quarantine_release",
+                    "reason": "QUARANTINE_LOCK active; reserved operation cannot be dispatched.",
+                    "operation_state": state.value,
+                    "passage_id": record.passage_id,
+                }
             if self.consensus_backend is not None and record.resource_id and record.amount > 0:
                 if not record.reservation_id:
                     return {
@@ -2210,11 +2218,22 @@ class DualKernelGovernor:
                             "operation_state": current.state.value,
                             "reason": reason,
                         }
-                    return self._re_adjudicate_hold(
-                        passage, pressure, velocity, capacity, option_space,
-                        authority, context_fit, evidence_quality, irreversibility_materiality,
-                        delegation, resource_id, amount, trajectory_id,
-                    )
+                    # HOLD -> RESERVED is a fresh admission. Serialize its
+                    # re-adjudication and durable transition with the same
+                    # shared gate as ordinary admission/dispatch.
+                    with self.membrane.state._quarantine_lock:
+                        with self.registry.quarantine_guard():
+                            if self._quarantine_blocks():
+                                return {
+                                    "hold_resolved": False,
+                                    "operation_state": current.state.value,
+                                    "reason": "QUARANTINE_LOCK is active; HOLD cannot resolve to admission.",
+                                }
+                            return self._re_adjudicate_hold(
+                                passage, pressure, velocity, capacity, option_space,
+                                authority, context_fit, evidence_quality, irreversibility_materiality,
+                                delegation, resource_id, amount, trajectory_id,
+                            )
         except Exception:
             current = self.registry.get(idempotency_key)
             return {

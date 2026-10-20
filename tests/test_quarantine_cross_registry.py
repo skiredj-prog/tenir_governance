@@ -278,3 +278,31 @@ def test_corrupt_quarantine_mark_fails_closed_and_cannot_be_released(tmp_path):
     assert "corrupt" in refused["reason"]
     with pytest.raises(RuntimeError, match="corrupt"):
         fresh.lock_quarantine("again")
+
+
+def test_hold_readjudication_cannot_admit_under_shared_quarantine(tmp_path):
+    store = tmp_path / "ops.json"
+    gov = _governor(store)
+    key = "hold-under-quarantine"
+    record = OperationRecord(
+        idempotency_key=key,
+        passage_id="passage-held",
+        agent_id="alice",
+        action_type="read_only",
+    )
+    assert gov.registry.register(record)
+    assert gov.hold_manager.enter_hold(key, tau_k_seconds=3600)["entered"]
+    # A separate registry instance establishes the lock.
+    other = _governor(store)
+    other.lock_quarantine("cross-worker-monitor")
+    result = gov.resolve_hold(
+        key,
+        passage=Passage(
+            passage_id="passage-held", idempotency_key=key,
+            agent_id="alice", action_type="read_only",
+        ),
+        authority=0.9, context_fit=0.9, evidence_quality=0.9,
+    )
+    assert result["hold_resolved"] is False
+    assert "QUARANTINE_LOCK" in result["reason"]
+    assert gov.registry.get(key).state == OperationState.HOLD
