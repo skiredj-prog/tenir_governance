@@ -660,6 +660,7 @@ def test_unbound_membrane_new_incident_also_invalidates_old_proof():
         "operator", "lei", _test_token(second),
     )
     assert accepted["released"] is True
+    assert accepted["receipt"]["incident_id"] == "local-002"
     assert state.quarantine_active is False
     assert state._quarantine_incident_id is None
 
