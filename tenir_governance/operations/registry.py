@@ -155,7 +155,7 @@ _LEGAL_TRANSITIONS = {
     OperationState.HOLD: {OperationState.RESERVED, OperationState.FAILED, OperationState.ESCALATED},
     OperationState.RESERVED: {OperationState.DISPATCHING, OperationState.FAILED},
     OperationState.DISPATCHING: {OperationState.CONFIRMED, OperationState.FAILED, OperationState.UNKNOWN},
-    OperationState.ESCALATED: {OperationState.RESERVED, OperationState.FAILED, OperationState.UNKNOWN},
+    OperationState.ESCALATED: {OperationState.HOLD, OperationState.FAILED, OperationState.UNKNOWN},
     OperationState.UNKNOWN: {OperationState.CONFIRMED, OperationState.FAILED},  # reconcilable
     OperationState.CONFIRMED: set(),  # terminal
     OperationState.FAILED: set(),  # terminal

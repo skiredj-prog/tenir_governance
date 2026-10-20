@@ -195,7 +195,7 @@ def test_failed_authorized_exit_does_not_leave_false_receipt(monkeypatch, tmp_pa
     original = reg.transition_to
 
     def lose_race(idempotency_key, target, *args, **kwargs):
-        if target == OperationState.RESERVED:
+        if target == OperationState.HOLD:
             assert original(idempotency_key, OperationState.UNKNOWN)[0]
             return False, OperationState.UNKNOWN
         return original(idempotency_key, target, *args, **kwargs)
@@ -488,7 +488,7 @@ class TestAuthorizedExit:
     """Test authorized exit from ESCALATED state with ExitReceipt."""
 
     def test_authorize_exit_approved(self):
-        """authorize_exit(approve=True) transitions ESCALATED → RESERVED."""
+        """authorize_exit records approval at HOLD pending fresh admission checks."""
         reg = DurableOperationRegistry()
         rec = OperationRecord(
             idempotency_key="op-exit-1", passage_id="p1",
@@ -507,7 +507,7 @@ class TestAuthorizedExit:
             approve=True,
         )
         assert result["exited"] is True
-        assert result["operation_state"] == OperationState.RESERVED.value
+        assert result["operation_state"] == OperationState.HOLD.value
         assert result["exit_receipt"] is not None
         assert result["exit_receipt"]["authorized_by"] == "operator@org"
         assert result["exit_receipt"]["authorization"] == "ceremony-G-R5-001"
@@ -784,7 +784,7 @@ class TestGovernorHoldLifecycle:
         assert result["operation_state"] == OperationState.ESCALATED.value
 
     def test_governor_authorize_exit(self):
-        """Governor.authorize_exit() transitions ESCALATED → RESERVED."""
+        """Governor.authorize_exit() returns to HOLD pending fresh adjudication."""
         gov, state = _setup_governor()
         from tenir_governance.operations import OperationRecord
         rec = OperationRecord(
@@ -802,7 +802,7 @@ class TestGovernorHoldLifecycle:
             approve=True,
         )
         assert result["exited"] is True
-        assert result["operation_state"] == OperationState.RESERVED.value
+        assert result["operation_state"] == OperationState.HOLD.value
 
     def test_governor_expire_hold(self, monkeypatch):
         """Governor.expire_hold() transitions HOLD → FAILED (fail-closed)."""
@@ -1203,14 +1203,14 @@ class TestHoldStateTransitions:
         reg.transition_to("op-1", OperationState.HOLD)
         assert reg.transition_to("op-1", OperationState.ESCALATED)[0]
 
-    def test_escalated_to_reserved(self):
+    def test_escalated_to_hold_before_fresh_admission(self):
         reg = DurableOperationRegistry()
         rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
                               agent_id="alice", action_type="payment")
         reg.register(rec)
         reg.transition_to("op-1", OperationState.HOLD)
         reg.transition_to("op-1", OperationState.ESCALATED)
-        assert reg.transition_to("op-1", OperationState.RESERVED)[0]
+        assert reg.transition_to("op-1", OperationState.HOLD)[0]
 
     def test_escalated_to_failed(self):
         reg = DurableOperationRegistry()
@@ -1265,7 +1265,7 @@ class TestHoldStateTransitions:
         assert OperationState.RESERVED.is_holding is False
 
     def test_escalated_is_not_terminal(self):
-        """ESCALATED is NOT terminal — it can transition to RESERVED/FAILED/UNKNOWN."""
+        """ESCALATED can leave for HOLD, FAILED, or UNKNOWN; admission is separate."""
         assert OperationState.ESCALATED.is_terminal is False
 
     def test_hold_may_not_have_been_dispatched(self):
@@ -1313,7 +1313,7 @@ class TestHoldPersistence:
         hm.enter_hold("op-persist-2", tau_k_seconds=300)
         hm.escalate_hold("op-persist-2", escalated_by="risk-officer")
 
-        # Authorized exit (transitions ESCALATED → RESERVED, persists receipt)
+        # Authorized exit (transitions ESCALATED → HOLD, persists receipt)
         hm.authorize_exit(
             "op-persist-2",
             authorized_by="operator@org",

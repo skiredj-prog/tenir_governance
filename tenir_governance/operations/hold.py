@@ -23,7 +23,8 @@ HOLD exit paths (from the doctrine):
     1. Evidence becomes sufficient → re-adjudicate → RESERVED (PASS/FLAG)
     2. τ_K expires (unresolved HOLD) → FAIL-CLOSED → FAILED
     3. Escalation → ESCALATED (absorbing until authorized exit)
-    4. Authorized exit from ESCALATED → RESERVED (with ExitReceipt)
+    4. Authorized exit from ESCALATED → HOLD (with ExitReceipt); fresh
+       re-adjudication is required before RESERVED admission
     5. Authorized exit from ESCALATED → FAILED (with ExitReceipt, if denied)
 
     Time-based exit from ESCALATED is REJECTED: τ_K expiry produces UNKNOWN,
@@ -232,7 +233,8 @@ class HoldManager:
             scope: scope of the authorization
             authorization: authorization mechanism (e.g., "ceremony-G-R5-001")
             reason: why the exit is being authorized
-            approve: True → transition to RESERVED (proceed);
+            approve: True → transition to HOLD (authorization recorded,
+                     fresh re-adjudication required before admission);
                      False → transition to FAILED (deny)
 
         Returns a dict with:
@@ -252,6 +254,14 @@ class HoldManager:
                     "exit_receipt": None,
                     "reason": f"Operation is in state {record.state.value}, not ESCALATED."}
 
+        if approve and self._registry.quarantine_is_active():
+            return {
+                "exited": False,
+                "operation_state": record.state.value,
+                "exit_receipt": None,
+                "reason": "QUARANTINE_LOCK is active; authorized exit remains pending.",
+            }
+
         receipt = ExitReceipt(
             authorized_by=authorized_by,
             scope=scope,
@@ -260,7 +270,7 @@ class HoldManager:
             reason=reason,
         )
 
-        target_state = OperationState.RESERVED if approve else OperationState.FAILED
+        target_state = OperationState.HOLD if approve else OperationState.FAILED
         success, _prev = self._registry.transition_to(
             idempotency_key,
             target_state,
