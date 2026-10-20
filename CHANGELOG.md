@@ -31,7 +31,7 @@ This release candidate is not published. It targets single-host deployments with
 - This entry must be converted from candidate notes to final release notes before tagging; the release workflow rejects an entry still marked as a release candidate.
 
 ### Compatibility note
-- Changes previously tracked under 5.6.1 are incorporated here; 5.7.0 is their release entry.
+- v5.7.0 extends the separately published 5.6.1 patch (2026-10-20); the latter remains its own release entry.
 - `admissible_structural` describes catalog coherence only and does not imply `effective_guarantee_demonstrated`.
 
 ---
@@ -40,6 +40,59 @@ This release candidate is not published. It targets single-host deployments with
 All notable changes to TENIR-Gov are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
+
+---
+
+## [5.6.1] — 2026-10-20 — Published patch: Budget safety and deterministic Raft state
+
+### Corrected in this branch
+- Reject `reconcile_commit()` unless the reservation is `RESERVED`; repeated commits remain idempotent, while a late effect after `RELEASED` returns `RECONCILE_CONFLICT` and records a deterministic incident.
+- Replace replicated wall-clock timestamps with a replicated logical clock.
+- Validate finite, positive reservation amounts and non-negative finite capacities; preserve decimal arithmetic in the replicated budget and fractional values in read results.
+- Return the actual reservation state on idempotent replay.
+- Make resource registration non-destructive; reject implicit capacity changes.
+
+### Additional safety corrections under review
+- Preserve compatibility with five-argument legacy Raft reserve commands and normalize restored float accounting before Decimal arithmetic.
+- Preserve exact Decimal values in Raft state reads and fractional values in the shared consensus state contract.
+- Validate governor amounts before budget gating; bind dispatch resource and amount to the adjudicated durable record; block dispatch under QUARANTINE_LOCK and serialize quarantine transitions against dispatch/provider execution.
+- Add regression tests for legacy state/journal compatibility, large-capacity decimal precision, invalid amounts, dispatch identity mismatch, pre-reserved operations under quarantine, empty Stripe search, concurrent reconciliation, and linearizability-checker branch isolation.
+- Keep Stripe reconciliation UNKNOWN when search returns no result; an empty search is not proof of non-execution. Serialize reconciliation state transitions with budget release/refund to prevent duplicate refunds.
+- Prevent live resource replacement from orphaning reservations or swapping the resource lock; correct the sequential oracle so COMMITTED cannot follow RELEASED, bind concrete reservation IDs across replay/commit, and exercise the actual concurrent Raft history.
+- Normalize Decimal input before the single-host backend persists reservation JSON; add regressions for Decimal idempotency, HOLD identity preservation, and preventing a HOLD veto from releasing another operation’s reservation.
+- Replace fixed leader-failover sleeps with bounded polling across the three- and five-node tests; release reserved accounting when an UNKNOWN reservation is explicitly reconciled as non-executed.
+- Allow recovery reconciliation to start from DISPATCHING after a crash; normalize indeterminate outcomes to UNKNOWN and check terminal transition success before reporting reconciliation.
+
+### Release metadata / DOI provenance
+- Software citation DOI: `10.5281/zenodo.21277138` (consistent with
+  `pyproject.toml` and the existing public software citation).
+- The legacy `10.5281/zenodo.21264803` claim is not asserted as a
+  peer-reviewed article pending confirmation of its publication details.
+- Python 3.12 wheel/sdist and full-test preflight runs as a **non-publishing**
+  PR CI job; no release tag is created by this process.
+
+### FM-20 release boundary (mandatory while unresolved)
+- PySyncObj uses pickle command transport. Raft in 5.6.1 is **experimental only**:
+  constructors reject production, staging, missing environment declarations,
+  multi-host scope, remote addresses, and wildcard bindings before network startup.
+- Explicit `TENIR_ENV=test` or `TENIR_ENV=development` and loopback-only peers
+  are required for local integration tests; this does **not** demonstrate
+  physical multi-host security or resolve FM-20.
+- The tag-triggered release workflow must install `.[test,raft]` and execute
+  the Raft suite explicitly before PyPI publishing; no tag is authorized by
+  this release-candidate preparation.
+
+### Test perimeter
+- Reproduction: `TENIR_ENV=test python -m pip install -e ".[test,raft]" && TENIR_ENV=test pytest -q tests/test_raft_backend.py`
+- Included: local `pysyncobj` Raft integration tests, I8 regressions, invalid-amount cases, idempotent replay, resource re-registration, logical-clock replication and fractional-budget accounting.
+- Environment: test cluster nodes use `localhost` and separate ports; this is not a physical multi-host network test.
+- Excluded: Byzantine tolerance, hardened peer transport/authentication, third-party attestation, and proof of exactly-once external effects.
+- Raft regression suite result for the original implementation snapshot: **46 collected, 46 passed, 0 failed, 0 skipped** in 119.01 s on GitHub Actions `ubuntu-latest`, Python 3.11.17, pytest 8.4.2, `pysyncobj` 0.3.17. Tested implementation commit: `82037052556c5bfd731bd59fe958cf4df61d21b6`; CI run: [#39205580977](https://github.com/skiredj-prog/tenir_governance/actions/runs/39205580977). For current-branch validation, first install the dependencies shown in the reproduction command above, then run `pytest -q tests/test_raft_backend.py`.
+
+### Status
+- Release status: published as v5.6.1 on 2026-10-20; historical test counts retain their original commit and run identifiers.
+- `admissible_structural` describes catalog coherence only and does not imply `effective_guarantee_demonstrated`.
+
 
 ---
 
