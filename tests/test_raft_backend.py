@@ -91,20 +91,61 @@ def test_fm20_explicit_loopback_scope_does_not_require_network_start():
 # ---------------------------------------------------------------------------
 
 def _make_cluster(n=3, base_port=6000):
-    """Create a cluster of n Raft nodes."""
+    """Create a ready cluster or fail with status and clean up partial setup."""
     nodes = []
     addrs = [f"localhost:{base_port + i}" for i in range(n)]
-    for i in range(n):
-        store = tempfile.mkdtemp(prefix=f"raft_node{i}_")
-        others = [addrs[j] for j in range(n) if j != i]
-        node = RaftConsensusBackend(
-            addrs[i], others, store_dir=store, peer_auth_key=TEST_PEER_AUTH_KEY,
-        )
-        nodes.append(node)
-    # Wait for all nodes to be ready
-    for node in nodes:
-        node.wait_ready(timeout=10.0)
+    try:
+        for i in range(n):
+            store = tempfile.mkdtemp(prefix=f"raft_node{i}_")
+            others = [addrs[j] for j in range(n) if j != i]
+            node = RaftConsensusBackend(
+                addrs[i], others, store_dir=store, peer_auth_key=TEST_PEER_AUTH_KEY,
+            )
+            nodes.append(node)
+        for index, node in enumerate(nodes):
+            if not node.wait_ready(timeout=10.0):
+                pytest.fail(
+                    f"Raft node {addrs[index]} did not become ready within 10s; "
+                    f"cluster_status={[peer.get_status() for peer in nodes]!r}. "
+                    "Verify that authenticated loopback TCP is permitted in this environment."
+                )
+    except BaseException:
+        _teardown(nodes)
+        raise
     return nodes
+
+
+@pytest.mark.parametrize("failure", ["timeout", "startup"])
+def test_cluster_setup_reports_failure_and_destroys_created_nodes(monkeypatch, failure):
+    """A failed setup cannot leave threads or listeners behind for later tests."""
+    created = []
+
+    class UnreadyNode:
+        def __init__(self, address, peers, **kwargs):
+            if failure == "startup" and created:
+                raise OSError("simulated listener failure")
+            self.address = address
+            self.destroyed = False
+            created.append(self)
+
+        def wait_ready(self, timeout):
+            return False
+
+        def get_status(self):
+            return {"address": self.address, "leader": None}
+
+        def destroy(self):
+            self.destroyed = True
+
+    monkeypatch.setattr(sys.modules[__name__], "RaftConsensusBackend", UnreadyNode)
+    if failure == "timeout":
+        with pytest.raises(pytest.fail.Exception, match="cluster_status=.*leader"):
+            _make_cluster()
+    else:
+        with pytest.raises(OSError, match="simulated listener failure"):
+            _make_cluster()
+    assert len(created) == (3 if failure == "timeout" else 1)
+    assert all(node.destroyed for node in created)
 
 
 def _get_leader(nodes):

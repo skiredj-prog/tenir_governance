@@ -269,7 +269,14 @@ class DurableBudgetCoordinator:
         self._lock = threading.Lock()
         self._resources: dict[str, dict] = {}  # Decimal counters: capacity, reserved, consumed
         if store_path:
-            self._load()
+            # Initial reads share the writer gate too: an atomic replacement
+            # can deny a concurrent open on Windows or hide the initial store.
+            flock = self._lock_file()
+            try:
+                self._load()
+            finally:
+                if flock:
+                    flock.close()
 
     def register(self, resource) -> None:
         """Register once; preserve accounting for already-known resources."""
