@@ -6,9 +6,12 @@ from typing import Any
 
 
 from .kernel import TenirKernel
+from .deployment_manifest import verify_deployment_manifest
+from tenir_governance.deployment_safety import require_production_manifest
 
 
 def create_app():
+    require_production_manifest(os.environ, verify_deployment_manifest)
     try:
         from fastapi import FastAPI, Header, HTTPException
         from fastapi.concurrency import run_in_threadpool

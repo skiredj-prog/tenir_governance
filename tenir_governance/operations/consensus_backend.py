@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import tempfile
 import threading
 import time
 import uuid
@@ -40,11 +41,7 @@ from typing import Protocol, runtime_checkable
 from tenir_governance.operations.budget import (
     DurableBudgetCoordinator, _decimal_add, _decimal_subtract,
 )
-
-try:
-    import fcntl
-except ImportError:
-    fcntl = None
+from tenir_governance.operations.file_lock import acquire_file_lock
 
 
 # --- Result types (matching consensus-interface-v1.json) ---
@@ -75,6 +72,7 @@ class RefundResult:
 class ReconciliationResult:
     status: str  # CONFIRMED | FAILED | UNRESOLVED | NOT_FOUND | RECONCILE_CONFLICT | ERROR
     effect_observed: bool | None = None
+    compensation_id: str | None = None
 
 
 @dataclass
@@ -84,6 +82,7 @@ class ConsensusState:
     committed: int | float | Decimal
     capacity: int | float | Decimal
     reservations: list = field(default_factory=list)
+    compensations: list = field(default_factory=list)
 
 
 # --- ConsensusBackend Protocol (matches consensus-interface-v1.json) ---
@@ -195,37 +194,51 @@ class SingleHostLockBackend:
 
     def _persist_reservations(self, reservations: dict):
         """Persist reservation registry atomically."""
-        tmp = self._reservations_store + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(reservations, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp, self._reservations_store)
+        fd, tmp = tempfile.mkstemp(
+            prefix="reservations.", suffix=".tmp", dir=self._store_dir,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(reservations, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, self._reservations_store)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
     def _persist_transaction(self, transaction: dict) -> None:
         """Durably record a single in-flight budget/registry transaction."""
-        tmp = self._transaction_store + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(transaction, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, self._transaction_store)
-        dir_fd = os.open(self._store_dir, os.O_RDONLY)
+        fd, tmp = tempfile.mkstemp(
+            prefix="transaction.", suffix=".tmp", dir=self._store_dir,
+        )
         try:
-            os.fsync(dir_fd)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(transaction, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, self._transaction_store)
+            if os.name != "nt":
+                dir_fd = os.open(self._store_dir, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
         finally:
-            os.close(dir_fd)
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
     def _clear_transaction(self) -> None:
         try:
             os.unlink(self._transaction_store)
         except FileNotFoundError:
             return
-        dir_fd = os.open(self._store_dir, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        if os.name != "nt":
+            dir_fd = os.open(self._store_dir, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
 
     def _snapshot(self, resource_id: str) -> dict:
         state = self._coordinator.get_state_exact(resource_id)
@@ -301,15 +314,8 @@ class SingleHostLockBackend:
 
     def _lock_file(self):
         """Acquire cross-process exclusive lock on reservations store."""
-        if fcntl is None:
-            return None
         lock_path = self._reservations_store + ".lock"
-        if not os.path.exists(lock_path):
-            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
-            os.close(fd)
-        f = open(lock_path, "r+")
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        return f
+        return acquire_file_lock(lock_path)
 
     def reserve(self, key: str, amount: int | float | Decimal, resource_id: str) -> ReservationResult:
         """Reserve budget for an idempotency key.

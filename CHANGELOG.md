@@ -1,34 +1,37 @@
 # Changelog
 
-## [5.6.1] — Pending release — Patch: Budget safety and deterministic Raft state
+## [5.7.0] — Release candidate — Safety, durable accounting and deployment evidence
 
-### Corrected in this branch
-- Reject `reconcile_commit()` unless the reservation is `RESERVED`; repeated commits remain idempotent, while a late effect after `RELEASED` returns `RECONCILE_CONFLICT` and records a deterministic incident.
-- Replace replicated wall-clock timestamps with a replicated logical clock.
-- Validate finite, positive reservation amounts and non-negative finite capacities; preserve decimal arithmetic in the replicated budget and fractional values in read results.
-- Return the actual reservation state on idempotent replay.
-- Make resource registration non-destructive; reject implicit capacity changes.
+This release candidate is not published. It targets single-host deployments with explicitly bounded guarantees. Any Harv activity is an independent review, not a certification.
 
-### Additional safety corrections under review
-- Preserve compatibility with five-argument legacy Raft reserve commands and normalize restored float accounting before Decimal arithmetic.
-- Preserve exact Decimal values in Raft state reads and fractional values in the shared consensus state contract.
-- Validate governor amounts before budget gating; bind dispatch resource and amount to the adjudicated durable record; block dispatch under QUARANTINE_LOCK and serialize quarantine transitions against dispatch/provider execution.
-- Add regression tests for legacy state/journal compatibility, large-capacity decimal precision, invalid amounts, dispatch identity mismatch, pre-reserved operations under quarantine, empty Stripe search, concurrent reconciliation, and linearizability-checker branch isolation.
-- Keep Stripe reconciliation UNKNOWN when search returns no result; an empty search is not proof of non-execution. Serialize reconciliation state transitions with budget release/refund to prevent duplicate refunds.
-- Prevent live resource replacement from orphaning reservations or swapping the resource lock; correct the sequential oracle so COMMITTED cannot follow RELEASED, bind concrete reservation IDs across replay/commit, and exercise the actual concurrent Raft history.
-- Normalize Decimal input before the single-host backend persists reservation JSON; add regressions for Decimal idempotency, HOLD identity preservation, and preventing a HOLD veto from releasing another operation’s reservation.
-- Replace fixed leader-failover sleeps with bounded polling across the three- and five-node tests; release reserved accounting when an UNKNOWN reservation is explicitly reconciled as non-executed.
-- Allow recovery reconciliation to start from DISPATCHING after a crash; normalize indeterminate outcomes to UNKNOWN and check terminal transition success before reporting reconciliation.
+### Added
+- Single-host SQLite WAL consensus backend with atomic budget/reservation transactions, rollback, and validated migration from legacy JSON state.
+- Deployment manifest schema and verifier, with explicit restrictions for unsafe production configurations.
+- Canonical payload hashing in permits and dispatch-time payload verification.
+- Fail-closed HOLD handling when provider failure conflicts with an S3 `HYPOTHESIS_VIOLATED` signal.
 
-### Test perimeter
-- Reproduction: `python -m pip install -e ".[test]" "pysyncobj==0.3.17" && pytest -q tests/test_raft_backend.py`
-- Included: local `pysyncobj` Raft integration tests, I8 regressions, invalid-amount cases, idempotent replay, resource re-registration, logical-clock replication and fractional-budget accounting.
-- Environment: test cluster nodes use `localhost` and separate ports; this is not a physical multi-host network test.
-- Excluded: Byzantine tolerance, hardened peer transport/authentication, third-party attestation, and proof of exactly-once external effects.
-- Raft regression suite result for the original implementation snapshot: **46 collected, 46 passed, 0 failed, 0 skipped** in 119.01 s on GitHub Actions `ubuntu-latest`, Python 3.11.17, pytest 8.4.2, `pysyncobj` 0.3.17. Tested implementation commit: `82037052556c5bfd731bd59fe958cf4df61d21b6`; CI run: [#39205580977](https://github.com/skiredj-prog/tenir_governance/actions/runs/39205580977). For current-branch validation, first install the dependencies shown in the reproduction command above, then run `pytest -q tests/test_raft_backend.py`.
+### Changed
+- Raft replicated state uses deterministic inputs and a replicated logical clock; reservation identifiers are created outside replicated methods.
+- Budget and membrane boundaries reject non-positive and non-finite amounts.
+- Cross-process persistence uses platform-aware locks and atomic file replacement.
+- Recovery and reconciliation preserve reservation ownership and idempotency across retries and restart.
 
-### Status
-- Release status: not released by this change; do not infer a PyPI publication from this changelog entry.
+### Fixed
+- A late external effect after reservation release can no longer mutate `RELEASED` to `COMMITTED`; it records an idempotent compensation transaction instead.
+- Unknown provider outcomes remain unresolved until evidence supports a safe reconciliation decision.
+
+### Security and deployment limits
+- FM-20 remains **Open**: PySyncObj command transport still uses pickle. `production_allowed` is fixed to `false`; v5.7.0 rejects `HOST_SCOPE=multi-host`, rejects production manifests with Raft enabled, and requires a verified manifest for production startup. Remediation target: 5.8.0. This is a hard-disable mitigation, not a transport fix.
+- Use the SQLite WAL backend for the bounded single-host deployment profile.
+- This package does not claim Byzantine fault tolerance or exactly-once external provider effects.
+
+### Verification status
+- No test result is claimed for this candidate until it has been executed against its exact committed SHA. The release workflow installs `.[api,test,raft]`, requires PySyncObj, runs the Raft suite explicitly, then runs the full suite and rejects skipped Raft tests.
+- The Raft tests use local loopback clusters and do not constitute a physical multi-host network or production security test.
+- This entry must be converted from candidate notes to final release notes before tagging; the release workflow rejects an entry still marked as a release candidate.
+
+### Compatibility note
+- Changes previously tracked under 5.6.1 are incorporated here; 5.7.0 is their release entry.
 - `admissible_structural` describes catalog coherence only and does not imply `effective_guarantee_demonstrated`.
 
 ---

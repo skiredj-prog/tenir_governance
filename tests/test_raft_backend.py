@@ -26,6 +26,8 @@ pysyncobj = pytest.importorskip("pysyncobj")
 from tenir_governance.operations.raft_backend import RaftConsensusBackend, _RaftStateMachine
 from tenir_governance.operations.consensus_backend import ConsensusState
 
+TEST_PEER_AUTH_KEY = "test-only-shared-raft-secret-32chars-min"
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -38,7 +40,9 @@ def _make_cluster(n=3, base_port=6000):
     for i in range(n):
         store = tempfile.mkdtemp(prefix=f"raft_node{i}_")
         others = [addrs[j] for j in range(n) if j != i]
-        node = RaftConsensusBackend(addrs[i], others, store_dir=store)
+        node = RaftConsensusBackend(
+            addrs[i], others, store_dir=store, peer_auth_key=TEST_PEER_AUTH_KEY,
+        )
         nodes.append(node)
     # Wait for all nodes to be ready
     for node in nodes:
@@ -1085,6 +1089,32 @@ class TestLinearizability:
 # ---------------------------------------------------------------------------
 
 class TestListOneRegressions:
+    def test_refund_committed_reservation_is_replicated_and_idempotent(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader is not None
+        assert leader.register_resource("budget-refund-L1", 100) == "REGISTERED"
+
+        reservation = leader.reserve("refund-key", 30, "budget-refund-L1")
+        assert reservation.status == "RESERVED"
+        assert leader.commit(reservation.reservation_id).status == "COMMITTED"
+        assert leader.get_state("budget-refund-L1").committed == 30
+
+        refunded = leader.refund(reservation.reservation_id)
+        assert refunded.status == "REFUNDED"
+        assert leader.refund(reservation.reservation_id).status == "ALREADY_REFUNDED"
+        assert _wait_until(lambda: all(
+            node.get_state("budget-refund-L1").committed == 0
+            for node in cluster
+        )), "refund did not converge to every replica"
+
+        for node in cluster:
+            state = node.get_state("budget-refund-L1")
+            assert state.reserved == 0
+            assert state.committed == 0
+            assert state.available == state.capacity == 100
+            by_id = {item["reservation_id"]: item for item in state.reservations}
+            assert by_id[reservation.reservation_id]["state"] == "REFUNDED"
+
     def test_reconcile_commit_after_release_cannot_overconsume_budget(self, cluster):
         leader = _get_leader(cluster)
         assert leader is not None
@@ -1100,11 +1130,17 @@ class TestListOneRegressions:
         result = leader.reconcile("late-effect-A")
         assert result.status == "RECONCILE_CONFLICT"
         assert result.effect_observed is True
+        assert result.compensation_id == f"compensation:{a.reservation_id}"
         assert _wait_until(lambda: all(
             node.get_state("budget-I8-L1").reserved == 100
             and node.get_state("budget-I8-L1").committed == 0
             for node in cluster
         )), "followers did not converge to the expected budget state"
+        assert _wait_until(lambda: all(
+            any(item["compensation_id"] == result.compensation_id
+                for item in node.get_state("budget-I8-L1").compensations)
+            for node in cluster
+        )), "compensation record did not converge to every replica"
         for node in cluster:
             state = node.get_state("budget-I8-L1")
             assert state.reserved == 100
@@ -1113,6 +1149,27 @@ class TestListOneRegressions:
             by_id = {r["reservation_id"]: r for r in state.reservations}
             assert by_id[a.reservation_id]["state"] == "RELEASED"
             assert by_id[b.reservation_id]["state"] == "RESERVED"
+            compensation = next(
+                item for item in state.compensations
+                if item["compensation_id"] == result.compensation_id
+            )
+            assert compensation["original_reservation_id"] == a.reservation_id
+            assert compensation["amount"] == Decimal("100")
+            assert compensation["status"] == "REQUIRED"
+
+        # Reconciliation replay must reuse the same compensation transaction.
+        replay = leader.reconcile("late-effect-A")
+        assert replay.compensation_id == result.compensation_id
+        assert _wait_until(lambda: all(
+            any(item["compensation_id"] == result.compensation_id
+                for item in node.get_state("budget-I8-L1").compensations)
+            for node in cluster
+        )), "replayed compensation record did not converge to every replica"
+        assert all(
+            len([item for item in node.get_state("budget-I8-L1").compensations
+                 if item["compensation_id"] == result.compensation_id]) == 1
+            for node in cluster
+        )
 
     def test_idempotent_reserve_returns_actual_terminal_state(self, cluster):
         leader = _get_leader(cluster)

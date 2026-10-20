@@ -32,18 +32,17 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 import hashlib
 from contextlib import contextmanager
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from enum import Enum
-from typing import Optional
+from typing import Any, Mapping, Optional
 from uuid import uuid4
 
-try:
-    import fcntl
-except ImportError:
-    fcntl = None  # Windows fallback (not used in tests)
+from .payload_binding import EMPTY_PAYLOAD_HASH
+from .file_lock import acquire_file_lock
 
 
 class OperationState(str, Enum):
@@ -228,6 +227,9 @@ class OperationRecord:
     # Durable SingleHostLockBackend reservation owning this operation budget.
     # Empty only for legacy records or operations without a budget reservation.
     reservation_id: str = ""
+    # SHA-256 of the canonical JSON action payload approved at adjudication.
+    # The empty-object digest is the backwards-compatible default.
+    payload_hash: str = EMPTY_PAYLOAD_HASH
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -252,7 +254,7 @@ class DurableOperationRegistry:
 
     For the prototype, durability is provided via a file-backed JSON store
     with atomic rename + fsync. Cross-process atomicity is provided via
-    fcntl.flock file-level locking. In production, this would be:
+    operating-system file-level locking. In production, this would be:
         - A transactional database with SELECT ... FOR UPDATE
         - A write-ahead log with crash recovery
         - A distributed consensus system (Raft, Paxos)
@@ -260,7 +262,7 @@ class DurableOperationRegistry:
     DURABILITY MODEL:
         - Process crash (kill -9): The last successfully persisted state
           survives. Atomic rename ensures the store file is never partially
-          written. The fcntl.flock is released automatically when the process
+          written. The OS file lock is released automatically when the process
           dies, so a crashed process does not deadlock the registry.
         - Power loss: Survives IF the directory fsync in _persist() completes.
           The temp file is fsync'd before rename, and the parent directory is
@@ -305,30 +307,18 @@ class DurableOperationRegistry:
         sets the _corrupted flag so register() and transition_to() can refuse
         new operations, preventing silent duplicate adjudication.
 
-        Preserves hold_record from existing in-memory records when reloading,
-        so that HoldManager modifications are not lost during state transitions
-        that trigger a disk reload.
+        The durable store is authoritative. In particular, do not carry over a
+        HoldRecord from memory: another registry instance may have committed a
+        newer state and matching metadata since this instance last loaded it.
         """
         if not self._store_path or not os.path.exists(self._store_path):
             return
         try:
             with open(self._store_path, "r") as f:
                 data = json.load(f)
-            # Preserve hold_records from existing in-memory records.
-            # In-memory hold_records are always more up-to-date than disk
-            # because HoldManager modifies them in memory before calling
-            # transition_to(), which triggers this reload. Without this
-            # preservation, exit_reason and exit_receipt set by
-            # resolve_hold() / authorize_exit() would be lost.
-            existing_hold_records = {
-                k: v.hold_record for k, v in self._records.items() if v.hold_record
-            }
             self._records = {}
             for key, rec in data.items():
                 record = OperationRecord.from_dict(rec)
-                if key in existing_hold_records:
-                    # Always prefer in-memory hold_record (most up-to-date)
-                    record.hold_record = existing_hold_records[key]
                 self._records[key] = record
             self._corrupted = False
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
@@ -348,51 +338,56 @@ class DurableOperationRegistry:
           survives. A crash during _persist leaves either the old file
           (rename not yet done) or the new file (rename done). The temp
           file may be orphaned but is harmless.
-        - Power loss: survives IF fsync of the parent directory completes.
-          Without the directory fsync, the rename may not be flushed to
-          disk and power loss could revert to the old file. With it, the
-          rename is durable.
+        - Power loss: on POSIX systems, survives IF fsync of the parent
+          directory completes. Python's standard library does not provide
+          portable directory fsync on Windows, so this implementation does
+          not claim power-loss durability there.
 
         In production, replace this with a database transaction (which
         handles all of this internally).
         """
         if self._store_path:
             data = {k: v.to_dict() for k, v in self._records.items()}
-            tmp = self._store_path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(data, f)
-                f.flush()
-                os.fsync(f.fileno())
-            os.rename(tmp, self._store_path)
-            # fsync the parent directory so the rename survives power loss
-            dir_fd = os.open(os.path.dirname(self._store_path) or ".", os.O_RDONLY)
+            directory = os.path.dirname(os.path.abspath(self._store_path))
+            prefix = os.path.basename(self._store_path) + "."
+            fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=directory)
             try:
-                os.fsync(dir_fd)
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    json.dump(data, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(tmp, self._store_path)
+                # Windows does not support opening directories for fsync.
+                if os.name != "nt":
+                    dir_fd = os.open(directory, os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
             finally:
-                os.close(dir_fd)
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
 
     def _lock_file(self):
         """Acquire a cross-process exclusive lock on the store file.
 
-        Uses fcntl.flock for cross-process atomicity. The caller must
-        close the returned file handle to release the lock.
-        Returns None if no store path or fcntl is unavailable.
+        The caller must close the returned file handle to release the lock.
+        Returns None for an in-memory registry.
         """
-        if not self._store_path or fcntl is None:
+        if not self._store_path:
             return None
-        # Ensure the lock target exists
         lock_path = self._store_path + ".lock"
-        if not os.path.exists(lock_path):
-            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
-            os.close(fd)
-        f = open(lock_path, "r+")
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        return f
+        return acquire_file_lock(lock_path)
 
     @property
     def is_corrupted(self) -> bool:
         """True if the persistent store was corrupted on load."""
         return self._corrupted
+
+    @property
+    def is_persistent(self) -> bool:
+        """True when registry records are backed by a durable file store."""
+        return bool(self._store_path)
 
     def register(self, record: OperationRecord) -> bool:
         """Register a new operation. Returns False if key already exists.
@@ -453,22 +448,13 @@ class DurableOperationRegistry:
             with lock:
                 yield
             return
-        if fcntl is None:
-            raise RuntimeError(
-                "Cross-process settlement requires fcntl; refusing unsafe settlement."
-            )
         digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
         lock_path = f"{self._store_path}.{digest}.settlement.lock"
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        lock_file = os.fdopen(fd, "r+")
+        lock_file = acquire_file_lock(lock_path)
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             yield
         finally:
-            try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            finally:
-                lock_file.close()
+            lock_file.close()
 
     def get(self, idempotency_key: str) -> OperationRecord | None:
         with self._lock:
@@ -482,6 +468,9 @@ class DurableOperationRegistry:
         idempotency_key: str,
         new_state: OperationState,
         claimed_by: str = "",
+        *,
+        hold_record: HoldRecord | None = None,
+        hold_record_changes: Mapping[str, Any] | None = None,
     ) -> tuple[bool, OperationState | None]:
         """Atomically transition an operation to a new state.
 
@@ -505,7 +494,29 @@ class DurableOperationRegistry:
         Cross-process safe: acquires a file lock, reloads from disk to see
         the latest state from other processes, then atomically checks and
         persists.
+
+        HOLD lifecycle metadata associated with the transition can be passed
+        as a new ``hold_record`` or as ``hold_record_changes``. The metadata
+        is applied only after the transition is legal and persisted in the
+        same registry write as the state change.
         """
+        if hold_record is not None and hold_record_changes:
+            raise ValueError("provide hold_record or hold_record_changes, not both")
+        if hold_record is not None and not isinstance(hold_record, HoldRecord):
+            raise TypeError("hold_record must be a HoldRecord")
+        changes = dict(hold_record_changes or {})
+        allowed_hold_fields = {
+            "escalated_at", "escalated_by", "exit_reason", "exit_receipt",
+        }
+        unknown_hold_fields = set(changes) - allowed_hold_fields
+        if unknown_hold_fields:
+            raise ValueError(f"unsupported hold record field(s): {sorted(unknown_hold_fields)}")
+        for name in ("escalated_at", "escalated_by", "exit_reason"):
+            if name in changes and not isinstance(changes[name], str):
+                raise TypeError(f"{name} must be a string")
+        if "exit_receipt" in changes and changes["exit_receipt"] is not None and not isinstance(changes["exit_receipt"], ExitReceipt):
+            raise TypeError("exit_receipt must be an ExitReceipt or None")
+
         with self._lock:
             if self._corrupted:
                 raise RuntimeError(
@@ -540,10 +551,34 @@ class DurableOperationRegistry:
                     if record.state.is_dispatched:
                         return False, prev_state  # already dispatched
 
+                if hold_record is not None and record.hold_record is not None:
+                    return False, prev_state
+                if changes and record.hold_record is None:
+                    return False, prev_state
+
+                previous_hold_record = record.hold_record
+                previous_claimed_by = record.dispatch_claimed_by
                 record.state = new_state
+                if hold_record is not None:
+                    record.hold_record = hold_record
+                elif changes:
+                    record.hold_record = replace(record.hold_record, **changes)
                 if claimed_by:
                     record.dispatch_claimed_by = claimed_by
-                self._persist()
+                try:
+                    self._persist()
+                except BaseException:
+                    # The rename may or may not have completed before a
+                    # persistence error (for example, a directory fsync
+                    # failure). Reload the durable record so state and metadata
+                    # stay paired with whichever side of the atomic replace won.
+                    if self._store_path and os.path.exists(self._store_path):
+                        self._load()
+                    else:
+                        record.state = prev_state
+                        record.hold_record = previous_hold_record
+                        record.dispatch_claimed_by = previous_claimed_by
+                    raise
                 return True, prev_state
             finally:
                 if flock:

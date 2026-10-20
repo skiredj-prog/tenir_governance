@@ -28,6 +28,7 @@ from typing import Any, Optional
 from ..objects import Agent, Passage, Trajectory, Delegation, Resource, MissionInvariant
 from ..objects.passage import ExecutionStatus as PassageStatus
 from ..composition.decisions import Decision, CheckType
+from ..operations.budget import _positive_finite_float
 
 
 def _utc_now() -> str:
@@ -195,6 +196,7 @@ class TransitionMembrane:
         resource_id: str | None = None,
         amount: float = 0.0,
         trajectory_id: str | None = None,
+        existing_reservation_amount: float = 0.0,
     ) -> dict[str, Any]:
         """Evaluate all applicable guards for a proposed passage.
 
@@ -247,21 +249,37 @@ class TransitionMembrane:
         # I8 — Aggregate budget (MANDATORY when resource is in scope)
         # Pure check: the membrane never mutates the budget. Reservation is
         # owned by the governor's state transitions (see DualKernelGovernor).
-        if resource_id is not None and amount > 0:
-            resource = self.state.resources.get(resource_id)
-            if resource is None:
-                checks.append(CheckResult("I8", CheckType.MANDATORY, Decision.HARD_VETO,
-                                           f"I8: Resource '{resource_id}' not registered."))
+        if resource_id is not None:
+            normalized_amount = _positive_finite_float(amount)
+            if normalized_amount is None:
+                checks.append(CheckResult(
+                    "I8", CheckType.MANDATORY, Decision.HARD_VETO,
+                    "I8: Budget amount must be finite and strictly positive.",
+                ))
             else:
-                lock = self.state.get_lock(resource_id)
-                with lock:
-                    if resource.available >= amount:
-                        checks.append(CheckResult("I8", CheckType.MANDATORY, Decision.PASS,
-                                                   f"I8: Budget OK — {amount} within available {resource.available:.2f}."))
-                    else:
-                        checks.append(CheckResult("I8", CheckType.MANDATORY, Decision.HARD_VETO,
-                                                   f"I8: Aggregate budget violation — requested {amount} but only "
-                                                   f"{resource.available:.2f} available."))
+                amount = normalized_amount
+                resource = self.state.resources.get(resource_id)
+                if resource is None:
+                    checks.append(CheckResult("I8", CheckType.MANDATORY, Decision.HARD_VETO,
+                                               f"I8: Resource '{resource_id}' not registered."))
+                else:
+                    lock = self.state.get_lock(resource_id)
+                    with lock:
+                        existing = _positive_finite_float(existing_reservation_amount)
+                        if not isinstance(existing_reservation_amount, bool) and existing_reservation_amount == 0:
+                            existing = 0.0
+                        if existing is None:
+                            checks.append(CheckResult(
+                                "I8", CheckType.MANDATORY, Decision.HARD_VETO,
+                                "I8: Existing reservation amount is invalid.",
+                            ))
+                        elif resource.available + existing >= amount:
+                            checks.append(CheckResult("I8", CheckType.MANDATORY, Decision.PASS,
+                                                       f"I8: Budget OK — {amount} within available {resource.available + existing:.2f}."))
+                        else:
+                            checks.append(CheckResult("I8", CheckType.MANDATORY, Decision.HARD_VETO,
+                                                       f"I8: Aggregate budget violation — requested {amount} but only "
+                                                       f"{resource.available:.2f} available."))
 
         # I9 — Trajectory temporal consistency (MANDATORY when trajectory is in scope)
         if trajectory_id is not None:
@@ -322,8 +340,12 @@ class TransitionMembrane:
 
     def commit_passage(self, passage: Passage, resource_id: str | None = None, amount: float = 0.0) -> None:
         """Commit a passage that was allowed — update execution status and resource state."""
+        if resource_id is not None:
+            amount = _positive_finite_float(amount)
+            if amount is None:
+                raise ValueError("Budget amount must be finite and strictly positive.")
         passage.execution_status = PassageStatus.DISPATCHED
-        if resource_id and amount > 0:
+        if resource_id is not None:
             resource = self.state.resources.get(resource_id)
             if resource:
                 with self.state.get_lock(resource_id):
@@ -331,8 +353,12 @@ class TransitionMembrane:
 
     def fail_passage(self, passage: Passage, resource_id: str | None = None, amount: float = 0.0) -> None:
         """Mark a passage as failed — release any reservation."""
+        if resource_id is not None:
+            amount = _positive_finite_float(amount)
+            if amount is None:
+                raise ValueError("Budget amount must be finite and strictly positive.")
         passage.execution_status = PassageStatus.FAILED
-        if resource_id and amount > 0:
+        if resource_id is not None:
             resource = self.state.resources.get(resource_id)
             if resource:
                 with self.state.get_lock(resource_id):

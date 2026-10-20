@@ -12,6 +12,8 @@ from typing import Sequence
 
 from .kernel import TenirKernel
 from .schema import validate_runtime_object
+from .deployment_manifest import verify_deployment_manifest
+from tenir_governance.deployment_safety import require_production_manifest
 
 
 def _read_object(path: str) -> dict:
@@ -38,6 +40,9 @@ def build_parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate", help="validate a schema 1.2 JSON object")
     validate.add_argument("runtime_object")
 
+    manifest = commands.add_parser("verify-manifest", help="validate deployment.manifest and artifact hashes")
+    manifest.add_argument("deployment_manifest")
+
     adjudicate = commands.add_parser("adjudicate", help="adjudicate a schema 1.2 JSON object")
     adjudicate.add_argument("runtime_object")
     adjudicate.add_argument("--mode", default="SHADOW_PASSIVE", choices=(
@@ -54,6 +59,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "serve":
+            require_production_manifest(os.environ, verify_deployment_manifest)
             if len(os.getenv("TENIR_API_TOKEN", "")) < 32:
                 raise ValueError("set TENIR_API_TOKEN to a secret of at least 32 characters")
             try:
@@ -61,6 +67,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             except ImportError as exc:
                 raise RuntimeError("Install the API extra: pip install -e '.[api]'") from exc
             uvicorn.run("tenir_kernel.api:app", host=args.host, port=args.port, reload=False)
+            return
+
+        if args.command == "verify-manifest":
+            result = verify_deployment_manifest(args.deployment_manifest)
+            print(json.dumps(result, indent=2, sort_keys=True))
             return
 
         if args.command == "demo":

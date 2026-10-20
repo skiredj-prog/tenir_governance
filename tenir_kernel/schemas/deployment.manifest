@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tenir:deployment-manifest:1",
+  "title": "TENIR-Gov Deployment Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "deployment_id",
+    "release",
+    "runtime_contract",
+    "deployment",
+    "mode",
+    "governance_controls",
+    "budget_store",
+    "raft",
+    "artifacts"
+  ],
+  "properties": {
+    "manifest_version": {"const": "1"},
+    "deployment_id": {"type": "string", "minLength": 1},
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["package", "version"],
+      "properties": {
+        "package": {"const": "tenir-governance"},
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"}
+      }
+    },
+    "runtime_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine_spec_version", "schema_version"],
+      "properties": {
+        "engine_spec_version": {"const": "TENIR-2.0"},
+        "schema_version": {"const": "1.2"}
+      }
+    },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["environment", "host_scope"],
+      "properties": {
+        "environment": {"enum": ["development", "test", "staging", "production"]},
+        "host_scope": {"enum": ["single-host", "multi-host"]}
+      }
+    },
+    "mode": {"enum": ["SHADOW_OFF", "SHADOW_PASSIVE", "SHADOW_CRITICAL", "ENFORCE"]},
+    "governance_controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["i2_payload_binding", "i5_conflict_hold"],
+      "properties": {
+        "i2_payload_binding": {"const": true},
+        "i5_conflict_hold": {"const": true}
+      }
+    },
+    "budget_store": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend", "database"],
+      "properties": {
+        "backend": {"const": "sqlite_wal"},
+        "database": {"type": "string", "minLength": 1}
+      }
+    },
+    "raft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "peer_authentication", "serialization", "production_allowed"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "peer_authentication": {"type": "boolean"},
+        "serialization": {"enum": ["not_used", "pickle", "json", "msgpack"]},
+        "production_allowed": {"const": false}
+      },
+      "if": {"properties": {"enabled": {"const": true}}, "required": ["enabled"]},
+      "then": {
+        "properties": {
+          "peer_authentication": {"const": true},
+          "serialization": {"const": "pickle"}
+        }
+      },
+      "else": {
+        "properties": {
+          "serialization": {"const": "not_used"}
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        }
+      }
+    }
+  }
+}

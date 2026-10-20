@@ -19,6 +19,7 @@ import threading
 import json
 import pytest
 from decimal import Decimal
+from types import SimpleNamespace
 
 from tenir_governance.operations.budget import DurableBudgetCoordinator
 from tenir_governance.operations.consensus_backend import SingleHostLockBackend
@@ -28,7 +29,8 @@ from tenir_governance.composition.decisions import Decision
 from tenir_governance.membrane import TransitionMembrane, MembraneState
 from tenir_governance.objects import Agent, Passage, Resource
 from tenir_governance.operations import (
-    MockProvider, OperationState, ProviderOutcome,
+    DurableOperationRegistry, HoldManager, HoldRecord, MockProvider,
+    OperationRecord, OperationState, ProviderOutcome,
 )
 from tenir_kernel.kernel import TenirKernel
 
@@ -74,6 +76,7 @@ def test_hold_resolve_then_dispatch_does_not_double_reserve():
     res = gov.resolve_hold(
         p.idempotency_key, passage=p,
         pressure=0.2, velocity=0.2, capacity=0.9,
+        authority=0.9, context_fit=1.0, evidence_quality=1.0,
         resource_id="budget", amount=10.0,
     )
 
@@ -136,6 +139,7 @@ def test_reconciliation_flag_write_failure_leaves_budget_untouched(monkeypatch):
     passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
     result = gov.adjudicate(
         passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        authority=0.9, context_fit=1.0, evidence_quality=1.0,
         resource_id="budget", amount=10.0,
     )
     assert result["operation_state"] == OperationState.RESERVED.value
@@ -174,6 +178,7 @@ def test_concurrent_adjudication_reserves_budget_once():
         p = Passage(agent_id="alice", action_type="payment", amount=amount)
         r = gov.adjudicate(
             p, pressure=0.2, velocity=0.2, capacity=0.9,
+            authority=0.9, context_fit=1.0, evidence_quality=1.0,
             resource_id="budget", amount=amount,
         )
         decisions.append(r["composed_decision"])
@@ -303,6 +308,7 @@ def test_concurrent_adjudication_fails_without_lock():
         p = Passage(agent_id="alice", action_type="payment", amount=amount)
         r = gov.adjudicate(
             p, pressure=0.2, velocity=0.2, capacity=0.9,
+            authority=0.9, context_fit=1.0, evidence_quality=1.0,
             resource_id="budget", amount=amount,
         )
         decisions.append(r["composed_decision"])
@@ -1037,9 +1043,9 @@ def test_cross_instance_confirm_and_proven_fail_cannot_diverge_durable_budget(tm
 
     def synchronized_lock(original):
         @contextmanager
-        def lock_once(idempotency_key):
+        def lock_once(idempotency_key, **kwargs):
             both_start.wait(timeout=5)
-            with original(idempotency_key):
+            with original(idempotency_key, **kwargs):
                 yield
         return lock_once
 
@@ -1087,7 +1093,9 @@ def test_cross_instance_confirm_and_proven_fail_cannot_diverge_durable_budget(tm
         assert final_state.committed == Decimal("0")
         assert final_state.reserved == Decimal("0")
     else:
-        raise AssertionError(f"Unexpected terminal race result: {final_record.state}")
+        raise AssertionError(
+            f"Unexpected terminal race result: {final_record.state}; results={results}"
+        )
 
 
 
@@ -1178,6 +1186,7 @@ def test_recovery_fails_closed_when_backend_reservation_amount_is_ambiguous(tmp_
     assert gov.dispatch_and_execute(key, "budget", 10.0)["operation_state"] in (
         OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
     )
+    ownership_before_reconcile = gov.registry.get(key).budget_committed
 
     original_get_state = backend.get_state
 
@@ -1197,7 +1206,7 @@ def test_recovery_fails_closed_when_backend_reservation_amount_is_ambiguous(tmp_
     assert result["reconciled"] is False
     assert result.get("recommendation") == "human_review"
     assert record.state in (OperationState.UNKNOWN, OperationState.DISPATCHING)
-    assert record.budget_committed is False
+    assert record.budget_committed == ownership_before_reconcile
     assert state.reserved == Decimal("0")
     assert state.committed == Decimal("10.0")
 
@@ -1221,7 +1230,6 @@ def test_recovery_replays_after_refund_and_ownership_flags_before_terminal_trans
     assert dispatched["operation_state"] in (
         OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
     )
-
     original_transition = gov.registry.transition_to
 
     def crash_before_failed_terminal(idempotency_key, target_state):
@@ -1273,6 +1281,7 @@ def test_recovery_refuses_ambiguous_unknown_backend_reservation_state(tmp_path, 
     assert dispatched["operation_state"] in (
         OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
     )
+    state_before_reconcile = backend.get_state("budget")
 
     original_get_state = backend.get_state
     original_release = backend.release
@@ -1301,8 +1310,8 @@ def test_recovery_refuses_ambiguous_unknown_backend_reservation_state(tmp_path, 
     assert result.get("recommendation") == "human_review"
     assert record.state in (OperationState.UNKNOWN, OperationState.DISPATCHING)
     assert release_calls == []
-    assert actual_backend_state.reserved == Decimal("10.0")
-    assert actual_backend_state.committed == Decimal("0")
+    assert actual_backend_state.reserved == state_before_reconcile.reserved
+    assert actual_backend_state.committed == state_before_reconcile.committed == Decimal("10.0")
 
 
 
@@ -1335,4 +1344,217 @@ def test_durable_settlement_rejects_in_memory_operation_registry(tmp_path):
     with pytest.raises(RuntimeError, match="requires a persistent operation registry"):
         with registry.settlement_lock("operation-key"):
             pytest.fail("unsafe settlement lock unexpectedly acquired")
+
+
+class _CallCountingBackend:
+    def __init__(self):
+        self.reserve_calls = 0
+        self.release_calls = 0
+
+    def reserve(self, *args, **kwargs):
+        self.reserve_calls += 1
+        return SimpleNamespace(status="RESERVED", reservation_id="reservation-1")
+
+    def release(self, *args, **kwargs):
+        self.release_calls += 1
+        return SimpleNamespace(status="RELEASED")
+
+
+class _CallCountingProvider:
+    def __init__(self):
+        self.execute_calls = 0
+        self.reconcile_calls = 0
+
+    def execute(self, **kwargs):
+        self.execute_calls += 1
+        return SimpleNamespace(outcome=ProviderOutcome.CONFIRMED)
+
+    def reconcile(self, **kwargs):
+        self.reconcile_calls += 1
+        return SimpleNamespace(resolved=False, outcome=ProviderOutcome.UNKNOWN)
+
+
+def test_volatile_registry_blocks_durable_reserve_dispatch_and_reconcile():
+    """Backend actions must not outrun the persistent ownership/settlement record."""
+    gov, _state = _setup_governor()
+    backend = _CallCountingBackend()
+    provider = _CallCountingProvider()
+    gov.consensus_backend = backend
+    gov.provider = provider
+
+    reserve_record = OperationRecord(
+        idempotency_key="volatile-reserve",
+        passage_id="p-reserve", agent_id="alice", action_type="payment",
+        amount=10.0, resource_id="budget",
+    )
+    assert gov.registry.register(reserve_record)
+    assert gov._reserve_budget("volatile-reserve", "budget", 10.0) is False
+    assert backend.reserve_calls == 0
+
+    dispatch_record = OperationRecord(
+        idempotency_key="volatile-dispatch",
+        passage_id="p-dispatch", agent_id="alice", action_type="payment",
+        amount=10.0, resource_id="budget", state=OperationState.RESERVED,
+    )
+    assert gov.registry.register(dispatch_record)
+    dispatched = gov.dispatch_and_execute("volatile-dispatch", "budget", 10.0)
+    assert dispatched["dispatched"] is False
+    assert provider.execute_calls == 0
+    assert gov.registry.get("volatile-dispatch").state == OperationState.RESERVED
+
+    reconcile_record = OperationRecord(
+        idempotency_key="volatile-reconcile",
+        passage_id="p-reconcile", agent_id="alice", action_type="payment",
+        amount=10.0, resource_id="budget", state=OperationState.UNKNOWN,
+    )
+    assert gov.registry.register(reconcile_record)
+    reconciled = gov.reconcile_unknown("volatile-reconcile")
+    assert reconciled["reconciled"] is False
+    assert provider.reconcile_calls == 0
+    assert gov.registry.get("volatile-reconcile").state == OperationState.UNKNOWN
+
+
+class _FailOnceReleaseBackend:
+    def __init__(self, backend, registry, key):
+        self.backend = backend
+        self.registry = registry
+        self.key = key
+        self.release_states = []
+        self.release_calls = 0
+
+    def __getattr__(self, name):
+        return getattr(self.backend, name)
+
+    def release(self, reservation_id):
+        self.release_calls += 1
+        self.release_states.append(self.registry.get(self.key).state)
+        if self.release_calls == 1:
+            return SimpleNamespace(status="ERROR")
+        return self.backend.release(reservation_id)
+
+
+@pytest.mark.parametrize("exit_path", ["expire", "deny"])
+def test_hold_exit_release_failure_is_retryable_and_precedes_transition(tmp_path, exit_path):
+    """An unresolved durable release leaves HOLD/ESCALATED open for safe retry."""
+    from tenir_governance.operations.consensus_backend import SingleHostLockBackend
+
+    gov, _state = _setup_governor()
+    registry = DurableOperationRegistry(str(tmp_path / "operations.json"))
+    gov.registry = registry
+    gov.hold_manager = HoldManager(registry)
+    key = f"release-retry-{exit_path}"
+
+    backend = SingleHostLockBackend(str(tmp_path / "backend"))
+    backend.register_resource("budget", 100.0)
+    reservation = backend.reserve(key, 10.0, "budget")
+    assert reservation.status == "RESERVED"
+    starting_state = OperationState.HOLD if exit_path == "expire" else OperationState.ESCALATED
+    hold_record = HoldRecord(
+        hold_start="2000-01-01T00:00:00+00:00",
+        tau_k_seconds=3600.0,
+        escalated_at="2000-01-01T00:00:00+00:00" if exit_path == "deny" else "",
+        escalated_by="risk-officer" if exit_path == "deny" else "",
+    )
+    assert registry.register(OperationRecord(
+        idempotency_key=key,
+        passage_id=f"p-{key}",
+        agent_id="alice",
+        action_type="payment",
+        amount=10.0,
+        resource_id="budget",
+        state=starting_state,
+        hold_record=hold_record,
+        budget_reserved=True,
+        reservation_id=reservation.reservation_id,
+    ))
+    retry_backend = _FailOnceReleaseBackend(backend, registry, key)
+    gov.consensus_backend = retry_backend
+
+    def attempt_exit():
+        if exit_path == "expire":
+            return gov.expire_hold(key)
+        return gov.authorize_exit(
+            key, authorized_by="ciso", scope="global",
+            authorization="ceremony-G-R5-001", approve=False,
+        )
+
+    first = attempt_exit()
+    assert first.get("expired" if exit_path == "expire" else "exited") is False
+    assert first["budget_reconciliation_required"] is True
+    assert registry.get(key).state == starting_state
+    assert registry.get(key).budget_reserved is True
+    assert backend.get_state("budget").reserved == Decimal("10.0")
+
+    second = attempt_exit()
+    assert second.get("expired" if exit_path == "expire" else "exited") is True
+    assert registry.get(key).state == OperationState.FAILED
+    assert registry.get(key).budget_reserved is False
+    assert backend.get_state("budget").reserved == Decimal("0.0")
+    assert retry_backend.release_states == [starting_state, starting_state]
+
+
+def test_expire_hold_does_not_release_unowned_in_memory_budget():
+    gov, state = _setup_governor()
+    budget = state.resources["budget"]
+    assert budget.reserve(10.0)
+    key = "hold-expiry-unowned-memory"
+    assert gov.registry.register(OperationRecord(
+        idempotency_key=key,
+        passage_id=f"p-{key}",
+        agent_id="alice",
+        action_type="payment",
+        amount=10.0,
+        resource_id="budget",
+        state=OperationState.HOLD,
+        hold_record=HoldRecord(
+            hold_start="2000-01-01T00:00:00+00:00",
+            tau_k_seconds=3600,
+        ),
+        budget_reserved=False,
+        budget_committed=False,
+    ))
+
+    result = gov.expire_hold(key)
+
+    assert result["expired"] is True
+    assert budget.reserved == 10.0
+    assert budget.consumed == 0.0
+
+
+def test_expire_hold_does_not_release_unowned_durable_reservation(tmp_path, monkeypatch):
+    gov, _state, backend = _setup_durable_backend_governor(tmp_path)
+    gov.hold_manager = HoldManager(gov.registry)
+    reservation = backend.reserve("unowned-by-operation", 10.0, "budget")
+    assert reservation.status == "RESERVED"
+    key = "hold-expiry-unowned-backend"
+    assert gov.registry.register(OperationRecord(
+        idempotency_key=key,
+        passage_id=f"p-{key}",
+        agent_id="alice",
+        action_type="payment",
+        amount=10.0,
+        resource_id="budget",
+        reservation_id=reservation.reservation_id,
+        state=OperationState.HOLD,
+        hold_record=HoldRecord(
+            hold_start="2000-01-01T00:00:00+00:00",
+            tau_k_seconds=3600,
+        ),
+        budget_reserved=False,
+        budget_committed=False,
+    ))
+    release_calls = []
+    original_release = backend.release
+
+    def tracked_release(reservation_id):
+        release_calls.append(reservation_id)
+        return original_release(reservation_id)
+
+    monkeypatch.setattr(backend, "release", tracked_release)
+
+    result = gov.expire_hold(key)
+
+    assert result["expired"] is True, result
+    assert release_calls == []
+    assert backend.get_state("budget").reserved == Decimal("10.0")
 

@@ -36,7 +36,7 @@ if {repr(resource_id)} not in coord._resources:
 action = {repr(action)}
 if action == 'reserve':
     result = coord.reserve({repr(resource_id)}, {amount}.0)
-    print(f"RESERVE:{result}")
+    print(f"RESERVE:{{result}}")
 elif action == 'commit':
     result = coord.commit({repr(resource_id)}, {amount}.0)
     print(f"COMMIT:{{result}}")
@@ -45,7 +45,8 @@ elif action == 'release':
     print("RELEASE:done")
 elif action == 'state':
     state = coord.get_state({repr(resource_id)})
-    print(f"STATE:{{json.dumps(state)}}")
+    printable = {{k: float(v) if hasattr(v, "as_tuple") else v for k, v in state.items()}}
+    print(f"STATE:{{json.dumps(printable)}}")
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -108,7 +109,7 @@ sys.path.insert(0, {repr(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 from tenir_governance.operations.budget import DurableBudgetCoordinator
 coord = DurableBudgetCoordinator({repr(store)})
 state = coord.get_state('res1')
-print(json.dumps(state))
+print(json.dumps({{k: float(v) if hasattr(v, "as_tuple") else v for k, v in state.items()}}))
 """
         result = subprocess.run([sys.executable, "-c", state_script], capture_output=True, text=True, timeout=10)
         state = json.loads(result.stdout.strip())
@@ -168,7 +169,7 @@ sys.path.insert(0, {repr(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 from tenir_governance.operations.budget import DurableBudgetCoordinator
 coord = DurableBudgetCoordinator({repr(store)})
 state = coord.get_state('res1')
-print(json.dumps(state))
+print(json.dumps({{k: float(v) if hasattr(v, "as_tuple") else v for k, v in state.items()}}))
 """
         result = subprocess.run([sys.executable, "-c", state_script], capture_output=True, text=True, timeout=10)
         state = json.loads(result.stdout.strip())
@@ -208,7 +209,7 @@ r = coord.commit('res1', 40.0)
 print(f"COMMIT:{{r}}")
 state = coord.get_state('res1')
 import json
-print(f"STATE:{{json.dumps(state)}}")
+print(f"STATE:{{json.dumps({{k: float(v) if hasattr(v, 'as_tuple') else v for k, v in state.items()}})}}")
 """
         result = subprocess.run([sys.executable, "-c", commit_script], capture_output=True, text=True, timeout=10)
         assert "True" in result.stdout
@@ -287,7 +288,7 @@ sys.path.insert(0, {repr(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 from tenir_governance.operations.budget import DurableBudgetCoordinator
 coord = DurableBudgetCoordinator({repr(store)})
 state = coord.get_state('res1')
-print(json.dumps(state))
+print(json.dumps({{k: float(v) if hasattr(v, "as_tuple") else v for k, v in state.items()}}))
 """
         result = subprocess.run([sys.executable, "-c", state_script], capture_output=True, text=True, timeout=10)
         state = json.loads(result.stdout.strip())

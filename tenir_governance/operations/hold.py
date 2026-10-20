@@ -113,15 +113,14 @@ class HoldManager:
             tau_k_seconds=tau_k_seconds,
             tau_k_source=tau_k_source,
         )
-        record.hold_record = hold_record
-
         success, _prev = self._registry.transition_to(
-            idempotency_key, OperationState.HOLD,
+            idempotency_key, OperationState.HOLD, hold_record=hold_record,
         )
         if not success:
+            current = self._registry.get(idempotency_key)
             return {
                 "entered": False,
-                "operation_state": record.state.value,
+                "operation_state": current.state.value if current else None,
                 "hold_record": None,
                 "reason": "Transition CREATED → HOLD failed.",
             }
@@ -194,17 +193,19 @@ class HoldManager:
             return {"escalated": False, "operation_state": record.state.value,
                     "reason": f"Operation is in state {record.state.value}, not HOLD."}
 
-        if record.hold_record:
-            record.hold_record.escalated_at = _utc_now()
-            record.hold_record.escalated_by = escalated_by
-            record.hold_record.exit_reason = "escalated"
-
         success, _prev = self._registry.transition_to(
-            idempotency_key, OperationState.ESCALATED,
+            idempotency_key,
+            OperationState.ESCALATED,
+            hold_record_changes={
+                "escalated_at": _utc_now(),
+                "escalated_by": escalated_by,
+                "exit_reason": "escalated",
+            },
         )
+        current = self._registry.get(idempotency_key)
         return {
             "escalated": success,
-            "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
+            "operation_state": current.state.value if current else None,
             "reason": "Hold escalated to Risk Officer — ESCALATED is absorbing." if success
                       else "Transition HOLD → ESCALATED failed.",
         }
@@ -259,18 +260,20 @@ class HoldManager:
             reason=reason,
         )
 
-        if record.hold_record:
-            record.hold_record.exit_receipt = receipt
-            record.hold_record.exit_reason = "authorized_exit"
-
         target_state = OperationState.RESERVED if approve else OperationState.FAILED
         success, _prev = self._registry.transition_to(
-            idempotency_key, target_state,
+            idempotency_key,
+            target_state,
+            hold_record_changes={
+                "exit_receipt": receipt,
+                "exit_reason": "authorized_exit",
+            },
         )
+        current = self._registry.get(idempotency_key)
 
         return {
             "exited": success,
-            "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
+            "operation_state": current.state.value if current else None,
             "exit_receipt": receipt.to_dict() if success else None,
             "reason": f"Authorized exit ({'approved' if approve else 'denied'}) by {authorized_by}." if success
                       else f"Transition ESCALATED → {target_state.value} failed.",
@@ -299,15 +302,23 @@ class HoldManager:
             return {"expired": False, "operation_state": record.state.value,
                     "reason": f"Operation is in state {record.state.value}, not HOLD."}
 
-        if record.hold_record:
-            record.hold_record.exit_reason = "expired"
+        expiry = self.check_tau_k_expiry(idempotency_key)
+        if not expiry["expired"]:
+            return {
+                "expired": False,
+                "operation_state": record.state.value,
+                "reason": expiry["reason"],
+            }
 
         success, _prev = self._registry.transition_to(
-            idempotency_key, OperationState.FAILED,
+            idempotency_key,
+            OperationState.FAILED,
+            hold_record_changes={"exit_reason": "expired"},
         )
+        current = self._registry.get(idempotency_key)
         return {
             "expired": success,
-            "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
+            "operation_state": current.state.value if current else None,
             "reason": "τ_K exhausted — FAIL-CLOSED rejection (not a resolution)." if success
                       else "Transition HOLD → FAILED failed.",
         }
@@ -333,15 +344,15 @@ class HoldManager:
             return {"expired": False, "operation_state": record.state.value,
                     "reason": f"Operation is in state {record.state.value}, not ESCALATED."}
 
-        if record.hold_record:
-            record.hold_record.exit_reason = "expired_escalated"
-
         success, _prev = self._registry.transition_to(
-            idempotency_key, OperationState.UNKNOWN,
+            idempotency_key,
+            OperationState.UNKNOWN,
+            hold_record_changes={"exit_reason": "expired_escalated"},
         )
+        current = self._registry.get(idempotency_key)
         return {
             "expired": success,
-            "operation_state": self._registry.get(idempotency_key).state.value if success else record.state.value,
+            "operation_state": current.state.value if current else None,
             "reason": "τ_K expired on ESCALATED — UNKNOWN (time-based exit rejected, needs human)." if success
                       else "Transition ESCALATED → UNKNOWN failed.",
         }

@@ -113,6 +113,9 @@ class InProcessBudgetCoordinator:
             return self._locks[resource_id]
 
     def reserve(self, resource_id: str, amount: float) -> bool:
+        amount = _positive_finite_float(amount)
+        if amount is None:
+            return False
         resource = self._resources.get(resource_id)
         if resource is None:
             return False
@@ -123,6 +126,9 @@ class InProcessBudgetCoordinator:
             return False
 
     def commit(self, resource_id: str, amount: float) -> bool:
+        amount = _positive_finite_float(amount)
+        if amount is None:
+            return False
         resource = self._resources.get(resource_id)
         if resource is None:
             return False
@@ -134,6 +140,9 @@ class InProcessBudgetCoordinator:
             return False
 
     def release(self, resource_id: str, amount: float) -> None:
+        amount = _positive_finite_float(amount)
+        if amount is None:
+            return
         resource = self._resources.get(resource_id)
         if resource is None:
             return
@@ -153,16 +162,33 @@ import json
 import math
 import os
 import tempfile
-
-try:
-    import fcntl
-except ImportError:
-    fcntl = None  # Windows fallback
+from .file_lock import acquire_file_lock
 
 
 MAX_DECIMAL_DIGITS = 128
 MAX_DECIMAL_EXPONENT = 128
 MAX_DECIMAL_ADJUSTED = 128
+
+
+def _positive_finite_float(value) -> float | None:
+    """Normalize an amount for float-based in-memory accounting.
+
+    Reject booleans, malformed values, non-finite values, zero, and negative
+    amounts. Check the float conversion for overflow and underflow before it
+    reaches a Resource counter.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
+        if not parsed.is_finite() or parsed <= 0:
+            return None
+        normalized = float(parsed)
+    except (InvalidOperation, TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(normalized) or normalized <= 0:
+        return None
+    return normalized
 
 
 def _validate_decimal_bounds(value: Decimal) -> Decimal:
@@ -316,15 +342,10 @@ class DurableBudgetCoordinator:
 
     def _lock_file(self):
         """Acquire a cross-process exclusive lock on the budget store file."""
-        if not self._store_path or fcntl is None:
+        if not self._store_path:
             return None
         lock_path = self._store_path + ".lock"
-        if not os.path.exists(lock_path):
-            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
-            os.close(fd)
-        f = open(lock_path, "r+")
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        return f
+        return acquire_file_lock(lock_path)
 
     def _load(self):
         """Load budget state from the durable store."""
@@ -363,21 +384,28 @@ class DurableBudgetCoordinator:
         """Persist budget state atomically (temp file, fsync, rename)."""
         if not self._store_path:
             return
-        tmp = self._store_path + ".tmp"
+        directory = os.path.dirname(os.path.abspath(self._store_path))
+        prefix = os.path.basename(self._store_path) + "."
+        fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=directory)
         serializable = {
             resource_id: {key: str(value) for key, value in record.items()}
             for resource_id, record in self._resources.items()
         }
-        with open(tmp, "w") as f:
-            json.dump(serializable, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp, self._store_path)
-        dir_fd = os.open(os.path.dirname(self._store_path) or ".", os.O_RDONLY)
         try:
-            os.fsync(dir_fd)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(serializable, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, self._store_path)
+            if os.name != "nt":
+                dir_fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
         finally:
-            os.close(dir_fd)
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
     def _reload_and_check(self, resource_id: str, amount: Decimal) -> bool:
         """Reload from disk under lock and check if amount is available.

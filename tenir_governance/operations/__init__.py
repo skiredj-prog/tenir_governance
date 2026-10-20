@@ -14,6 +14,7 @@ from .provider import (
     DispatchProvider, DispatchResult, ProviderOutcome,
     ReconciliationResult, MockProvider, StripeProvider,
 )
+from .sqlite_backend import SQLiteConsensusBackend
 from .._profile_meta import DISCLOSURE
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "HoldRecord", "ExitReceipt", "HoldManager",
     "DispatchProvider", "DispatchResult", "ProviderOutcome",
     "ReconciliationResult", "MockProvider", "StripeProvider",
+    "SQLiteConsensusBackend",
 ]
