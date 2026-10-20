@@ -558,25 +558,44 @@ class DurableOperationRegistry:
                 os.unlink(tmp)
         self._quarantine_memory = dict(mark)
 
-    def set_quarantine(self, active: bool, *, locked_by: str = "") -> None:
-        """Activation only. Never permit an unauthenticated public unlock."""
+    def set_quarantine(
+        self, active: bool, *, locked_by: str = "",
+        incident_id: str | None = None,
+    ) -> None:
+        """Activate or reassert a lock; never allow unauthenticated release.
+
+        A nonempty incident_id distinguishes a genuinely new incident from
+        an idempotent retry of the existing one. A *different* incident ID
+        renews the lock identity even when quarantine is already active,
+        invalidating release proofs obtained for an earlier incident.
+        Without an incident ID, legacy repeated activation stays idempotent.
+        """
         if active is not True:
             raise PermissionError(
                 "QUARANTINE_LOCK cannot be cleared through set_quarantine; "
                 "a trusted, lock-bound authorization verifier is mandatory."
             )
+        if incident_id is not None and (
+            not isinstance(incident_id, str) or not incident_id.strip()
+        ):
+            raise ValueError("incident_id must be a nonempty string when provided.")
         with self.quarantine_guard():
             with self._lock:
                 old = self._quarantine_read_locked()
                 if old.get("corrupted"):
                     raise RuntimeError("QUARANTINE_LOCK mark is corrupt; recovery required.")
-                if old["active"]:
-                    return  # Idempotent; preserve the original lock identity.
-                self._quarantine_write_locked({
+                if old["active"] and (
+                    incident_id is None or old.get("incident_id") == incident_id
+                ):
+                    return  # Exact retry or legacy idempotent reassertion.
+                mark = {
                     "active": True,
                     "lock_id": uuid4().hex,
                     "locked_by": locked_by,
-                })
+                }
+                if incident_id is not None:
+                    mark["incident_id"] = incident_id
+                self._quarantine_write_locked(mark)
 
     def quarantine_is_active(self) -> bool:
         """Fail closed on malformed durable state; reflects all local workers."""
@@ -652,6 +671,7 @@ class DurableOperationRegistry:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "reason": reason,
                     "locked_by": mark.get("locked_by", ""),
+                    "incident_id": mark.get("incident_id"),
                 }
                 # Persist unlocked state BEFORE returning a success receipt.
                 self._quarantine_write_locked({
