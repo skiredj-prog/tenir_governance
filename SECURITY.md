@@ -4,7 +4,9 @@
 
 | Version / Line                         | Supported | Notes |
 |----------------------------------------|-----------|-------|
-| 5.4.x (Agentic Governance Profile)     | ✅        | Current release line on PyPI. Includes two-kernel composition, provider integration, HOLD lifecycle, and opt-in τ⁻¹ / EVP post-execution assessment. |
+| 5.6.1 (release candidate)              | ⏳ Not released | Raft development/test loopback only; production/multi-host Raft blocked while FM-20 is open. |
+| 5.5.x (Agentic Governance Profile)     | ✅        | Latest published line; single-host operational guarantees only. |
+| 5.4.x (Agentic Governance Profile)     | ✅        | Prior supported release line, including HOLD lifecycle and post-execution assessment. |
 | 5.3.x (Agentic Governance Profile)     | ✅        | Supported prior line. Includes two-kernel composition, DurableOperationRegistry, and schema 1.2 conformance; it does not include the v5.4.x assessment layer. |
 | 5.2.x (TENIR 2.0 kernel + R5 hardening)| ✅        | Still supported. |
 | 5.1.x / 5.0.x (IRON OMEGA R5)          | ⚠️ Limited | Security fixes only; migrate to 5.2+ recommended. |
@@ -17,9 +19,20 @@ Install from PyPI with an explicit version pin in production:
 ```bash
 pip install "tenir-governance==5.5.0"
 # or with extras
-pip install "tenir-governance[api]==5.4.3"
-pip install "tenir-governance[r5]==5.4.3"
+pip install "tenir-governance[api]==5.5.0"
+pip install "tenir-governance[r5]==5.5.0"
 ```
+
+### FM-20: Raft execution boundary for v5.6.1
+
+PySyncObj uses pickle command serialization and has not been approved for
+production or physical multi-host use. The 5.6.1 release candidate requires an
+explicit `TENIR_ENV=test` or `TENIR_ENV=development` and all node endpoints
+on loopback (`localhost`, `127.0.0.0/8`, or `::1`). Missing/production/staging
+environment declarations, multi-host scope, wildcard bindings and remote peer
+addresses are rejected by the backend constructor before network startup.
+Loopback restrictions do not establish transport security against malicious
+co-resident processes or a compromised host. FM-20 remains OPEN.
 
 ## Reporting a Vulnerability
 

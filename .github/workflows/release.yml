@@ -53,9 +53,20 @@ jobs:
         run: python -m pip install --upgrade pip build twine
 
       - name: Install project with test dependencies
-        run: python -m pip install -e ".[test]"
+        run: |
+          python -m pip install -e ".[test,raft]"
+          python -m pip check
+
+      - name: Verify Raft tests run with explicitly declared non-production scope
+        env:
+          TENIR_ENV: test
+        run: |
+          python -c "import pysyncobj"
+          python -m pytest tests/test_raft_backend.py -q
 
       - name: Run the full test suite
+        env:
+          TENIR_ENV: test
         run: python -m pytest tests/ -q
 
       - name: Build wheel and source distribution

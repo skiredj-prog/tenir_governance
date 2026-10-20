@@ -1,8 +1,8 @@
 {
   "upload_type": "software",
   "title": "TENIR-Gov: Governance Middleware for AI-Enabled Operational Systems",
-  "description": "<p>TENIR-Gov is an open-source governance middleware that sits between decision-producing AI agents and downstream execution environments. It enforces explicit policies, validates operational intents through a neuro-symbolic grammar layer, and persists every governance decision in a cryptographically verifiable Merkle-based audit ledger — independently of any underlying AI model.</p><p>Release 5.4.4 provides: neuro-symbolic validation (LALR(1) grammar + optional LLM fine-tuning), a deterministic policy engine (frozen dataclass contract), a graph-based policy store (Neo4j 5.x), a Merkle epoch audit ledger, an administrative governance plane, a polymorphic UI surface contract, ledger migration tooling, two-kernel composition with HOLD/ESCALATE lifecycle, post-execution assessment (τ⁻¹ partial tau inversion + EVP), a hardened I8 aggregate budget invariant with governor-owned reservation, and CAVE aligned to the doctrinal definition (Control / Aim / Veto / Epistemics).</p>",
-  "version": "5.5.0",
+  "description": "<p>TENIR-Gov is an open-source governance middleware that sits between decision-producing AI agents and downstream execution environments. It enforces explicit policies, validates operational intents through a neuro-symbolic grammar layer, and persists every governance decision in a cryptographically verifiable Merkle-based audit ledger — independently of any underlying AI model.</p><p>Release 5.6.1 (pending publication) consolidates: neuro-symbolic validation (LALR(1) grammar + optional LLM fine-tuning), a deterministic policy engine (frozen dataclass contract), a graph-based policy store (Neo4j 5.x), a Merkle epoch audit ledger, an administrative governance plane, a polymorphic UI surface contract, ledger migration tooling, two-kernel composition with HOLD/ESCALATE lifecycle, post-execution assessment (τ⁻¹ partial tau inversion + EVP), a hardened I8 aggregate budget invariant with governor-owned reservation, and CAVE aligned to the doctrinal definition (Control / Aim / Veto / Epistemics).</p>",
+  "version": "5.6.1",
   "license": "Apache-2.0",
   "creators": [
     {
@@ -36,5 +36,5 @@
     }
   ],
   "communities": [],
-  "notes": "Release 5.4.4: TENIR 2.0 schema 1.2 kernel, runtime constraint geometry, connectors, R5 security hardening, two-kernel composition, post-execution assessment layer, I8 budget coordination fix, and CAVE doctrinal alignment (Control/Aim/Veto/Epistemics). Validation is performed through the repository CI gate. Policy fingerprint (default): d083e0b82a16c04d0."
+  "notes": "Release 5.6.1 candidate (not yet published): Raft budget safety and deterministic state hardening. FM-20 remains open; PySyncObj transport is restricted to explicitly declared development/test environments with loopback-only peers. Production and physical multi-host Raft are unsupported. Existing DOI identifiers are preserved pending release-owner confirmation."
 }

@@ -40,6 +40,8 @@ jobs:
   raft-regressions:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      TENIR_ENV: test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,7 +50,8 @@ jobs:
       - name: Install package and test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[test]" "pysyncobj==0.3.17"
+          python -m pip install -e ".[test,raft]"
+          python -m pip check
       - name: Run Raft regression suite
         run: pytest -q tests/test_raft_backend.py
       - name: Run governor and membrane regression suite

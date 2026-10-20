@@ -45,6 +45,7 @@ tenir-sdk      = "tenir_governance.sdk:main"
 tenir-kernel    = "tenir_kernel.cli:main"
 
 [project.optional-dependencies]
+raft = ["pysyncobj==0.3.17"]
 api = [
     "fastapi>=0.115,<1",
     "pydantic>=2.5,<3",

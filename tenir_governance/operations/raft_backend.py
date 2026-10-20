@@ -1,4 +1,8 @@
-"""RaftConsensusBackend — multi-host consensus via Raft (pysyncobj).
+"""RaftConsensusBackend — experimental loopback-only Raft (pysyncobj).
+
+FM-20: PySyncObj uses unsafe pickle transport. In 5.6.1 the backend only
+starts with an explicit development/test environment and loopback addresses.
+This is not approved for production or physical multi-host deployment.
 
 This module provides a multi-host ConsensusBackend adapter that uses the Raft
 consensus algorithm (via pysyncobj) for replicated state. It implements the
@@ -34,6 +38,8 @@ Limitations:
 # Compliance class: profile-bound
 from __future__ import annotations
 
+import ipaddress
+
 import json
 import os
 import threading
@@ -67,6 +73,57 @@ from tenir_governance.operations.consensus_backend import (
 
 
 MAX_AMOUNT = Decimal("1000000000000000000")
+
+
+def _raft_loopback_address(address):
+    """Accept explicit host:port loopback endpoints; never resolve remote DNS."""
+    if not isinstance(address, str):
+        return False
+    host, sep, port = address.rpartition(":")
+    if not sep or not port.isascii() or not port.isdecimal():
+        return False
+    if not 1 <= int(port) <= 65535:
+        return False
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    elif ":" in host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _enforce_raft_dev_loopback(self_addr, other_addrs):
+    """FM-20 fail-closed boundary before constructing a PySyncObj network."""
+    declared = {
+        key: value.strip().lower()
+        for key in ("TENIR_ENV", "ENVIRONMENT")
+        if (value := os.environ.get(key)) is not None
+    }
+    if not declared or len(set(declared.values())) != 1 or any(
+        value not in ("development", "test") for value in declared.values()
+    ):
+        raise RuntimeError(
+            "FM-20: Raft requires an explicitly declared development/test "
+            "environment; production and unspecified environments are blocked."
+        )
+    scopes = {
+        value.strip().lower().replace("_", "-")
+        for key in ("HOST_SCOPE", "TENIR_HOST_SCOPE")
+        if (value := os.environ.get(key)) is not None
+    }
+    if any(value != "single-host" for value in scopes):
+        raise RuntimeError("FM-20: Raft multi-host scope is prohibited in v5.6.1.")
+    if not isinstance(other_addrs, (tuple, list)) or not _raft_loopback_address(self_addr) or any(
+        not _raft_loopback_address(peer) for peer in other_addrs
+    ):
+        raise RuntimeError(
+            "FM-20: Raft endpoints must be explicit local loopback host:port "
+            "addresses; remote, wildcard and DNS peer addresses are prohibited."
+        )
 
 
 
@@ -364,12 +421,9 @@ class _RaftStateMachine(SyncObj):
 class RaftConsensusBackend:
     """Multi-host ConsensusBackend using Raft (pysyncobj).
 
-    Implements the ConsensusBackend interface with true cross-host fault
-    tolerance via Raft consensus. State is replicated across all nodes.
-
-    This backend satisfies C1 (safety/linearizability), C2 (liveness),
-    C3 (fault tolerance for crash-stop), and I8 (budget conservation)
-    for multi-host deployments.
+    Implements the ConsensusBackend interface for loopback-only development
+    and testing. Raft replication is not approved for production while
+    FM-20 (pickle command transport) remains open.
 
     Args:
         self_addr: address of this node (e.g., "localhost:5000")
@@ -379,6 +433,7 @@ class RaftConsensusBackend:
     """
 
     def __init__(self, self_addr, other_addrs, store_dir=None, provider_reconcile=None):
+        _enforce_raft_dev_loopback(self_addr, other_addrs)
         if SyncObj is None:
             raise ImportError(
                 "pysyncobj is required for RaftConsensusBackend. "
