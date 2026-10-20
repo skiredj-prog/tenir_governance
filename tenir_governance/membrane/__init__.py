@@ -132,21 +132,30 @@ class MembraneState:
         reason: str = "",
     ) -> dict[str, Any]:
         with self._quarantine_lock:
-            if self._quarantine_registry is not None:
-                # The durable registry verifies the authorization and commits
-                # the shared release before the local flag can be cleared.
-                result = self._quarantine_registry.authorized_release_quarantine(
-                    authorized_by=authorized_by, scope=scope,
-                    authorization=authorization, reason=reason,
+            registry = self._quarantine_registry
+            if registry is None:
+                return self._release_quarantine_under_lock(
+                    authorized_by, scope, authorization, reason,
                 )
-                if result.get("released"):
+
+        # An injected trusted verifier can be slow. Do not hold the membrane
+        # lock across it: a concurrent local emergency lock must be able to
+        # persist its durable mark. The registry checks the lock ID on commit.
+        result = registry.authorized_release_quarantine(
+            authorized_by=authorized_by, scope=scope,
+            authorization=authorization, reason=reason,
+        )
+        if result.get("released"):
+            with self._quarantine_lock:
+                # Another worker/thread may have activated a fresh lock
+                # since the successful release. Do not clear its local state.
+                if not registry.quarantine_is_active():
                     self.quarantine = False
                     self.quarantine_release_receipt = result["receipt"]
                     self.quarantine_locked_at = ""
                     self.quarantine_locked_by = ""
                     self._quarantine_lock_id = ""
-                return result
-            return self._release_quarantine_under_lock(authorized_by, scope, authorization, reason)
+        return result
 
     def _release_quarantine_under_lock(
         self,
