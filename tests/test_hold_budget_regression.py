@@ -240,8 +240,8 @@ def test_authorize_exit_deny_releases_reservation():
     assert record.budget_committed is False
 
 
-def test_authorize_exit_approve_keeps_reservation():
-    """ESCALATED → authorize_exit(approve) → RESERVED: reservation kept, no re-reserve."""
+def test_authorize_exit_approve_returns_to_hold_until_fresh_readjudication():
+    """Authorization returns to HOLD; fresh adjudication is required for RESERVED."""
     gov, state = _setup_governor(budget_capacity=100.0)
     budget = state.resources["budget"]
 
@@ -257,7 +257,7 @@ def test_authorize_exit_approve_keeps_reservation():
     # Escalate the HOLD.
     assert gov.escalate_hold(p.idempotency_key, escalated_by="risk-officer")["escalated"]
 
-    # Approve exit → RESERVED, reservation must stay (no double-reserve).
+    # Approval records authorization but does not itself admit the operation.
     result = gov.authorize_exit(
         p.idempotency_key,
         authorized_by="ciso",
@@ -267,7 +267,7 @@ def test_authorize_exit_approve_keeps_reservation():
         approve=True,
     )
     assert result["exited"] is True
-    assert result["operation_state"] == OperationState.RESERVED.value
+    assert result["operation_state"] == OperationState.HOLD.value
 
     assert budget.reserved == 10.0, (
         f"Double reservation on approve: reserved={budget.reserved}, expected 10.0"
@@ -277,6 +277,18 @@ def test_authorize_exit_approve_keeps_reservation():
     record = gov.registry.get(p.idempotency_key)
     assert record.budget_reserved is True
     assert record.budget_committed is False
+
+    # A fresh adjudication is the separate admission decision.
+    gov.scoring = ScoringKernelAdapter(TenirKernel())
+    resolved = gov.resolve_hold(
+        p.idempotency_key, passage=p,
+        pressure=0.2, velocity=0.2, capacity=0.9,
+        authority=0.9, context_fit=1.0, evidence_quality=1.0,
+        resource_id="budget", amount=10.0,
+    )
+    assert resolved["hold_resolved"] is True
+    assert resolved["operation_state"] == OperationState.RESERVED.value
+    assert budget.reserved == 10.0
 
     # Clean up: dispatch and confirm to release the reservation.
     gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
