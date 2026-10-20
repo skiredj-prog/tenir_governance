@@ -637,3 +637,28 @@ def test_invalid_incident_id_cannot_change_quarantine(tmp_path, invalid):
         governor.lock_quarantine("watch", incident_id=invalid)
     assert _lock_id(store) == original
     assert governor.registry.quarantine_is_active() is True
+
+
+def test_unbound_membrane_new_incident_also_invalidates_old_proof():
+    """Standalone MembraneState must honor incident epochs without a registry."""
+    state = MembraneState(quarantine_release_verifier=_trusted_test_verifier)
+    state.lock_quarantine("local-operator", incident_id="local-001")
+    first = state._quarantine_lock_id
+    state.lock_quarantine("local-operator", incident_id="local-001")
+    assert state._quarantine_lock_id == first
+
+    state.lock_quarantine("local-operator", incident_id="local-002")
+    second = state._quarantine_lock_id
+    assert first != second
+    assert state.quarantine_active is True
+    denied = state.release_quarantine(
+        "operator", "lei", _test_token(first),
+    )
+    assert denied["released"] is False
+    assert state.quarantine_active is True
+    accepted = state.release_quarantine(
+        "operator", "lei", _test_token(second),
+    )
+    assert accepted["released"] is True
+    assert state.quarantine_active is False
+    assert state._quarantine_incident_id is None
