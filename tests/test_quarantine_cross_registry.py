@@ -469,3 +469,57 @@ def test_stale_verified_unlock_cannot_release_new_quarantine_epoch(tmp_path):
     assert "changed during authorization" in outcome["reason"]
     assert original.registry.quarantine_is_active() is True
     assert _governor(store).registry.quarantine_is_active() is True
+
+
+def test_slow_hold_kernel_does_not_delay_emergency_quarantine(tmp_path):
+    """A quarantine activated mid-HOLD evaluation must retain HOLD, not admit."""
+    store = tmp_path / "ops.json"
+    resolver = _governor(store)
+    locker = _governor(store)
+    key = "slow-hold-quarantine"
+    passage = Passage(
+        passage_id="slow-held-passage", idempotency_key=key,
+        agent_id="alice", action_type="read_only",
+    )
+    assert resolver.registry.register(OperationRecord(
+        idempotency_key=key, passage_id=passage.passage_id,
+        agent_id=passage.agent_id, action_type=passage.action_type,
+    ))
+    assert resolver.hold_manager.enter_hold(key, tau_k_seconds=3600)["entered"]
+
+    evaluation_started = threading.Event()
+    resume_evaluation = threading.Event()
+
+    class SlowScoring:
+        def adjudicate(self, **kwargs):
+            evaluation_started.set()
+            assert resume_evaluation.wait(8)
+            return {"decision": "PASS", "rationale": "controlled fresh evidence"}
+
+    resolver.scoring = SlowScoring()
+    outcome = {}
+    resolution = threading.Thread(
+        target=lambda: outcome.update(resolver.resolve_hold(
+            key, passage=passage,
+            authority=0.9, context_fit=0.9, evidence_quality=0.9,
+        )), daemon=True,
+    )
+    resolution.start()
+    try:
+        assert evaluation_started.wait(5)
+        activation_done = threading.Event()
+        activation = threading.Thread(
+            target=lambda: (locker.lock_quarantine("emergency"),
+                            activation_done.set()), daemon=True,
+        )
+        activation.start()
+        assert activation_done.wait(3), "HOLD evaluation blocked emergency quarantine"
+        assert locker.registry.quarantine_is_active() is True
+    finally:
+        resume_evaluation.set()
+        resolution.join(8)
+    assert not resolution.is_alive()
+    assert outcome["hold_resolved"] is False
+    assert outcome["composed_decision"] == "HOLD"
+    assert "QUARANTINE_LOCK" in outcome["composed_rationale"]
+    assert resolver.registry.get(key).state == OperationState.HOLD
