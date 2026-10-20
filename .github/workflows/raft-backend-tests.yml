@@ -17,6 +17,7 @@ on:
       - "tests/test_liveness.py"
       - "tests/test_hold_lifecycle.py"
       - "tests/test_sqlite_governor_crash_recovery.py"
+      - "tests/test_subprocess_provenance.py"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
   push:
@@ -35,6 +36,7 @@ on:
       - "tests/test_liveness.py"
       - "tests/test_hold_lifecycle.py"
       - "tests/test_sqlite_governor_crash_recovery.py"
+      - "tests/test_subprocess_provenance.py"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
 
@@ -68,3 +70,92 @@ jobs:
         run: pytest -q tests/test_hold_lifecycle.py
       - name: Run SQLite cross-store crash recovery campaign
         run: pytest -q tests/test_sqlite_governor_crash_recovery.py
+      - name: Validate subprocess source provenance and Decimal state
+        run: pytest -q tests/test_subprocess_provenance.py
+
+  packaging-preflight:
+    name: Python 3.12 packaging preflight (no publishing)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      TENIR_ENV: test
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Verify candidate version without creating a tag
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import tomllib
+          assert tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"] == "5.7.0"
+          print("Preflight candidate version 5.7.0 confirmed; no tag/publish")
+          PY
+      - name: Install test and build tools
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Install project with test dependencies
+        run: |
+          python -m pip install -e ".[test,raft]"
+          python -m pip check
+
+      - name: Verify Raft tests run with explicitly declared non-production scope
+        env:
+          TENIR_ENV: test
+        run: |
+          python -c "import pysyncobj"
+          python -m pytest tests/test_raft_backend.py -q
+
+      - name: Run the full test suite
+        env:
+          TENIR_ENV: test
+        run: python -m pytest tests/ -q
+
+      - name: Build wheel and source distribution
+        run: python -m build
+
+      - name: Validate distribution metadata
+        run: python -m twine check --strict dist/*
+
+      - name: Verify required modules are in both distributions
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import tarfile
+          import zipfile
+
+          required = {
+              "tenir_governance/operations/provider.py",
+              "tenir_governance/operations/hold.py",
+              "tenir_governance/assessment/__init__.py",
+              "tenir_governance/assessment/tau_inversion.py",
+              "tenir_governance/assessment/evp.py",
+              "tenir_governance/assessment/assessor.py",
+          }
+          wheels = list(Path("dist").glob("*.whl"))
+          sdists = list(Path("dist").glob("*.tar.gz"))
+          if len(wheels) != 1 or len(sdists) != 1:
+              raise SystemExit(f"Expected exactly one wheel and sdist; got {len(wheels)} wheel(s), {len(sdists)} sdist(s)")
+
+          with zipfile.ZipFile(wheels[0]) as archive:
+              wheel_names = set(archive.namelist())
+          missing_wheel = sorted(required - wheel_names)
+          if missing_wheel:
+              raise SystemExit(f"Wheel is missing required modules: {missing_wheel}")
+
+          with tarfile.open(sdists[0], "r:gz") as archive:
+              sdist_names = {name.split("/", 1)[1] for name in archive.getnames() if "/" in name}
+          missing_sdist = sorted(required - sdist_names)
+          if missing_sdist:
+              raise SystemExit(f"Source distribution is missing required modules: {missing_sdist}")
+
+          print("Wheel and source distribution contain provider, HOLD, and assessment modules.")
+          PY
+
