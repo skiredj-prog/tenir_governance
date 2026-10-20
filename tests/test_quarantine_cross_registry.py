@@ -890,3 +890,62 @@ def test_release_failure_before_inactive_mark_never_clears_lock(tmp_path, monkey
     fresh = _governor(store)
     assert fresh.registry.quarantine_is_active() is True
     assert fresh.release_quarantine("operator", "lei", "ceremony-G-R5-001")["released"] is False
+
+
+def _child_direct_registry_transition(store_path, key, target_name, queue):
+    """Independent Python interpreter calling the registry without a governor."""
+    try:
+        registry = DurableOperationRegistry(str(store_path))
+        success, previous = registry.transition_to(key, OperationState(target_name))
+        latest = registry.get(key)
+        queue.put({
+            "success": success,
+            "previous": previous.value if previous else None,
+            "state": latest.state.value if latest else None,
+        })
+    except BaseException as exc:
+        queue.put({"error": repr(exc)})
+
+
+def test_independent_process_direct_claim_obeys_shared_quarantine(tmp_path):
+    """Direct durable registry users cannot bypass lock from a second process."""
+    store = tmp_path / "raw-process-claims.json"
+    owner = _governor(store, verifier=_trusted_test_verifier)
+    assert owner.registry.register(OperationRecord(
+        idempotency_key="created-cross-process", passage_id="created-p",
+        agent_id="alice", action_type="payment",
+    ))
+    _register_reserved(owner, "reserved-cross-process")
+    owner.lock_quarantine("watch", incident_id="case-cross-process")
+    ctx = multiprocessing.get_context("spawn")
+
+    def attempt(key, target):
+        queue = ctx.Queue()
+        worker = ctx.Process(
+            target=_child_direct_registry_transition,
+            args=(str(store), key, target.value, queue),
+        )
+        worker.start()
+        worker.join(15)
+        assert worker.exitcode == 0
+        return queue.get(timeout=5)
+
+    created = attempt("created-cross-process", OperationState.RESERVED)
+    assert "error" not in created
+    assert created == {
+        "success": False,
+        "previous": OperationState.CREATED.value,
+        "state": OperationState.CREATED.value,
+    }
+    dispatch = attempt("reserved-cross-process", OperationState.DISPATCHING)
+    assert "error" not in dispatch
+    assert dispatch == {
+        "success": False,
+        "previous": OperationState.RESERVED.value,
+        "state": OperationState.RESERVED.value,
+    }
+
+    assert _release(owner, store)["released"] is True
+    admitted = attempt("created-cross-process", OperationState.RESERVED)
+    assert admitted["success"] is True
+    assert admitted["state"] == OperationState.RESERVED.value
