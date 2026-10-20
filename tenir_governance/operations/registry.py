@@ -510,11 +510,24 @@ class DurableOperationRegistry:
             return {"active": True, "corrupted": True}
         if not isinstance(item, dict) or type(item.get("active")) is not bool:
             return {"active": True, "corrupted": True}
-        if item["active"] and (
-            not isinstance(item.get("lock_id"), str)
-            or not item["lock_id"].strip()
-        ):
+        if not isinstance(item.get("lock_id"), str) or not item["lock_id"].strip():
             return {"active": True, "corrupted": True}
+        if not item["active"]:
+            # A durable inactive mark can exist ONLY after an authorized
+            # release. A partial JSON object like {"active": false} must not
+            # silently grant admission after data corruption.
+            receipt = item.get("release_receipt")
+            if (
+                not isinstance(receipt, dict)
+                or receipt.get("lock_id") != item["lock_id"]
+                or not isinstance(receipt.get("authorization_id"), str)
+                or not receipt["authorization_id"].strip()
+                or not isinstance(receipt.get("authorized_by"), str)
+                or not receipt["authorized_by"].strip()
+                or not isinstance(receipt.get("scope"), str)
+                or not receipt["scope"].strip()
+            ):
+                return {"active": True, "corrupted": True}
         return item
 
     def _quarantine_write_locked(self, mark: dict) -> None:
