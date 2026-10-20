@@ -575,3 +575,65 @@ def test_malformed_inactive_mark_never_unlocks(tmp_path, malformed):
     assert recovered.quarantine_is_active() is True
     with pytest.raises(RuntimeError, match="corrupt"):
         recovered.set_quarantine(True)
+
+
+def test_distinct_incident_renews_active_lock_and_invalidates_pending_release(tmp_path):
+    """An independent incident must not be cleared by proof for the old epoch."""
+    store = tmp_path / "ops.json"
+    verification_started = threading.Event()
+    complete_verification = threading.Event()
+
+    def suspended_verifier(**kwargs):
+        verification_started.set()
+        assert complete_verification.wait(8)
+        return _trusted_test_verifier(**kwargs)
+
+    original = _governor(store, verifier=suspended_verifier)
+    other = _governor(store, verifier=_trusted_test_verifier)
+    original.lock_quarantine("incident-operator", incident_id="case-001")
+    first_lock_id = _lock_id(store)
+
+    result = {}
+    pending = threading.Thread(
+        target=lambda: result.update(
+            _release(original, store, token=_test_token(first_lock_id))
+        ),
+        daemon=True,
+    )
+    pending.start()
+    try:
+        assert verification_started.wait(5)
+        # Same incident ID is idempotent, including from another worker.
+        other.membrane.lock_quarantine("another-operator", incident_id="case-001")
+        assert _lock_id(store) == first_lock_id
+        # A distinct incident while release verification is in progress
+        # must mint a fresh lock identity before the old proof can commit.
+        other.lock_quarantine("incident-operator", incident_id="case-002")
+        second_lock_id = _lock_id(store)
+        assert second_lock_id != first_lock_id
+        assert other.registry.quarantine_is_active() is True
+    finally:
+        complete_verification.set()
+        pending.join(8)
+
+    assert not pending.is_alive()
+    assert result["released"] is False
+    assert "changed during authorization" in result["reason"]
+    assert other.registry.quarantine_is_active() is True
+    assert _release(other, store, token=_test_token(first_lock_id))["released"] is False
+    fresh = _release(other, store, token=_test_token(second_lock_id))
+    assert fresh["released"] is True
+    assert fresh["receipt"]["incident_id"] == "case-002"
+    assert original.registry.quarantine_is_active() is False
+
+
+@pytest.mark.parametrize("invalid", ["", " ", 123, False, {}, []])
+def test_invalid_incident_id_cannot_change_quarantine(tmp_path, invalid):
+    store = tmp_path / "ops.json"
+    governor = _governor(store)
+    governor.lock_quarantine("watch", incident_id="case-001")
+    original = _lock_id(store)
+    with pytest.raises(ValueError, match="incident_id"):
+        governor.lock_quarantine("watch", incident_id=invalid)
+    assert _lock_id(store) == original
+    assert governor.registry.quarantine_is_active() is True
