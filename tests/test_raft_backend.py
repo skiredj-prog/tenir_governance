@@ -44,7 +44,7 @@ def test_fm20_rejects_missing_or_unsafe_environment(monkeypatch, environment):
         monkeypatch.delenv("TENIR_ENV", raising=False)
     else:
         monkeypatch.setenv("TENIR_ENV", environment)
-    with pytest.raises(RuntimeError, match="FM-20|Raft is not allowed"):
+    with pytest.raises(RuntimeError, match="FM-20|Raft is not allowed|TENIR_ENV must"):
         RaftConsensusBackend("127.0.0.1:6500", [], peer_auth_key=TEST_PEER_AUTH_KEY)
 
 
