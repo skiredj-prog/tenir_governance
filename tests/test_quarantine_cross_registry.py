@@ -949,3 +949,108 @@ def test_independent_process_direct_claim_obeys_shared_quarantine(tmp_path):
     admitted = attempt("created-cross-process", OperationState.RESERVED)
     assert admitted["success"] is True
     assert admitted["state"] == OperationState.RESERVED.value
+
+
+@pytest.mark.parametrize("blocked_call", ["get_state", "commit"])
+def test_slow_durable_backend_does_not_block_emergency_quarantine(
+    tmp_path, blocked_call,
+):
+    """Only the dispatch claim, not remote budget I/O, holds the shared gate."""
+    from types import SimpleNamespace
+
+    store = tmp_path / f"backend-block-{blocked_call}.json"
+    claimant = _governor(store)
+    locker = _governor(store)
+    key = "backend-blocked-op"
+    assert claimant.registry.register(OperationRecord(
+        idempotency_key=key, passage_id="p-backend-blocked",
+        agent_id="alice", action_type="payment",
+        resource_id="budget", amount=10.0,
+    ))
+    assert claimant.registry.set_budget_flags(
+        key, budget_reserved=True, reservation_id="reservation-test-id",
+    )
+    assert claimant.registry.transition_to(key, OperationState.RESERVED)[0]
+
+    entered = threading.Event()
+    resume_backend = threading.Event()
+    class PausedBackend:
+        def _pause(self, which):
+            if which == blocked_call:
+                entered.set()
+                assert resume_backend.wait(8), f"{which} remained blocked"
+
+        def get_state(self, resource_id):
+            assert resource_id == "budget"
+            self._pause("get_state")
+            return SimpleNamespace(reservations=[
+                {"reservation_id": "reservation-test-id", "state": "RESERVED"},
+            ])
+
+        def commit(self, reservation_id):
+            assert reservation_id == "reservation-test-id"
+            self._pause("commit")
+            return SimpleNamespace(status="COMMITTED")
+
+    claimant.consensus_backend = PausedBackend()
+    outcome = {}
+    worker = threading.Thread(
+        target=lambda: outcome.update(claimant.dispatch(key)), daemon=True,
+    )
+    worker.start()
+    try:
+        assert entered.wait(5), "backend did not reach expected blocked call"
+        assert claimant.registry.get(key).state == OperationState.DISPATCHING
+        activated = threading.Event()
+        emergency = threading.Thread(
+            target=lambda: (locker.lock_quarantine("emergency", incident_id="new-incident"),
+                            activated.set()), daemon=True,
+        )
+        emergency.start()
+        assert activated.wait(3), f"quarantine blocked by backend.{blocked_call}()"
+        assert locker.registry.quarantine_is_active() is True
+        assert locker.registry.get(key).state == OperationState.DISPATCHING
+    finally:
+        resume_backend.set()
+        worker.join(8)
+
+    assert not worker.is_alive()
+    assert outcome["dispatched"] is True
+    assert claimant.registry.get(key).state == OperationState.DISPATCHING
+    assert claimant.registry.get(key).budget_committed is True
+    assert locker.registry.quarantine_is_active() is True
+    assert locker.dispatch(key)["dispatched"] is False
+
+
+def test_failed_claimed_backend_commit_does_not_expose_provider_execution(tmp_path):
+    """Backend uncertainty after the durable claim never reports dispatch success."""
+    from types import SimpleNamespace
+
+    store = tmp_path / "backend-rejected-commit.json"
+    gov = _governor(store)
+    key = "backend-commit-refused"
+    assert gov.registry.register(OperationRecord(
+        idempotency_key=key, passage_id="p-commit-refused",
+        agent_id="alice", action_type="payment",
+        resource_id="budget", amount=10.0,
+    ))
+    assert gov.registry.set_budget_flags(
+        key, budget_reserved=True, reservation_id="reservation-refused",
+    )
+    assert gov.registry.transition_to(key, OperationState.RESERVED)[0]
+
+    class RefusingBackend:
+        def get_state(self, resource_id):
+            return SimpleNamespace(reservations=[
+                {"reservation_id": "reservation-refused", "state": "RESERVED"},
+            ])
+
+        def commit(self, reservation_id):
+            return SimpleNamespace(status="REFUSED")
+
+    gov.consensus_backend = RefusingBackend()
+    result = gov.dispatch(key)
+    assert result["dispatched"] is False
+    assert result["operation_state"] == OperationState.DISPATCHING.value
+    assert "refused commit" in result["reason"]
+    assert gov.registry.get(key).budget_committed is False
