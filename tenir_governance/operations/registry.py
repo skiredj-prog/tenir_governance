@@ -575,11 +575,44 @@ class DurableOperationRegistry:
         self, *, authorized_by: str, scope: str,
         authorization: str, reason: str = "",
     ) -> dict[str, Any]:
-        """Validate externally authenticated proof inside the shared gate.
+        """Verify outside the shared gate, then atomically check-and-release.
 
-        Refuses absent/corrupt records and unconfigured verifiers; an opaque
-        caller-supplied ceremony string alone never authorizes a release.
+        Trusted verification may involve slow external I/O. Never hold the
+        quarantine gate or registry mutex while calling it: other workers
+        must retain access to emergency locking and guarded dispatch checks.
+        A lock-id comparison at commit rejects stale or replayed proofs.
         """
+        with self.quarantine_guard():
+            with self._lock:
+                initial = self._quarantine_read_locked()
+                if initial.get("corrupted"):
+                    return {
+                        "released": False,
+                        "reason": "QUARANTINE_LOCK mark corrupt; manual recovery required.",
+                        "receipt": None,
+                    }
+                if not initial["active"]:
+                    return {
+                        "released": False,
+                        "reason": "No quarantine lock active.",
+                        "receipt": None,
+                    }
+                expected_lock_id = initial["lock_id"]
+
+        # Never call user-supplied integration code under either critical lock.
+        proof = _verify_quarantine_release(
+            self._quarantine_release_verifier,
+            authorized_by=authorized_by, scope=scope,
+            authorization=authorization, reason=reason,
+            lock_id=expected_lock_id,
+        )
+        if proof is None:
+            return {
+                "released": False,
+                "reason": "QUARANTINE_LOCK release denied: authorization not verified.",
+                "receipt": None,
+            }
+
         with self.quarantine_guard():
             with self._lock:
                 mark = self._quarantine_read_locked()
@@ -589,28 +622,18 @@ class DurableOperationRegistry:
                         "reason": "QUARANTINE_LOCK mark corrupt; manual recovery required.",
                         "receipt": None,
                     }
-                if not mark["active"]:
+                if not mark["active"] or mark.get("lock_id") != expected_lock_id:
                     return {
                         "released": False,
-                        "reason": "No quarantine lock active.",
-                        "receipt": None,
-                    }
-                proof = _verify_quarantine_release(
-                    self._quarantine_release_verifier,
-                    authorized_by=authorized_by, scope=scope,
-                    authorization=authorization, reason=reason,
-                    lock_id=mark["lock_id"],
-                )
-                if proof is None:
-                    return {
-                        "released": False,
-                        "reason": "QUARANTINE_LOCK release denied: authorization not verified.",
+                        "reason": "QUARANTINE_LOCK changed during authorization; fresh verification required.",
                         "receipt": None,
                     }
                 receipt = {
                     "authorized_by": proof["principal"],
                     "scope": proof["scope"],
-                    "authorization": authorization,
+                    # Never put the original credential/bearer token in a
+                    # durable receipt. The verifier supplies a safe reference.
+                    "authorization": "[redacted]",
                     "authorization_id": proof["authorization_id"],
                     "lock_id": proof["lock_id"],
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -618,7 +641,6 @@ class DurableOperationRegistry:
                     "locked_by": mark.get("locked_by", ""),
                 }
                 # Persist unlocked state BEFORE returning a success receipt.
-                # A failure to persist cannot falsely unlock another worker.
                 self._quarantine_write_locked({
                     "active": False,
                     "lock_id": mark["lock_id"],
