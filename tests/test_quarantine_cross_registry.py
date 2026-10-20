@@ -677,3 +677,115 @@ def test_prebound_incident_identity_is_preserved_on_registry_binding(tmp_path):
     assert mark["incident_id"] == "case-before-bind"
     assert mark["locked_by"] == "prebind-watch"
     assert state.quarantine_active is True
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_direct_registry_claims_cannot_bypass_quarantine(tmp_path, persistent):
+    """Public transition_to must obey I6 without a governor or membrane."""
+    store = str(tmp_path / "direct-claims.json") if persistent else None
+    reg = DurableOperationRegistry(store)
+    for key in ("direct-created", "direct-reserved", "direct-held"):
+        assert reg.register(OperationRecord(
+            idempotency_key=key, passage_id=f"p-{key}",
+            agent_id="alice", action_type="payment",
+        ))
+    assert reg.transition_to("direct-reserved", OperationState.RESERVED)[0]
+    assert reg.transition_to("direct-held", OperationState.HOLD)[0]
+    reg.set_quarantine(True, locked_by="emergency", incident_id="direct-case")
+
+    for key, target, prior in (
+        ("direct-created", OperationState.RESERVED, OperationState.CREATED),
+        ("direct-reserved", OperationState.DISPATCHING, OperationState.RESERVED),
+        ("direct-held", OperationState.RESERVED, OperationState.HOLD),
+    ):
+        admitted, seen_state = reg.transition_to(key, target)
+        assert admitted is False
+        assert seen_state == prior
+        assert reg.get(key).state == prior
+
+    # Fail-closed transitions must remain possible during quarantine.
+    assert reg.transition_to("direct-held", OperationState.FAILED)[0]
+    assert reg.get("direct-held").state == OperationState.FAILED
+
+
+def test_hold_manager_authorized_exit_cannot_override_quarantine(tmp_path):
+    """An exit receipt is not authority to ignore LEI quarantine I6."""
+    from tenir_governance.operations.hold import HoldManager
+
+    store = tmp_path / "exit-guard.json"
+    reg = DurableOperationRegistry(str(store))
+    key = "escalated-under-quarantine"
+    assert reg.register(OperationRecord(
+        idempotency_key=key, passage_id="p-escalated",
+        agent_id="alice", action_type="payment",
+    ))
+    manager = HoldManager(reg)
+    assert manager.enter_hold(key, tau_k_seconds=3600)["entered"]
+    assert manager.escalate_hold(key, escalated_by="risk-officer")["escalated"]
+    original = reg.get(key).hold_record
+
+    reg.set_quarantine(True, locked_by="incident", incident_id="case-exit")
+    blocked = manager.authorize_exit(
+        key, authorized_by="risk-officer", scope="payment",
+        authorization="ceremony-G-R5-001", approve=True,
+    )
+    assert blocked["exited"] is False
+    assert blocked["exit_receipt"] is None
+    assert blocked["operation_state"] == OperationState.ESCALATED.value
+    after = reg.get(key)
+    assert after.hold_record.exit_receipt is None
+    assert after.hold_record.exit_reason == original.exit_reason
+
+    # Denying the unsafe operation remains available under quarantine.
+    denied = manager.authorize_exit(
+        key, authorized_by="risk-officer", scope="payment",
+        authorization="ceremony-G-R5-001", approve=False,
+    )
+    assert denied["exited"] is True
+    assert reg.get(key).state == OperationState.FAILED
+
+
+def test_direct_claim_and_activation_serialize_under_shared_gate(tmp_path, monkeypatch):
+    """A direct transition that began first must finish before lock activation."""
+    store = tmp_path / "direct-race.json"
+    claimant = DurableOperationRegistry(str(store))
+    locker = DurableOperationRegistry(str(store))
+    key = "direct-race"
+    assert claimant.register(OperationRecord(
+        idempotency_key=key, passage_id="p-direct-race",
+        agent_id="alice", action_type="payment",
+    ))
+    entered = threading.Event()
+    proceed = threading.Event()
+    activation_complete = threading.Event()
+    original = claimant._transition_to_unchecked_quarantine
+    output = {}
+
+    def paused_claim(*args, **kwargs):
+        if args[1] == OperationState.RESERVED:
+            entered.set()
+            assert proceed.wait(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(claimant, "_transition_to_unchecked_quarantine", paused_claim)
+    claiming = threading.Thread(
+        target=lambda: output.update(success=claimant.transition_to(key, OperationState.RESERVED)[0]),
+        daemon=True,
+    )
+    claiming.start()
+    assert entered.wait(5)
+    activation = threading.Thread(
+        target=lambda: (locker.set_quarantine(True, incident_id="race-incident"),
+                        activation_complete.set()), daemon=True,
+    )
+    activation.start()
+    assert not activation_complete.wait(0.15)
+    proceed.set()
+    claiming.join(5)
+    activation.join(5)
+    assert not claiming.is_alive() and not activation.is_alive()
+    assert output["success"] is True
+    assert activation_complete.is_set()
+    assert locker.quarantine_is_active()
+    assert claimant.transition_to(key, OperationState.DISPATCHING)[0] is False
+    assert locker.get(key).state == OperationState.RESERVED
