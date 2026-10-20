@@ -1,8 +1,9 @@
 """Optional Raft adapter, blocked for production in the v5.7 release line.
 
 This module provides a Raft ConsensusBackend adapter using pysyncobj. It is
-available for development and integration tests only while FM-20 remains open:
-v5.7 blocks production startup and the multi-host deployment scope.
+available for explicitly declared development and integration tests only while
+FM-20 remains open. v5.7 blocks production, staging, unspecified environments,
+remote node addresses and the multi-host deployment scope.
 
 Architecture:
     - Budget state (capacity, reserved, committed) is replicated across all
@@ -28,13 +29,14 @@ Limitations:
     - Network partitions: safety maintained, liveness requires quorum
     - reconcile() depends on provider availability
     - pysyncobj uses pickle for serialization (not cryptographically signed)
-    - v5.7 hard-disables production Raft and HOST_SCOPE=multi-host; local tests do
-      not establish physical multi-host behavior or safe network transport
+    - v5.7 requires explicit development/test and loopback-only endpoints.
+      FM-20 remains open: local tests do not establish secure network transport
 """
 # Profile: agentic-governance-profile-v1.0.0
 # Compliance class: profile-bound
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import threading
@@ -75,6 +77,57 @@ from tenir_governance.deployment_safety import (
 
 MAX_AMOUNT = Decimal("1000000000000000000")
 MIN_PEER_AUTH_KEY_LENGTH = 32
+
+
+def _raft_loopback_address(address):
+    """Accept only explicit loopback host:port endpoints, not remote DNS peers."""
+    if not isinstance(address, str):
+        return False
+    host, sep, port = address.rpartition(":")
+    if not sep or not port.isascii() or not port.isdecimal():
+        return False
+    if not 1 <= int(port) <= 65535:
+        return False
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    elif ":" in host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _enforce_raft_dev_loopback(self_addr, other_addrs):
+    """FM-20 boundary: reject unsafe nodes before opening a PySyncObj socket."""
+    declared = {
+        key: value.strip().lower()
+        for key in ("TENIR_ENV", "ENVIRONMENT")
+        if (value := os.environ.get(key)) is not None
+    }
+    if not declared or len(set(declared.values())) != 1 or any(
+        value not in ("development", "test") for value in declared.values()
+    ):
+        raise RuntimeError(
+            "FM-20: Raft requires explicitly declared development/test; "
+            "missing, staging and production environments are prohibited."
+        )
+    scopes = {
+        value.strip().lower().replace("_", "-")
+        for key in ("HOST_SCOPE", "TENIR_HOST_SCOPE")
+        if (value := os.environ.get(key)) is not None
+    }
+    if any(value != "single-host" for value in scopes):
+        raise RuntimeError("FM-20: Raft multi-host scope is prohibited in v5.7.0.")
+    if not isinstance(other_addrs, (list, tuple)) or not _raft_loopback_address(self_addr) or any(
+        not _raft_loopback_address(peer) for peer in other_addrs
+    ):
+        raise RuntimeError(
+            "FM-20: Raft endpoints must use explicit loopback host:port "
+            "addresses; remote and wildcard addresses are prohibited."
+        )
 
 
 def _validate_peer_auth_key(peer_auth_key):
@@ -440,6 +493,7 @@ class RaftConsensusBackend:
         enforce_host_scope()
         if runtime_environment() == "production":
             raise RuntimeError(RAFT_PRODUCTION_DISABLED_MESSAGE)
+        _enforce_raft_dev_loopback(self_addr, other_addrs)
         peer_auth_key = _validate_peer_auth_key(peer_auth_key)
         if SyncObj is None:
             raise ImportError(
