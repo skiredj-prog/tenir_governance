@@ -768,6 +768,42 @@ class DurableOperationRegistry:
         hold_record: HoldRecord | None = None,
         hold_record_changes: Mapping[str, Any] | None = None,
     ) -> tuple[bool, OperationState | None]:
+        """Enforce shared quarantine even for direct registry admission calls.
+
+        Every path to RESERVED or DISPATCHING, including a HoldManager exit
+        or a direct registry caller, must linearize against quarantine
+        activation. Other transitions remain available for fail-closed
+        settlement and recovery. A previously DISPATCHING claim may finish.
+        """
+        if new_state in (OperationState.RESERVED, OperationState.DISPATCHING):
+            with self.quarantine_guard():
+                if self.quarantine_is_active():
+                    current = self.get(idempotency_key)
+                    return False, current.state if current is not None else None
+                return self._transition_to_unchecked_quarantine(
+                    idempotency_key,
+                    new_state,
+                    claimed_by=claimed_by,
+                    hold_record=hold_record,
+                    hold_record_changes=hold_record_changes,
+                )
+        return self._transition_to_unchecked_quarantine(
+            idempotency_key,
+            new_state,
+            claimed_by=claimed_by,
+            hold_record=hold_record,
+            hold_record_changes=hold_record_changes,
+        )
+
+    def _transition_to_unchecked_quarantine(
+        self,
+        idempotency_key: str,
+        new_state: OperationState,
+        claimed_by: str = "",
+        *,
+        hold_record: HoldRecord | None = None,
+        hold_record_changes: Mapping[str, Any] | None = None,
+    ) -> tuple[bool, OperationState | None]:
         """Atomically transition an operation to a new state.
 
         This is the critical atomic operation. It checks:
