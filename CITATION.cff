@@ -15,9 +15,9 @@ abstract: >
   production and remote peers while FM-20 remains open.
 version: "5.6.1"
 license: Apache-2.0
-repository-code: "https://github.com/skiredj-prog/tenir-governance"
-doi: 10.5281/zenodo.21264803
-url: "https://github.com/skiredj-prog/tenir-governance"
+repository-code: "https://github.com/skiredj-prog/tenir_governance"
+doi: 10.5281/zenodo.21277138
+url: "https://github.com/skiredj-prog/tenir_governance"
 keywords:
   - governance middleware
   - AI governance
@@ -37,17 +37,5 @@ authors:
     orcid: "https://orcid.org/0009-0003-2678-4069"
 identifiers:
   - type: doi
-    value: 10.5281/zenodo.21264803
+    value: 10.5281/zenodo.21277138
     description: "Zenodo archive of TENIR-Gov"
-references:
-  - type: article
-    title: >
-      TENIR-Gov: An Open-Source Governance Middleware Combining
-      Deterministic Policy Enforcement, Neuro-Symbolic Validation,
-      and Verifiable Audit Logging for AI-Enabled Operational Systems
-    authors:
-      - family-names: Skiredj
-        given-names: Abdelaziz
-    journal: SoftwareX
-    year: 2026
-    doi: 10.5281/zenodo.21264803

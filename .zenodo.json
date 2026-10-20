@@ -27,14 +27,7 @@
   ],
   "language": "eng",
   "access_right": "open",
-  "related_identifiers": [
-    {
-      "relation": "isDocumentedBy",
-      "identifier": "10.5281/zenodo.21264803",
-      "scheme": "doi",
-      "resource_type": "publication-article"
-    }
-  ],
+  "related_identifiers": [],
   "communities": [],
-  "notes": "Release 5.6.1 candidate (not yet published): Raft budget safety and deterministic state hardening. FM-20 remains open; PySyncObj transport is restricted to explicitly declared development/test environments with loopback-only peers. Production and physical multi-host Raft are unsupported. Existing DOI identifiers are preserved pending release-owner confirmation."
+  "notes": "Release 5.6.1 candidate (not yet published): Raft budget safety and deterministic state hardening. FM-20 remains open; PySyncObj transport is restricted to explicitly declared development/test environments with loopback-only peers. Production and physical multi-host Raft are unsupported. Existing DOI identifiers are preserved pending release-owner confirmation. The historic 10.5281/zenodo.21264803 article link was withheld from publication metadata pending an authoritative bibliographic check."
 }
