@@ -65,7 +65,11 @@ class MembraneState:
                 raise RuntimeError("MembraneState already bound to a different operation registry.")
             self._quarantine_registry = registry
             if self.quarantine:
-                registry.set_quarantine(True, locked_by=self.quarantine_locked_by)
+                registry.set_quarantine(
+                    True,
+                    locked_by=self.quarantine_locked_by,
+                    incident_id=self._quarantine_incident_id,
+                )
 
     def register_agent(self, agent: Agent) -> None:
         self.agents[agent.agent_id] = agent
