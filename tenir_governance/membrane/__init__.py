@@ -212,11 +212,12 @@ class MembraneState:
     @property
     def quarantine_active(self) -> bool:
         """Check if quarantine lock is currently active."""
-        if self.quarantine:
-            return True
         if self._quarantine_registry is not None:
+            # Shared durable state is authoritative. A different worker can
+            # release an earlier lock while this worker's local flag remains
+            # set; stale memory must not permanently block valid admissions.
             return self._quarantine_registry.quarantine_is_active()
-        return False
+        return self.quarantine
 
 
 @dataclass
