@@ -532,9 +532,63 @@ class DualKernelGovernor:
             composed_decision=composed_decision,
         )
 
-        # The cross-process gate covers both the shared mark check and the
-        # entire durable admission/reservation/HOLD claim. Lock activation
-        # cannot overtake this transaction between its check and transition.
+        # A network-backed reservation can block indefinitely. Perform that
+        # external call before taking the shared quarantine gate, then make
+        # the final admission decision and state claim under the gate. If an
+        # emergency lock wins while reserve() is in flight, compensate the
+        # reservation only after leaving the gate.
+        external_reservation_acquired = False
+        external_reservation_id = None
+        retains_operation = composed_decision in (
+            Decision.PASS.value, Decision.FLAG.value, Decision.HOLD.value,
+        )
+        if (retains_operation and budget_in_scope and self.consensus_backend is not None):
+            # Avoid creating a reservation if quarantine is already active.
+            # This short read is intentionally separate from reserve(): the
+            # lock may activate immediately afterward, in which case the
+            # final claim below vetoes and compensates the late reservation.
+            with self.membrane.state._quarantine_lock:
+                with self.registry.quarantine_guard():
+                    already_quarantined = self._quarantine_blocks()
+            if already_quarantined:
+                composed_decision = Decision.HARD_VETO.value
+                composed_rationale = (
+                    "QUARANTINE_LOCK is active; admission and reservation blocked."
+                )
+                self.ledger.append(
+                    kernel="composed",
+                    decision=composed_decision,
+                    rationale=composed_rationale,
+                    passage_id=passage.passage_id,
+                    idempotency_key=idem_key,
+                )
+            else:
+                if not self._reserve_budget(idem_key, resource_id, amount):
+                    composed_decision = Decision.HARD_VETO.value
+                    composed_rationale = (
+                        "Budget reservation failed at commit point (concurrent consumption) "
+                        "— fail-closed HARD_VETO."
+                    )
+                    self.ledger.append(
+                        kernel="composed",
+                        decision=composed_decision,
+                        rationale=composed_rationale,
+                        passage_id=passage.passage_id,
+                        idempotency_key=idem_key,
+                    )
+                else:
+                    reservation_record = self.registry.get(idem_key)
+                    external_reservation_id = (
+                        reservation_record.reservation_id if reservation_record else None
+                    )
+                    external_reservation_acquired = bool(
+                        reservation_record
+                        and reservation_record.budget_reserved
+                        and reservation_record.reservation_id
+                    )
+
+        # The cross-process gate linearizes quarantine activation against the
+        # final admission/HOLD claim. No external budget call runs inside it.
         with self.membrane.state._quarantine_lock:
             with self.registry.quarantine_guard():
                 # 6a. Budget ownership: a reservation is taken here, exactly once,
@@ -553,14 +607,23 @@ class DualKernelGovernor:
                             composed_rationale = (
                                 "QUARANTINE_LOCK activated during adjudication; admission and reservation blocked."
                             )
-                        elif budget_in_scope and not self._reserve_budget(
-                            idem_key, resource_id, amount,
-                        ):
-                            composed_decision = Decision.HARD_VETO.value
-                            composed_rationale = (
-                                "Budget reservation failed at commit point (concurrent consumption) "
-                                "— fail-closed HARD_VETO."
-                            )
+                    if (budget_in_scope and self.consensus_backend is None
+                            and composed_decision != Decision.HARD_VETO.value
+                            and not self._reserve_budget(
+                                idem_key, resource_id, amount,
+                    )):
+                        composed_decision = Decision.HARD_VETO.value
+                        composed_rationale = (
+                            "Budget reservation failed at commit point (concurrent consumption) "
+                            "— fail-closed HARD_VETO."
+                        )
+                        self.ledger.append(
+                            kernel="composed",
+                            decision=composed_decision,
+                            rationale=composed_rationale,
+                            passage_id=passage.passage_id,
+                            idempotency_key=idem_key,
+                        )
                     if composed_decision == Decision.HARD_VETO.value:
                         self.ledger.append(
                             kernel="composed",
@@ -574,36 +637,24 @@ class DualKernelGovernor:
                 if composed_decision == Decision.PASS.value or composed_decision == Decision.FLAG.value:
                     success, _prev = self.registry.transition_to(idem_key, OperationState.RESERVED)
                     if not success:
-                        # Transition failed — the operation cannot be reserved.
-                        # This is an inconsistent state: the decision is PASS but
-                        # the durable state does not confirm it. Return HOLD, not PASS.
+                        # A failed RESERVED claim must not leak a backend
+                        # reservation acquired before taking the quarantine gate.
+                        # Fail closed; compensation runs below after the gate.
+                        composed_decision = Decision.HARD_VETO.value
+                        composed_rationale = (
+                            "RESERVED transition failed; fail-closed HARD_VETO."
+                        )
+                        self.registry.transition_to(idem_key, OperationState.FAILED)
                         self.ledger.append(
                             kernel="composed",
-                            decision=Decision.HOLD.value,
-                            rationale=f"PASS decision but RESERVED transition failed — fail-closed HOLD.",
+                            decision=composed_decision,
+                            rationale=composed_rationale,
                             passage_id=passage.passage_id,
                             idempotency_key=idem_key,
                         )
-                        return {
-                            "passage_id": passage.passage_id,
-                            "idempotency_key": idem_key,
-                            "scoring_decision": scoring_result["decision"] if scoring_result else None,
-                            "scoring_rationale": scoring_result["rationale"] if scoring_result else None,
-                            "scoring_ces": scoring_result.get("ces_state") if scoring_result else None,
-                            "scoring_s": scoring_result.get("s_score") if scoring_result else None,
-                            "membrane_decision": membrane_result["decision"] if membrane_result else None,
-                            "membrane_rationale": membrane_result["rationale"] if membrane_result else None,
-                            "membrane_checks": membrane_result.get("checks", []) if membrane_result else [],
-                            "composed_decision": Decision.HOLD.value,
-                            "composed_rationale": "PASS decision but RESERVED transition failed — fail-closed HOLD.",
-                            "execution_status": "pending",
-                            "operation_state": self.registry.get(idem_key).state.value if self.registry.get(idem_key) else "unknown",
-                            "ledger_entries": self.ledger.entry_count,
-                            "ledger_valid": self.ledger.verify_chain(),
-                        }
                 elif composed_decision == Decision.HARD_VETO.value:
-                    # No reservation is taken before the decision point (6a), so a
-                    # veto has nothing to release.
+                    # Any external reservation rejected by the final check is
+                    # compensated below, after leaving the shared gate.
                     self.registry.transition_to(idem_key, OperationState.FAILED)
                 elif composed_decision == Decision.HOLD.value:
                     # Enter through HoldManager so the lifecycle record is initialized.
@@ -623,7 +674,7 @@ class DualKernelGovernor:
                             idempotency_key=idem_key,
                         )
 
-                return {
+                response = {
                     "passage_id": passage.passage_id,
                     "idempotency_key": idem_key,
                     "scoring_decision": scoring_result["decision"] if scoring_result else None,
@@ -640,6 +691,53 @@ class DualKernelGovernor:
                     "ledger_entries": self.ledger.entry_count,
                     "ledger_valid": self.ledger.verify_chain(),
                 }
+
+        if external_reservation_acquired and composed_decision == Decision.HARD_VETO.value:
+            compensated = self._compensate_aborted_external_reservation(
+                idem_key, external_reservation_id,
+            )
+            if not compensated:
+                composed_rationale = (
+                    composed_rationale + " External reservation release is uncertain; "
+                    "durable ownership is retained for reconciliation."
+                )
+                response["composed_rationale"] = composed_rationale
+            current = self.registry.get(idem_key)
+            if current is not None:
+                response["operation_state"] = current.state.value
+        return response
+
+    def _compensate_aborted_external_reservation(
+        self, idempotency_key: str, reservation_id: str | None,
+    ) -> bool:
+        """Release a reservation rejected by the final quarantine check.
+
+        Keep durable ownership flags intact if release is uncertain so that
+        later reconciliation can recover the external reservation safely.
+        This method must be called outside the shared quarantine gate.
+        """
+        if not reservation_id or self.consensus_backend is None:
+            return False
+        try:
+            with self.registry.settlement_lock(
+                idempotency_key, require_persistent=True,
+            ):
+                current = self.registry.get(idempotency_key)
+                if (current is None or not current.budget_reserved
+                        or current.reservation_id != reservation_id):
+                    return False
+                released = self.consensus_backend.release(reservation_id)
+                if getattr(released, "status", None) != "RELEASED":
+                    return False
+                return self.registry.set_budget_flags(
+                    idempotency_key,
+                    budget_reserved=False,
+                    budget_committed=False,
+                    reservation_id="",
+                )
+        except Exception:
+            # Do not clear ownership when release or persistence is uncertain.
+            return False
 
     def _prospective_utilization(self, idempotency_key: str, resource, amount: float) -> float:
         """Budget utilization as it will be once this operation holds its budget.
