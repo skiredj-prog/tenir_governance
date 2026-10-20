@@ -865,3 +865,28 @@ def test_successful_quarantine_release_cleans_pending_guard(tmp_path):
     assert Path(str(store) + ".quarantine.initialized").exists()
     assert not Path(str(store) + ".quarantine.release-pending").exists()
     assert _governor(store).registry.quarantine_is_active() is False
+
+
+def test_release_failure_before_inactive_mark_never_clears_lock(tmp_path, monkeypatch):
+    """Crash/failure immediately after pending is durable leaves active quarantine."""
+    store = tmp_path / "release-before-mark.json"
+    owner = _governor(store, verifier=_trusted_test_verifier)
+    owner.lock_quarantine("incident")
+    original = owner.registry._quarantine_write_locked
+
+    def fail_before_replace(mark):
+        if mark["active"] is False:
+            raise OSError("injected before inactive replace")
+        return original(mark)
+
+    monkeypatch.setattr(owner.registry, "_quarantine_write_locked", fail_before_replace)
+    with pytest.raises(OSError, match="injected before inactive replace"):
+        _release(owner, store)
+
+    pending = Path(str(store) + ".quarantine.release-pending")
+    assert pending.exists()
+    raw = json.loads(Path(str(store) + ".quarantine.json").read_text())
+    assert raw["active"] is True
+    fresh = _governor(store)
+    assert fresh.registry.quarantine_is_active() is True
+    assert fresh.release_quarantine("operator", "lei", "ceremony-G-R5-001")["released"] is False
