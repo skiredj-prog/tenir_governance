@@ -100,11 +100,16 @@ class MembraneState:
                 self._locks[resource_id] = lock
             return lock
 
-    def lock_quarantine(self, locked_by: str = "") -> None:
+    def lock_quarantine(
+        self, locked_by: str = "", *, incident_id: str | None = None,
+    ) -> None:
         with self._quarantine_lock:
             if self._quarantine_registry is not None:
                 # Durable mark must exist before acknowledging the local lock.
-                self._quarantine_registry.set_quarantine(True, locked_by=locked_by)
+                # A fresh incident ID renews its lock-bound authorization epoch.
+                self._quarantine_registry.set_quarantine(
+                    True, locked_by=locked_by, incident_id=incident_id,
+                )
             self._lock_quarantine_under_lock(locked_by)
 
     def _lock_quarantine_under_lock(self, locked_by: str = "") -> None:
@@ -443,17 +448,15 @@ class TransitionMembrane:
         passage.execution_status = PassageStatus.HELD
         return "unknown"
 
-    def lock_quarantine(self, locked_by: str = "") -> None:
-        """Activate QUARANTINE_LOCK — blocks all new admission and dispatch.
+    def lock_quarantine(
+        self, locked_by: str = "", *, incident_id: str | None = None,
+    ) -> None:
+        """Activate or renew QUARANTINE_LOCK for a distinct incident.
 
-        Per v7.1 §6: QUARANTINE_LOCK blocks new attempt admission and
-        execution dispatch for the LEI until an authorized release or
-        resolution transition succeeds.
-
-        This is distinct from a HOLD decision — QUARANTINE_LOCK is a
-        persistent LEI-level guard, not a per-operation disposition.
+        An explicit new incident_id invalidates earlier release proofs.
+        Without one, repeat activation preserves legacy idempotency.
         """
-        self.state.lock_quarantine(locked_by)
+        self.state.lock_quarantine(locked_by, incident_id=incident_id)
 
     def release_quarantine(
         self,
