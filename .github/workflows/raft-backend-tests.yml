@@ -18,6 +18,7 @@ on:
       - "tests/test_hold_lifecycle.py"
       - "tests/test_sqlite_governor_crash_recovery.py"
       - "tests/test_subprocess_provenance.py"
+      - "tests/test_quarantine_cross_registry.py"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
   push:
@@ -37,6 +38,7 @@ on:
       - "tests/test_hold_lifecycle.py"
       - "tests/test_sqlite_governor_crash_recovery.py"
       - "tests/test_subprocess_provenance.py"
+      - "tests/test_quarantine_cross_registry.py"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
 
@@ -72,6 +74,8 @@ jobs:
         run: pytest -q tests/test_sqlite_governor_crash_recovery.py
       - name: Validate subprocess source provenance and Decimal state
         run: pytest -q tests/test_subprocess_provenance.py
+      - name: Test atomic interprocess quarantine and verified unlock
+        run: pytest -q tests/test_quarantine_cross_registry.py
 
   packaging-preflight:
     name: Python 3.12 packaging preflight (no publishing)
