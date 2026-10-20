@@ -485,6 +485,7 @@ class TestDualKernelGovernor:
         assert gov.registry.register(record)
         assert gov.hold_manager.enter_hold(key)["entered"]
         passage = Passage(
+            passage_id=record.passage_id,
             agent_id="alice",
             action_type="read_only",
             idempotency_key=key,
