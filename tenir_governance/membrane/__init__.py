@@ -56,6 +56,7 @@ class MembraneState:
     quarantine_release_verifier: Any = field(default=None, repr=False, compare=False)
     _quarantine_registry: Any = field(default=None, init=False, repr=False, compare=False)
     _quarantine_lock_id: str = field(default="", init=False, repr=False, compare=False)
+    _quarantine_incident_id: str | None = field(default=None, init=False, repr=False, compare=False)
 
     def bind_quarantine_registry(self, registry) -> None:
         """All public membrane entry points use the governor's durable store."""
@@ -103,6 +104,10 @@ class MembraneState:
     def lock_quarantine(
         self, locked_by: str = "", *, incident_id: str | None = None,
     ) -> None:
+        if incident_id is not None and (
+            not isinstance(incident_id, str) or not incident_id.strip()
+        ):
+            raise ValueError("incident_id must be a nonempty string when provided.")
         with self._quarantine_lock:
             if self._quarantine_registry is not None:
                 # Durable mark must exist before acknowledging the local lock.
@@ -110,9 +115,13 @@ class MembraneState:
                 self._quarantine_registry.set_quarantine(
                     True, locked_by=locked_by, incident_id=incident_id,
                 )
-            self._lock_quarantine_under_lock(locked_by)
+            self._lock_quarantine_under_lock(
+                locked_by, incident_id=incident_id,
+            )
 
-    def _lock_quarantine_under_lock(self, locked_by: str = "") -> None:
+    def _lock_quarantine_under_lock(
+        self, locked_by: str = "", *, incident_id: str | None = None,
+    ) -> None:
         """Activate QUARANTINE_LOCK — blocks all new admission and dispatch.
 
         Per v7.1 §6: QUARANTINE_LOCK blocks new attempt admission and
@@ -122,8 +131,12 @@ class MembraneState:
         This is distinct from a HOLD decision — QUARANTINE_LOCK is a
         persistent LEI-level guard, not a per-operation disposition.
         """
-        if not self.quarantine:
+        if (
+            not self.quarantine
+            or (incident_id is not None and self._quarantine_incident_id != incident_id)
+        ):
             self._quarantine_lock_id = uuid4().hex
+            self._quarantine_incident_id = incident_id
         self.quarantine = True
         self.quarantine_locked_at = _utc_now()
         self.quarantine_locked_by = locked_by
@@ -160,6 +173,7 @@ class MembraneState:
                     self.quarantine_locked_at = ""
                     self.quarantine_locked_by = ""
                     self._quarantine_lock_id = ""
+                    self._quarantine_incident_id = None
         return result
 
     def _release_quarantine_under_lock(
@@ -216,6 +230,7 @@ class MembraneState:
         self.quarantine_locked_at = ""
         self.quarantine_locked_by = ""
         self._quarantine_lock_id = ""
+        self._quarantine_incident_id = None
 
         return {
             "released": True,
