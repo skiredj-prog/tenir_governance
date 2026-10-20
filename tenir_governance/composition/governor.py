@@ -898,9 +898,11 @@ class DualKernelGovernor:
         checker = getattr(self.registry, "quarantine_is_active", None)
         return bool(checker()) if callable(checker) else False
 
-    def lock_quarantine(self, locked_by: str = "") -> None:
-        """Persist the shared guard through the bound membrane state."""
-        self.membrane.lock_quarantine(locked_by)
+    def lock_quarantine(
+        self, locked_by: str = "", *, incident_id: str | None = None,
+    ) -> None:
+        """Persist the shared guard; new incidents renew the lock epoch."""
+        self.membrane.lock_quarantine(locked_by, incident_id=incident_id)
 
     def release_quarantine(
         self,
