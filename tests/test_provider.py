@@ -82,6 +82,38 @@ def test_reconcile_can_recover_interrupted_dispatching_operation():
     assert state.resources["budget"].reserved == 0.0
 
 
+def test_reconcile_failed_does_not_release_unowned_budget():
+    gov, state = _setup_governor(
+        provider=MockProvider(behavior="timeout", reconcile_outcome=ProviderOutcome.FAILED),
+    )
+    key = "reconcile-failed-unowned-budget"
+    # This aggregate reservation belongs to another operation. The record below
+    # has the same amount/resource but explicitly owns no budget.
+    assert state.resources["budget"].reserve(10.0)
+    record = OperationRecord(
+        idempotency_key=key,
+        passage_id="p-unowned-reconcile",
+        agent_id="alice",
+        action_type="payment",
+        amount=10.0,
+        resource_id="budget",
+        budget_reserved=False,
+        budget_committed=False,
+    )
+    assert gov.registry.register(record)
+    assert gov.registry.transition_to(key, OperationState.RESERVED)[0]
+    assert gov.registry.transition_to(key, OperationState.DISPATCHING)[0]
+    assert gov.registry.transition_to(key, OperationState.UNKNOWN)[0]
+
+    result = gov.reconcile_unknown(key)
+
+    assert result["reconciled"] is True
+    assert result["operation_state"] == OperationState.FAILED.value
+    assert gov.registry.get(key).state == OperationState.FAILED
+    assert state.resources["budget"].reserved == 10.0
+    assert state.resources["budget"].consumed == 0.0
+
+
 def test_concurrent_failed_reconciliation_refunds_only_once():
     initial_provider = MockProvider(behavior="timeout")
     gov, state = _setup_governor(provider=initial_provider)
