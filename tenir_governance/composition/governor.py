@@ -2332,6 +2332,24 @@ class DualKernelGovernor:
 
         # 6. State transitions from HOLD
         hold_resolved = False
+        # I6 may have observed quarantine during kernel evaluation even if
+        # another worker released it before this point. Such evidence cannot
+        # be used to terminally fail an existing HOLD; require fresh review.
+        observed_i6_veto = any(
+            c.get("check_id") == "I6" and c.get("decision") == Decision.HARD_VETO.value
+            for c in (membrane_result.get("checks", []) if membrane_result else [])
+        )
+        if observed_i6_veto or self._quarantine_blocks():
+            composed_decision = Decision.HOLD.value
+            composed_rationale = (
+                "QUARANTINE_LOCK observed during HOLD re-adjudication; "
+                "HOLD retained pending fresh evidence."
+            )
+            self.ledger.append(
+                kernel="composed", decision=Decision.HOLD.value,
+                rationale=composed_rationale, passage_id=passage.passage_id,
+                idempotency_key=idem_key,
+            )
         if composed_decision in (Decision.PASS.value, Decision.FLAG.value):
             # No new reservation here: the HOLD already holds it. Serialize
             # the final admission, not the potentially slow kernel evaluation.
@@ -2344,6 +2362,11 @@ class DualKernelGovernor:
                         composed_rationale = (
                             "QUARANTINE_LOCK activated during HOLD re-adjudication; "
                             "HOLD retained, no RESERVED transition."
+                        )
+                        self.ledger.append(
+                            kernel="composed", decision=Decision.HOLD.value,
+                            rationale=composed_rationale, passage_id=passage.passage_id,
+                            idempotency_key=idem_key,
                         )
                     else:
                         success, _prev = self.registry.transition_to(
