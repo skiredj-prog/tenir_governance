@@ -413,3 +413,200 @@ def test_recovery_rejects_unknown_journal_operation(tmp_path):
 
     with pytest.raises(RuntimeError, match="Corrupted transaction journal"):
         SingleHostLockBackend(str(store_dir))
+
+
+def test_fail_rejects_unknown_outcome_without_releasing_or_refunding_budget():
+    """UNKNOWN must be reconciled; fail() cannot infer non-execution."""
+    gov, state = _setup_governor(budget_capacity=100.0)
+    budget = state.resources["budget"]
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    result = gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    assert result["operation_state"] == OperationState.RESERVED.value
+    assert budget.reserved == 10.0
+    assert gov.dispatch(passage.idempotency_key, "budget", 10.0)["dispatched"] is True
+    assert budget.reserved == 0.0
+    assert budget.consumed == 10.0
+    assert gov.mark_unknown(passage.idempotency_key) is True
+
+    before_reserved = budget.reserved
+    before_consumed = budget.consumed
+    before_record = gov.registry.get(passage.idempotency_key)
+
+    assert gov.fail(passage.idempotency_key) is False
+
+    after_record = gov.registry.get(passage.idempotency_key)
+    assert after_record.state == OperationState.UNKNOWN
+    assert after_record.budget_committed == before_record.budget_committed
+    assert after_record.budget_reserved == before_record.budget_reserved
+    assert budget.reserved == before_reserved == 0.0
+    assert budget.consumed == before_consumed == 10.0
+
+
+def test_fail_rechecks_state_under_budget_lock_before_compensating(monkeypatch):
+    """A concurrent UNKNOWN transition must not be overwritten by fail()."""
+    gov, state = _setup_governor(budget_capacity=100.0)
+    budget = state.resources["budget"]
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    result = gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    assert result["operation_state"] == OperationState.RESERVED.value
+    assert gov.dispatch(passage.idempotency_key, "budget", 10.0)["dispatched"] is True
+    assert budget.consumed == 10.0
+
+    registry = gov.registry
+    original_get = registry.get
+    first_read = True
+
+    def get_then_race(key):
+        nonlocal first_read
+        record = original_get(key)
+        if key == passage.idempotency_key and first_read:
+            first_read = False
+            # Simulate uncertainty arriving after fail()'s initial read but
+            # before its locked re-check.
+            assert registry.transition_to(key, OperationState.UNKNOWN)[0]
+        return record
+
+    monkeypatch.setattr(registry, "get", get_then_race)
+    assert gov.fail(passage.idempotency_key) is False
+    record = original_get(passage.idempotency_key)
+    assert record.state == OperationState.UNKNOWN
+    assert record.budget_committed is True
+    assert budget.consumed == 10.0
+    assert budget.reserved == 0.0
+
+
+def test_fail_refuses_dispatching_without_confirmed_provider_outcome():
+    """DISPATCHING is uncertain unless the provider explicitly reports FAILED."""
+    gov, state = _setup_governor(budget_capacity=100.0)
+    budget = state.resources["budget"]
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    result = gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    assert result["operation_state"] == OperationState.RESERVED.value
+    assert gov.dispatch(passage.idempotency_key, "budget", 10.0)["dispatched"] is True
+    assert gov.registry.get(passage.idempotency_key).state == OperationState.DISPATCHING
+    assert budget.reserved == 0.0
+    assert budget.consumed == 10.0
+
+    assert gov.fail(passage.idempotency_key) is False
+    record = gov.registry.get(passage.idempotency_key)
+    assert record.state == OperationState.DISPATCHING
+    assert record.budget_committed is True
+    assert budget.consumed == 10.0
+
+    # Public callers cannot forge provider confirmation through a boolean flag.
+    with pytest.raises(TypeError):
+        gov.fail(
+            passage.idempotency_key,
+            _provider_confirmed_no_effect=True,
+        )
+    assert gov.fail(passage.idempotency_key) is False
+    assert gov.registry.get(passage.idempotency_key).state == OperationState.DISPATCHING
+    assert budget.consumed == 10.0
+
+    # A real provider FAILED result uses the dedicated dispatch path.
+    failed_provider = MockProvider(behavior="failed")
+    failed_gov, failed_state = _setup_governor(
+        budget_capacity=100.0, provider=failed_provider,
+    )
+    failed_budget = failed_state.resources["budget"]
+    failed_passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    failed_gov.adjudicate(
+        failed_passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    failed_result = failed_gov.dispatch_and_execute(
+        failed_passage.idempotency_key, "budget", 10.0,
+    )
+    assert failed_result["operation_state"] == OperationState.FAILED.value
+    assert failed_gov.registry.get(failed_passage.idempotency_key).state == OperationState.FAILED
+    assert failed_budget.reserved == 0.0
+    assert failed_budget.consumed == 0.0
+
+
+
+def test_reconcile_rechecks_expected_state_before_failed_transition(monkeypatch):
+    """A terminal-state race cannot make reconciliation compensate stale budget state."""
+    provider = MockProvider(
+        behavior="timeout",
+        reconcile_outcome=ProviderOutcome.FAILED,
+    )
+    gov, state = _setup_governor(budget_capacity=100.0, provider=provider)
+    budget = state.resources["budget"]
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    assert result["operation_state"] == OperationState.UNKNOWN.value
+    assert budget.reserved == 0.0
+    assert budget.consumed == 10.0
+
+    registry = gov.registry
+    original_transition = registry.transition_to
+    raced = False
+
+    def transition_with_confirmation_race(key, new_state, *args, **kwargs):
+        nonlocal raced
+        if (
+            key == passage.idempotency_key
+            and new_state == OperationState.FAILED
+            and not raced
+        ):
+            raced = True
+            # A competing, authoritative confirmation wins before the FAILED
+            # compare-and-transition reaches the registry lock.
+            confirmed, _ = original_transition(
+                key, OperationState.CONFIRMED,
+                expected_states={OperationState.UNKNOWN},
+            )
+            assert confirmed is True
+        return original_transition(key, new_state, *args, **kwargs)
+
+    monkeypatch.setattr(registry, "transition_to", transition_with_confirmation_race)
+    reconciled = gov.reconcile_unknown(passage.idempotency_key)
+
+    assert reconciled["reconciled"] is False
+    record = registry.get(passage.idempotency_key)
+    assert record.state == OperationState.CONFIRMED
+    assert record.budget_committed is True
+    assert record.budget_reserved is False
+    assert budget.reserved == 0.0
+    assert budget.consumed == 10.0
+
+
+def test_fail_uses_atomic_expected_state_for_unbudgeted_operation(monkeypatch):
+    """A concurrent dispatch/UNKNOWN cannot be overwritten in the no-budget path."""
+    gov, _state = _setup_governor()
+    passage = Passage(agent_id="alice", action_type="noop", amount=0.0)
+    result = gov.adjudicate(
+        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+    )
+    assert result["operation_state"] == OperationState.RESERVED.value
+
+    registry = gov.registry
+    original_transition = registry.transition_to
+    injected = False
+
+    def transition_with_race(key, new_state, claimed_by="", **kwargs):
+        nonlocal injected
+        if key == passage.idempotency_key and new_state == OperationState.FAILED and not injected:
+            injected = True
+            # Another worker starts dispatch, then cannot establish the outcome.
+            assert original_transition(key, OperationState.DISPATCHING)[0]
+            assert original_transition(key, OperationState.UNKNOWN)[0]
+        return original_transition(key, new_state, claimed_by, **kwargs)
+
+    monkeypatch.setattr(registry, "transition_to", transition_with_race)
+    assert gov.fail(passage.idempotency_key) is False
+    assert injected is True
+    assert registry.get(passage.idempotency_key).state == OperationState.UNKNOWN
