@@ -555,6 +555,9 @@ def test_crash_after_backend_commit_reconciles_using_backend_state(tmp_path, mon
     with pytest.raises(_SimulatedProcessCrash):
         gov.dispatch_and_execute(key, "budget", 10.0)
 
+    # A process crash drops process-local dispatch markers. The same governor
+    # object is reused here; clear that marker so reconcile sees a restarted process.
+    gov._active_dispatches.clear()
     reopened_backend = SingleHostLockBackend(str(tmp_path))
     reopened_registry = DurableOperationRegistry(registry_path)
     gov.consensus_backend = reopened_backend

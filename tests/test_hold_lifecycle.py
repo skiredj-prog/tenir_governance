@@ -906,6 +906,22 @@ class TestGovernorHoldLifecycle:
         assert hold_entries[0]["recommendation"] == "resolve_or_escalate"
 
 
+# Test-only trusted verifier. A ceremony label is *not* authentication
+# in the production default, which refuses unconfigured release.
+def _test_quarantine_release_verifier(
+    *, authorized_by, scope, authorization, reason, lock_id,
+):
+    if authorization != "ceremony-G-R5-001":
+        return None
+    return {
+        "authorized": True,
+        "principal": authorized_by,
+        "scope": scope,
+        "lock_id": lock_id,
+        "authorization_id": "controlled-fixture-" + lock_id,
+    }
+
+
 # ── QUARANTINE_LOCK Tests ────────────────────────────────────────────
 
 class TestQuarantineLock:
@@ -934,7 +950,7 @@ class TestQuarantineLock:
 
     def test_release_quarantine_authenticated(self):
         """release_quarantine() requires authenticated authorization."""
-        state = MembraneState()
+        state = MembraneState(quarantine_release_verifier=_test_quarantine_release_verifier)
         membrane = TransitionMembrane(state)
         membrane.lock_quarantine(locked_by="admin@org")
         result = membrane.release_quarantine(
@@ -964,7 +980,7 @@ class TestQuarantineLock:
 
     def test_quarantine_release_receipt_preserved(self):
         """Quarantine release receipt is preserved after release."""
-        state = MembraneState()
+        state = MembraneState(quarantine_release_verifier=_test_quarantine_release_verifier)
         membrane = TransitionMembrane(state)
         membrane.lock_quarantine(locked_by="admin@org")
         membrane.release_quarantine(
@@ -978,7 +994,7 @@ class TestQuarantineLock:
 
     def test_quarantine_does_not_block_after_release(self):
         """After release, admission is allowed again."""
-        state = MembraneState()
+        state = MembraneState(quarantine_release_verifier=_test_quarantine_release_verifier)
         state.register_agent(Agent(agent_id="alice", authority_score=0.9,
                                     trusted_delegates=frozenset()))
         state.register_resource(Resource(resource_id="budget", capacity=100.0))
