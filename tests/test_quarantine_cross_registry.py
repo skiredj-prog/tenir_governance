@@ -360,6 +360,13 @@ def test_pre_sentinel_mark_is_migrated_and_deletion_fails_closed(tmp_path):
             "active": active,
             "lock_id": "legacy-quarantine-id",
         }
+        if not active:
+            old_mark["release_receipt"] = {
+                "lock_id": "legacy-quarantine-id",
+                "authorization_id": "legacy-receipt",
+                "authorized_by": "legacy-operator",
+                "scope": "lei",
+            }
         mark = Path(str(store) + ".quarantine.json")
         mark.write_text(json.dumps(old_mark), encoding="utf-8")
         sentinel = Path(str(store) + ".quarantine.initialized")
@@ -545,3 +552,26 @@ def test_failed_first_mark_write_cannot_leave_false_unlocked_state(tmp_path, mon
     assert restarted.quarantine_is_active() is True
     with pytest.raises(RuntimeError, match="corrupt"):
         restarted.set_quarantine(True, locked_by="must-not-bypass")
+
+
+@pytest.mark.parametrize("malformed", [
+    {"active": False},
+    {"active": False, "lock_id": "lock-1"},
+    {"active": False, "lock_id": "lock-1",
+     "release_receipt": {"lock_id": "another-lock", "authorization_id": "a",
+                         "authorized_by": "operator", "scope": "lei"}},
+    {"active": False, "lock_id": "lock-1",
+     "release_receipt": {"lock_id": "lock-1", "authorization_id": "",
+                         "authorized_by": "operator", "scope": "lei"}},
+])
+def test_malformed_inactive_mark_never_unlocks(tmp_path, malformed):
+    """An inactive state without a matching authorization receipt fails closed."""
+    store = tmp_path / "ops.json"
+    reg = DurableOperationRegistry(str(store))
+    assert reg.quarantine_is_active() is False
+    mark = Path(str(store) + ".quarantine.json")
+    mark.write_text(json.dumps(malformed), encoding="utf-8")
+    recovered = DurableOperationRegistry(str(store))
+    assert recovered.quarantine_is_active() is True
+    with pytest.raises(RuntimeError, match="corrupt"):
+        recovered.set_quarantine(True)
