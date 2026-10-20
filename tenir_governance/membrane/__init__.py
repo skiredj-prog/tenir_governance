@@ -205,17 +205,26 @@ class MembraneState:
                 "receipt": None,
             }
 
+        expected_lock_id = self._quarantine_lock_id
         proof = _verify_quarantine_release(
             self.quarantine_release_verifier,
             authorized_by=authorized_by, scope=scope,
             authorization=authorization, reason=reason,
-            lock_id=self._quarantine_lock_id,
+            lock_id=expected_lock_id,
         )
         if proof is None:
             return {
                 "released": False,
                 "receipt": None,
                 "reason": "QUARANTINE_LOCK release denied: authorization not verified.",
+            }
+        # The RLock permits a verifier to report a new incident reentrantly.
+        # Its proof authorizes only the epoch captured before that callback.
+        if not self.quarantine or self._quarantine_lock_id != expected_lock_id:
+            return {
+                "released": False,
+                "receipt": None,
+                "reason": "QUARANTINE_LOCK changed during authorization; fresh verification required.",
             }
         receipt = {
             "authorization_id": proof["authorization_id"],

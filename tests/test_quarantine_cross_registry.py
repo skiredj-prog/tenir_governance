@@ -665,6 +665,60 @@ def test_unbound_membrane_new_incident_also_invalidates_old_proof():
     assert state._quarantine_incident_id is None
 
 
+@pytest.mark.parametrize("incident_id", ["local-001", "local-002"])
+def test_unbound_release_rechecks_incident_after_verified_callback(incident_id):
+    """A reentrant verifier cannot use an old proof to clear a fresh incident."""
+    state = MembraneState()
+    state.lock_quarantine("initial-watch", incident_id="local-001")
+    first = state._quarantine_lock_id
+    during_verification = {}
+
+    def verify_then_report_incident(**request):
+        proof = _trusted_test_verifier(**request)
+        assert proof is not None
+        state.lock_quarantine("callback-watch", incident_id=incident_id)
+        during_verification.update({
+            "quarantine": state.quarantine,
+            "lock_id": state._quarantine_lock_id,
+            "incident_id": state._quarantine_incident_id,
+            "locked_at": state.quarantine_locked_at,
+            "locked_by": state.quarantine_locked_by,
+            "receipt": state.quarantine_release_receipt,
+        })
+        return proof
+
+    state.quarantine_release_verifier = verify_then_report_incident
+    result = state.release_quarantine("operator", "lei", _test_token(first))
+
+    if incident_id == "local-001":
+        # Reporting the same incident keeps its epoch and valid authorization.
+        assert during_verification["lock_id"] == first
+        assert result["released"] is True
+        assert result["receipt"]["lock_id"] == first
+        assert result["receipt"]["incident_id"] == incident_id
+        assert state.quarantine_active is False
+    else:
+        assert during_verification["lock_id"] != first
+        assert result["released"] is False
+        assert result["receipt"] is None
+        assert "changed during authorization" in result["reason"]
+        assert {
+            "quarantine": state.quarantine,
+            "lock_id": state._quarantine_lock_id,
+            "incident_id": state._quarantine_incident_id,
+            "locked_at": state.quarantine_locked_at,
+            "locked_by": state.quarantine_locked_by,
+            "receipt": state.quarantine_release_receipt,
+        } == during_verification
+        # A fresh proof remains usable after the stale release is refused.
+        state.quarantine_release_verifier = _trusted_test_verifier
+        accepted = state.release_quarantine(
+            "operator", "lei", _test_token(during_verification["lock_id"]),
+        )
+        assert accepted["released"] is True
+        assert accepted["receipt"]["incident_id"] == incident_id
+
+
 def test_prebound_incident_identity_is_preserved_on_registry_binding(tmp_path):
     """Attaching a durable store to a locked local membrane retains incident scope."""
     store = tmp_path / "ops.json"
