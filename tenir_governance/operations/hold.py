@@ -299,6 +299,16 @@ class HoldManager:
             return {"expired": False, "operation_state": record.state.value,
                     "reason": f"Operation is in state {record.state.value}, not HOLD."}
 
+        # Expiry is permitted only when an explicit τ_K bound exists and has
+        # elapsed. A missing bound is not evidence that the deadline elapsed.
+        expiry = self.check_tau_k_expiry(idempotency_key)
+        if not expiry["expired"]:
+            return {
+                "expired": False,
+                "operation_state": record.state.value,
+                "reason": expiry["reason"],
+            }
+
         if record.hold_record:
             record.hold_record.exit_reason = "expired"
 
