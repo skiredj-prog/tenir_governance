@@ -662,3 +662,17 @@ def test_unbound_membrane_new_incident_also_invalidates_old_proof():
     assert accepted["released"] is True
     assert state.quarantine_active is False
     assert state._quarantine_incident_id is None
+
+
+def test_prebound_incident_identity_is_preserved_on_registry_binding(tmp_path):
+    """Attaching a durable store to a locked local membrane retains incident scope."""
+    store = tmp_path / "ops.json"
+    state = MembraneState()
+    state.lock_quarantine("prebind-watch", incident_id="case-before-bind")
+    registry = DurableOperationRegistry(str(store))
+    state.bind_quarantine_registry(registry)
+    mark = json.loads(Path(str(store) + ".quarantine.json").read_text())
+    assert mark["active"] is True
+    assert mark["incident_id"] == "case-before-bind"
+    assert mark["locked_by"] == "prebind-watch"
+    assert state.quarantine_active is True
