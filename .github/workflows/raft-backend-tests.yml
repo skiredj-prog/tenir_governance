@@ -103,7 +103,7 @@ jobs:
 
       - name: Install project with test dependencies
         run: |
-          python -m pip install -e ".[test,raft]"
+          python -m pip install -e ".[api,test,raft]"
           python -m pip check
 
       - name: Verify Raft tests run with explicitly declared non-production scope
