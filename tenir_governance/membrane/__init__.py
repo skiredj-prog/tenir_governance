@@ -227,6 +227,7 @@ class MembraneState:
             "reason": reason,
             "locked_at": self.quarantine_locked_at,
             "locked_by": self.quarantine_locked_by,
+            "incident_id": self._quarantine_incident_id,
         }
 
         self.quarantine = False
