@@ -14,6 +14,10 @@ import time
 
 import pytest
 
+# The coordinator preserves Decimal precision. These small integer-boundary
+# subprocess fixtures print JSON numbers for transport only; exact Decimal
+# precision is independently verified in dedicated arithmetic regressions.
+
 
 def _run_subprocess_worker(store_path, resource_id, key, amount, action, capacity):
     """Run a worker in a subprocess that performs a budget operation."""
@@ -45,7 +49,7 @@ elif action == 'release':
     print("RELEASE:done")
 elif action == 'state':
     state = coord.get_state({repr(resource_id)})
-    print(f"STATE:{{json.dumps(state)}}")
+    print(f"STATE:{{json.dumps(state, default=float)}}")
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -108,7 +112,7 @@ sys.path.insert(0, {repr(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 from tenir_governance.operations.budget import DurableBudgetCoordinator
 coord = DurableBudgetCoordinator({repr(store)})
 state = coord.get_state('res1')
-print(json.dumps(state))
+print(json.dumps(state, default=float))
 """
         result = subprocess.run([sys.executable, "-c", state_script], capture_output=True, text=True, timeout=10)
         state = json.loads(result.stdout.strip())
@@ -168,7 +172,7 @@ sys.path.insert(0, {repr(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 from tenir_governance.operations.budget import DurableBudgetCoordinator
 coord = DurableBudgetCoordinator({repr(store)})
 state = coord.get_state('res1')
-print(json.dumps(state))
+print(json.dumps(state, default=float))
 """
         result = subprocess.run([sys.executable, "-c", state_script], capture_output=True, text=True, timeout=10)
         state = json.loads(result.stdout.strip())
@@ -208,7 +212,7 @@ r = coord.commit('res1', 40.0)
 print(f"COMMIT:{{r}}")
 state = coord.get_state('res1')
 import json
-print(f"STATE:{{json.dumps(state)}}")
+print(f"STATE:{{json.dumps(state, default=float)}}")
 """
         result = subprocess.run([sys.executable, "-c", commit_script], capture_output=True, text=True, timeout=10)
         assert "True" in result.stdout
@@ -287,7 +291,7 @@ sys.path.insert(0, {repr(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 from tenir_governance.operations.budget import DurableBudgetCoordinator
 coord = DurableBudgetCoordinator({repr(store)})
 state = coord.get_state('res1')
-print(json.dumps(state))
+print(json.dumps(state, default=float))
 """
         result = subprocess.run([sys.executable, "-c", state_script], capture_output=True, text=True, timeout=10)
         state = json.loads(result.stdout.strip())

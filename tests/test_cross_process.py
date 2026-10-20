@@ -72,8 +72,11 @@ def _child_adjudicate(store_path, key, result_queue):
 
     p = Passage(agent_id="alice", action_type="payment", amount=25.0,
                 idempotency_key=key)
-    r = gov.adjudicate(p, pressure=0.2, velocity=0.3, capacity=1.0,
-                       resource_id="budget", amount=25.0)
+    r = gov.adjudicate(
+        p, pressure=0.2, velocity=0.3, capacity=1.0,
+        authority=0.9, context_fit=0.9, evidence_quality=0.9,
+        resource_id="budget", amount=25.0,
+    )
     result_queue.put(("adjudicate", key, r["composed_decision"]))
 
 
