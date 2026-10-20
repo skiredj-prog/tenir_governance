@@ -682,7 +682,8 @@ class TestGovernorHoldLifecycle:
         gov.hold_manager.enter_hold("op-hold-test-1", tau_k_seconds=300)
 
         # Now resolve with better evidence (capacity must be in [0, 1])
-        p3 = Passage(agent_id="alice", action_type="payment", amount=10.0,
+        p3 = Passage(passage_id=rec.passage_id,
+                      agent_id="alice", action_type="payment", amount=10.0,
                       idempotency_key="op-hold-test-1")
         r2 = gov.resolve_hold(
             "op-hold-test-1",
@@ -707,6 +708,7 @@ class TestGovernorHoldLifecycle:
         gov.registry.register(rec)
         gov.hold_manager.enter_hold(key, tau_k_seconds=300)
         passage = Passage(
+            passage_id=rec.passage_id,
             agent_id="alice", action_type="payment", amount=10.0,
             idempotency_key=key,
         )
