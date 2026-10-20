@@ -296,6 +296,7 @@ class DurableOperationRegistry:
         self._local_settlement_locks: dict[str, threading.Lock] = {}
         self._local_settlement_locks_guard = threading.Lock()
         self._corrupted = False
+        self._quarantine_memory = False
         if store_path and os.path.exists(store_path):
             self._load()
 
@@ -388,6 +389,67 @@ class DurableOperationRegistry:
     def is_persistent(self) -> bool:
         """True when registry records are backed by a durable file store."""
         return bool(self._store_path)
+
+    def _quarantine_path(self) -> str | None:
+        if not self._store_path:
+            return None
+        return self._store_path + ".quarantine.json"
+
+    def set_quarantine(self, active: bool, *, locked_by: str = "") -> None:
+        """Persist the LEI quarantine mark shared by every registry on this store.
+
+        An in-memory registry keeps the mark in this process only. A file-backed
+        registry writes it under the same cross-process lock as operation
+        transitions. A corrupt mark file is not cleared here.
+        """
+        with self._lock:
+            path = self._quarantine_path()
+            if path is None:
+                self._quarantine_memory = bool(active)
+                return
+            flock = self._lock_file()
+            try:
+                payload = {
+                    "active": bool(active),
+                    "locked_by": locked_by if active else "",
+                }
+                directory = os.path.dirname(os.path.abspath(path))
+                fd, tmp = tempfile.mkstemp(prefix="quarantine.", suffix=".tmp", dir=directory)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                        json.dump(payload, stream)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(tmp, path)
+                finally:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
+                self._quarantine_memory = bool(active)
+            finally:
+                if flock:
+                    flock.close()
+
+    def quarantine_is_active(self) -> bool:
+        """Return the shared quarantine mark. Corrupt durable state fails closed."""
+        with self._lock:
+            path = self._quarantine_path()
+            if path is None:
+                return self._quarantine_memory
+            if not os.path.exists(path):
+                return False
+            flock = self._lock_file()
+            try:
+                try:
+                    with open(path, "r", encoding="utf-8") as stream:
+                        payload = json.load(stream)
+                except (OSError, json.JSONDecodeError, ValueError, TypeError):
+                    return True
+                if not isinstance(payload, dict) or "active" not in payload:
+                    return True
+                return bool(payload["active"])
+            finally:
+                if flock:
+                    flock.close()
 
     def register(self, record: OperationRecord) -> bool:
         """Register a new operation. Returns False if key already exists.

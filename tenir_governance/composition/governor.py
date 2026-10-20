@@ -542,7 +542,7 @@ class DualKernelGovernor:
             # budget is in scope. If a lock activates after I6's first check,
             # no outcome that retains the operation may pass this point.
             with self.membrane.state._quarantine_lock:
-                if self.membrane.state.quarantine_active:
+                if self._quarantine_blocks():
                     composed_decision = Decision.HARD_VETO.value
                     composed_rationale = (
                         "QUARANTINE_LOCK activated during adjudication; admission and reservation blocked."
@@ -872,6 +872,46 @@ class DualKernelGovernor:
                 "operation_state": state.value,
             }
 
+    def _quarantine_blocks(self) -> bool:
+        """True when this process or the shared registry mark forbids admission.
+
+        The in-memory flag excludes other threads on this membrane. The registry
+        mark is what another process sharing the durable store observes. A claim
+        that already reached DISPATCHING is not rolled back here.
+        """
+        if self.membrane.state.quarantine_active:
+            return True
+        checker = getattr(self.registry, "quarantine_is_active", None)
+        return bool(checker()) if callable(checker) else False
+
+    def lock_quarantine(self, locked_by: str = "") -> None:
+        """Activate quarantine in the shared registry, then in this process.
+
+        Durable mark first: if this process dies before the local flag is set,
+        other workers still observe the lock.
+        """
+        setter = getattr(self.registry, "set_quarantine", None)
+        if callable(setter):
+            setter(True, locked_by=locked_by)
+        self.membrane.lock_quarantine(locked_by)
+
+    def release_quarantine(
+        self,
+        authorized_by: str,
+        scope: str,
+        authorization: str,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """Release the local lock only when its receipt succeeds, then clear the shared mark."""
+        result = self.membrane.release_quarantine(
+            authorized_by, scope, authorization, reason,
+        )
+        if result.get("released"):
+            setter = getattr(self.registry, "set_quarantine", None)
+            if callable(setter):
+                setter(False)
+        return result
+
     def dispatch(
         self,
         idempotency_key: str,
@@ -954,7 +994,7 @@ class DualKernelGovernor:
 
         # QUARANTINE_LOCK blocks dispatch, including operations reserved before
         # the lock was activated. Check before the durable dispatch transition.
-        if self.membrane.state.quarantine_active:
+        if self._quarantine_blocks():
             return {
                 "dispatched": False,
                 "reason": "QUARANTINE_LOCK is active; dispatch is blocked.",
@@ -1108,6 +1148,8 @@ class DualKernelGovernor:
         # dispatch() linearizes the claim against QUARANTINE_LOCK. Do not hold
         # the global quarantine lock while performing external I/O: a hung
         # provider must not prevent quarantine activation or unrelated dispatches.
+        # A claim that already returned dispatched=True is not cancelled if
+        # quarantine activates before provider.execute(). New claims are blocked.
         return self._dispatch_and_execute_under_quarantine_lock(
             idempotency_key, resource_id, amount, metadata, payload=payload,
         )
