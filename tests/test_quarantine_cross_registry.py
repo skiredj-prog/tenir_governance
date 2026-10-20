@@ -381,3 +381,91 @@ def test_never_initialized_quarantine_store_is_not_blocked(tmp_path):
     fresh = DurableOperationRegistry(str(store))
     assert fresh.quarantine_is_active() is False
     assert not Path(str(store) + ".quarantine.initialized").exists()
+
+
+def test_slow_verifier_does_not_block_quarantine_gate_or_local_lock(tmp_path):
+    """External authentication must not hold the interprocess admission gate."""
+    store = tmp_path / "ops.json"
+    verification_started = threading.Event()
+    finish_verification = threading.Event()
+
+    def slow_verifier(**kwargs):
+        verification_started.set()
+        assert finish_verification.wait(8)
+        return _trusted_test_verifier(**kwargs)
+
+    owner = _governor(store, verifier=slow_verifier)
+    observer = _governor(store)
+    owner.lock_quarantine("incident")
+    token = _test_token(_lock_id(store))
+    result = {}
+    release_thread = threading.Thread(
+        target=lambda: result.update(_release(owner, store, token=token)),
+        daemon=True,
+    )
+    release_thread.start()
+    try:
+        assert verification_started.wait(5), "verifier was not entered"
+        observed = threading.Event()
+        observation = {}
+        read_thread = threading.Thread(
+            target=lambda: (observation.update(active=observer.registry.quarantine_is_active()),
+                            observed.set()),
+            daemon=True,
+        )
+        read_thread.start()
+        assert observed.wait(3), "slow verifier held shared quarantine gate"
+        assert observation["active"] is True
+
+        local_done = threading.Event()
+        local_lock_thread = threading.Thread(
+            target=lambda: (owner.lock_quarantine("same-worker-emergency"),
+                            local_done.set()),
+            daemon=True,
+        )
+        local_lock_thread.start()
+        assert local_done.wait(3), "slow verifier held local quarantine mutex"
+    finally:
+        finish_verification.set()
+        release_thread.join(8)
+    assert not release_thread.is_alive()
+    assert result["released"] is True
+    assert result["receipt"]["authorization"] == "[redacted]"
+    assert token not in json.dumps(result["receipt"])
+    assert token not in Path(str(store) + ".quarantine.json").read_text(encoding="utf-8")
+
+
+def test_stale_verified_unlock_cannot_release_new_quarantine_epoch(tmp_path):
+    """Changing lock identity during verification invalidates the old proof."""
+    store = tmp_path / "ops.json"
+    verification_started = threading.Event()
+    finish_verification = threading.Event()
+
+    def slow_verifier(**kwargs):
+        verification_started.set()
+        assert finish_verification.wait(8)
+        return _trusted_test_verifier(**kwargs)
+
+    original = _governor(store, verifier=slow_verifier)
+    competing = _governor(store, verifier=_trusted_test_verifier)
+    original.lock_quarantine("first-incident")
+    initial_id = _lock_id(store)
+    outcome = {}
+    release_thread = threading.Thread(
+        target=lambda: outcome.update(_release(original, store, token=_test_token(initial_id))),
+        daemon=True,
+    )
+    release_thread.start()
+    try:
+        assert verification_started.wait(5)
+        assert _release(competing, store, token=_test_token(initial_id))["released"] is True
+        competing.lock_quarantine("second-incident")
+        assert _lock_id(store) != initial_id
+    finally:
+        finish_verification.set()
+        release_thread.join(8)
+    assert not release_thread.is_alive()
+    assert outcome["released"] is False
+    assert "changed during authorization" in outcome["reason"]
+    assert original.registry.quarantine_is_active() is True
+    assert _governor(store).registry.quarantine_is_active() is True
