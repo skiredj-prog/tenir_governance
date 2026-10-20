@@ -523,3 +523,25 @@ def test_slow_hold_kernel_does_not_delay_emergency_quarantine(tmp_path):
     assert outcome["composed_decision"] == "HOLD"
     assert "QUARANTINE_LOCK" in outcome["composed_rationale"]
     assert resolver.registry.get(key).state == OperationState.HOLD
+
+
+def test_failed_first_mark_write_cannot_leave_false_unlocked_state(tmp_path, monkeypatch):
+    """A crash/error after the durable sentinel but before mark cannot fail open."""
+    store = tmp_path / "ops.json"
+    original = DurableOperationRegistry(str(store))
+    import tenir_governance.operations.registry as registry_module
+
+    def fail_mark_create(*args, **kwargs):
+        raise OSError("injected mark persistence failure")
+
+    monkeypatch.setattr(registry_module.tempfile, "mkstemp", fail_mark_create)
+    with pytest.raises(OSError, match="injected mark persistence failure"):
+        original.set_quarantine(True, locked_by="crash-between-writes")
+    monkeypatch.undo()
+
+    assert Path(str(store) + ".quarantine.initialized").exists()
+    assert not Path(str(store) + ".quarantine.json").exists()
+    restarted = DurableOperationRegistry(str(store))
+    assert restarted.quarantine_is_active() is True
+    with pytest.raises(RuntimeError, match="corrupt"):
+        restarted.set_quarantine(True, locked_by="must-not-bypass")
