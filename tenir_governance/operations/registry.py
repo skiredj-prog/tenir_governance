@@ -459,6 +459,47 @@ class DurableOperationRegistry:
     def _quarantine_initialized_path(self) -> str | None:
         return self._store_path + ".quarantine.initialized" if self._store_path else None
 
+    def _quarantine_release_pending_path(self) -> str | None:
+        return self._store_path + ".quarantine.release-pending" if self._store_path else None
+
+    def _quarantine_sync_parent_locked(self, path: str) -> None:
+        if os.name != "nt":
+            directory = os.path.dirname(os.path.abspath(path))
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+
+    def _quarantine_begin_release_locked(self, lock_id: str) -> None:
+        """Durable fail-closed guard before writing any inactive mark."""
+        path = self._quarantine_release_pending_path()
+        if path is None:
+            return
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(lock_id + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            # os.fdopen has closed the descriptor when its context exits.
+            pass
+        self._quarantine_sync_parent_locked(path)
+
+    def _quarantine_finish_release_locked(self) -> None:
+        """Remove the recovery guard only after the inactive mark is fsynced.
+
+        Removing this guard is the release visibility/commit point.
+        A crash after it but before the caller receives the receipt remains
+        an unavoidable lost-acknowledgement window on a local filesystem.
+        """
+        path = self._quarantine_release_pending_path()
+        if path is None:
+            return
+        os.unlink(path)
+        self._quarantine_sync_parent_locked(path)
+
     def _quarantine_ensure_initialized_locked(self) -> None:
         """Durably remember that a quarantine mark has existed.
 
@@ -490,6 +531,12 @@ class DurableOperationRegistry:
         path = self._quarantine_path()
         if path is None:
             return dict(self._quarantine_memory)
+        # If a release crashed after replacing the active mark, the pending
+        # sidecar prevents the inactive JSON from reopening admission. This
+        # sidecar must be resolved explicitly, never auto-deleted on restart.
+        pending = self._quarantine_release_pending_path()
+        if pending and os.path.exists(pending):
+            return {"active": True, "corrupted": True}
         if not os.path.exists(path):
             # An untouched store may have no quarantine mark. Once any mark
             # was written, its disappearance is corruption, not an unlock.
@@ -673,12 +720,17 @@ class DurableOperationRegistry:
                     "locked_by": mark.get("locked_by", ""),
                     "incident_id": mark.get("incident_id"),
                 }
-                # Persist unlocked state BEFORE returning a success receipt.
+                # First persist an independent fail-closed release guard.
+                # If mark replace/fsync subsequently fails, another worker
+                # still sees quarantine as active even if JSON is inactive.
+                self._quarantine_begin_release_locked(mark["lock_id"])
                 self._quarantine_write_locked({
                     "active": False,
                     "lock_id": mark["lock_id"],
                     "release_receipt": receipt,
                 })
+                # This is the visibility/commit point of a successful unlock.
+                self._quarantine_finish_release_locked()
                 return {
                     "released": True,
                     "reason": "QUARANTINE_LOCK release verified and persisted.",
