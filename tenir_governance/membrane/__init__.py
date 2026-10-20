@@ -21,6 +21,7 @@ from __future__ import annotations
 from .._profile_meta import DISCLOSURE
 
 import threading
+from uuid import uuid4
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -29,6 +30,7 @@ from ..objects import Agent, Passage, Trajectory, Delegation, Resource, MissionI
 from ..objects.passage import ExecutionStatus as PassageStatus
 from ..composition.decisions import Decision, CheckType
 from ..operations.budget import _positive_finite_float
+from ..operations.registry import _verify_quarantine_release
 
 
 def _utc_now() -> str:
@@ -51,6 +53,18 @@ class MembraneState:
     # Per-resource locks for atomic budget reservations
     _locks: dict[str, threading.Lock] = field(default_factory=dict)
     _quarantine_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
+    quarantine_release_verifier: Any = field(default=None, repr=False, compare=False)
+    _quarantine_registry: Any = field(default=None, init=False, repr=False, compare=False)
+    _quarantine_lock_id: str = field(default="", init=False, repr=False, compare=False)
+
+    def bind_quarantine_registry(self, registry) -> None:
+        """All public membrane entry points use the governor's durable store."""
+        with self._quarantine_lock:
+            if self._quarantine_registry is not None and self._quarantine_registry is not registry:
+                raise RuntimeError("MembraneState already bound to a different operation registry.")
+            self._quarantine_registry = registry
+            if self.quarantine:
+                registry.set_quarantine(True, locked_by=self.quarantine_locked_by)
 
     def register_agent(self, agent: Agent) -> None:
         self.agents[agent.agent_id] = agent
@@ -88,6 +102,9 @@ class MembraneState:
 
     def lock_quarantine(self, locked_by: str = "") -> None:
         with self._quarantine_lock:
+            if self._quarantine_registry is not None:
+                # Durable mark must exist before acknowledging the local lock.
+                self._quarantine_registry.set_quarantine(True, locked_by=locked_by)
             self._lock_quarantine_under_lock(locked_by)
 
     def _lock_quarantine_under_lock(self, locked_by: str = "") -> None:
@@ -100,6 +117,8 @@ class MembraneState:
         This is distinct from a HOLD decision — QUARANTINE_LOCK is a
         persistent LEI-level guard, not a per-operation disposition.
         """
+        if not self.quarantine:
+            self._quarantine_lock_id = uuid4().hex
         self.quarantine = True
         self.quarantine_locked_at = _utc_now()
         self.quarantine_locked_by = locked_by
@@ -113,6 +132,20 @@ class MembraneState:
         reason: str = "",
     ) -> dict[str, Any]:
         with self._quarantine_lock:
+            if self._quarantine_registry is not None:
+                # The durable registry verifies the authorization and commits
+                # the shared release before the local flag can be cleared.
+                result = self._quarantine_registry.authorized_release_quarantine(
+                    authorized_by=authorized_by, scope=scope,
+                    authorization=authorization, reason=reason,
+                )
+                if result.get("released"):
+                    self.quarantine = False
+                    self.quarantine_release_receipt = result["receipt"]
+                    self.quarantine_locked_at = ""
+                    self.quarantine_locked_by = ""
+                    self._quarantine_lock_id = ""
+                return result
             return self._release_quarantine_under_lock(authorized_by, scope, authorization, reason)
 
     def _release_quarantine_under_lock(
@@ -140,7 +173,21 @@ class MembraneState:
                 "receipt": None,
             }
 
+        proof = _verify_quarantine_release(
+            self.quarantine_release_verifier,
+            authorized_by=authorized_by, scope=scope,
+            authorization=authorization, reason=reason,
+            lock_id=self._quarantine_lock_id,
+        )
+        if proof is None:
+            return {
+                "released": False,
+                "receipt": None,
+                "reason": "QUARANTINE_LOCK release denied: authorization not verified.",
+            }
         receipt = {
+            "authorization_id": proof["authorization_id"],
+            "lock_id": proof["lock_id"],
             "authorized_by": authorized_by,
             "scope": scope,
             "timestamp": _utc_now(),
@@ -154,6 +201,7 @@ class MembraneState:
         self.quarantine_release_receipt = receipt
         self.quarantine_locked_at = ""
         self.quarantine_locked_by = ""
+        self._quarantine_lock_id = ""
 
         return {
             "released": True,
@@ -164,7 +212,11 @@ class MembraneState:
     @property
     def quarantine_active(self) -> bool:
         """Check if quarantine lock is currently active."""
-        return self.quarantine
+        if self.quarantine:
+            return True
+        if self._quarantine_registry is not None:
+            return self._quarantine_registry.quarantine_is_active()
+        return False
 
 
 @dataclass
@@ -208,7 +260,7 @@ class TransitionMembrane:
         checks: list[CheckResult] = []
 
         # I6 — No admission under quarantine (MANDATORY)
-        if self.state.quarantine:
+        if self.state.quarantine_active:
             checks.append(CheckResult("I6", CheckType.MANDATORY, Decision.HARD_VETO,
                                        "I6: System is under quarantine lock — no admissions permitted."))
         else:
@@ -297,7 +349,7 @@ class TransitionMembrane:
         system_state = {
             "agents": len(self.state.agents),
             "resources": {rid: r.consumed for rid, r in self.state.resources.items()},
-            "quarantine": self.state.quarantine,
+            "quarantine": self.state.quarantine_active,
         }
         for inv in self.state.invariants:
             holds, reason = inv.evaluate(system_state)

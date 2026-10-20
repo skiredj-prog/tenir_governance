@@ -329,6 +329,7 @@ class DualKernelGovernor:
         self.policy = policy or CompositionPolicy()
         self.policy.validate()
         self.registry = registry or DurableOperationRegistry()
+        self.membrane.state.bind_quarantine_registry(self.registry)
         self.budget_coordinator = budget_coordinator
         # Optional durable reservation backend. When supplied, this becomes
         # the budget source of truth for this governor instance.
@@ -531,53 +532,97 @@ class DualKernelGovernor:
             composed_decision=composed_decision,
         )
 
-        # 6a. Budget ownership: a reservation is taken here, exactly once,
-        # for every outcome that keeps the operation alive (PASS/FLAG/HOLD).
-        # A failed reservation at this point (concurrent consumption since
-        # the membrane check) is fail-closed to HARD_VETO.
-        if composed_decision in (
-            Decision.PASS.value, Decision.FLAG.value, Decision.HOLD.value,
-        ):
-            # Linearize final admission against QUARANTINE_LOCK even when no
-            # budget is in scope. If a lock activates after I6's first check,
-            # no outcome that retains the operation may pass this point.
-            with self.membrane.state._quarantine_lock:
-                if self._quarantine_blocks():
-                    composed_decision = Decision.HARD_VETO.value
-                    composed_rationale = (
-                        "QUARANTINE_LOCK activated during adjudication; admission and reservation blocked."
-                    )
-                elif budget_in_scope and not self._reserve_budget(
-                    idem_key, resource_id, amount,
+        # The cross-process gate covers both the shared mark check and the
+        # entire durable admission/reservation/HOLD claim. Lock activation
+        # cannot overtake this transaction between its check and transition.
+        with self.membrane.state._quarantine_lock:
+            with self.registry.quarantine_guard():
+                # 6a. Budget ownership: a reservation is taken here, exactly once,
+                # for every outcome that keeps the operation alive (PASS/FLAG/HOLD).
+                # A failed reservation at this point (concurrent consumption since
+                # the membrane check) is fail-closed to HARD_VETO.
+                if composed_decision in (
+                    Decision.PASS.value, Decision.FLAG.value, Decision.HOLD.value,
                 ):
-                    composed_decision = Decision.HARD_VETO.value
-                    composed_rationale = (
-                        "Budget reservation failed at commit point (concurrent consumption) "
-                        "— fail-closed HARD_VETO."
-                    )
-            if composed_decision == Decision.HARD_VETO.value:
-                self.ledger.append(
-                    kernel="composed",
-                    decision=composed_decision,
-                    rationale=composed_rationale,
-                    passage_id=passage.passage_id,
-                    idempotency_key=idem_key,
-                )
+                    # Linearize final admission against QUARANTINE_LOCK even when no
+                    # budget is in scope. If a lock activates after I6's first check,
+                    # no outcome that retains the operation may pass this point.
+                    with self.membrane.state._quarantine_lock:
+                        if self._quarantine_blocks():
+                            composed_decision = Decision.HARD_VETO.value
+                            composed_rationale = (
+                                "QUARANTINE_LOCK activated during adjudication; admission and reservation blocked."
+                            )
+                        elif budget_in_scope and not self._reserve_budget(
+                            idem_key, resource_id, amount,
+                        ):
+                            composed_decision = Decision.HARD_VETO.value
+                            composed_rationale = (
+                                "Budget reservation failed at commit point (concurrent consumption) "
+                                "— fail-closed HARD_VETO."
+                            )
+                    if composed_decision == Decision.HARD_VETO.value:
+                        self.ledger.append(
+                            kernel="composed",
+                            decision=composed_decision,
+                            rationale=composed_rationale,
+                            passage_id=passage.passage_id,
+                            idempotency_key=idem_key,
+                        )
 
-        # 6. State machine transitions
-        if composed_decision == Decision.PASS.value or composed_decision == Decision.FLAG.value:
-            success, _prev = self.registry.transition_to(idem_key, OperationState.RESERVED)
-            if not success:
-                # Transition failed — the operation cannot be reserved.
-                # This is an inconsistent state: the decision is PASS but
-                # the durable state does not confirm it. Return HOLD, not PASS.
-                self.ledger.append(
-                    kernel="composed",
-                    decision=Decision.HOLD.value,
-                    rationale=f"PASS decision but RESERVED transition failed — fail-closed HOLD.",
-                    passage_id=passage.passage_id,
-                    idempotency_key=idem_key,
-                )
+                # 6. State machine transitions
+                if composed_decision == Decision.PASS.value or composed_decision == Decision.FLAG.value:
+                    success, _prev = self.registry.transition_to(idem_key, OperationState.RESERVED)
+                    if not success:
+                        # Transition failed — the operation cannot be reserved.
+                        # This is an inconsistent state: the decision is PASS but
+                        # the durable state does not confirm it. Return HOLD, not PASS.
+                        self.ledger.append(
+                            kernel="composed",
+                            decision=Decision.HOLD.value,
+                            rationale=f"PASS decision but RESERVED transition failed — fail-closed HOLD.",
+                            passage_id=passage.passage_id,
+                            idempotency_key=idem_key,
+                        )
+                        return {
+                            "passage_id": passage.passage_id,
+                            "idempotency_key": idem_key,
+                            "scoring_decision": scoring_result["decision"] if scoring_result else None,
+                            "scoring_rationale": scoring_result["rationale"] if scoring_result else None,
+                            "scoring_ces": scoring_result.get("ces_state") if scoring_result else None,
+                            "scoring_s": scoring_result.get("s_score") if scoring_result else None,
+                            "membrane_decision": membrane_result["decision"] if membrane_result else None,
+                            "membrane_rationale": membrane_result["rationale"] if membrane_result else None,
+                            "membrane_checks": membrane_result.get("checks", []) if membrane_result else [],
+                            "composed_decision": Decision.HOLD.value,
+                            "composed_rationale": "PASS decision but RESERVED transition failed — fail-closed HOLD.",
+                            "execution_status": "pending",
+                            "operation_state": self.registry.get(idem_key).state.value if self.registry.get(idem_key) else "unknown",
+                            "ledger_entries": self.ledger.entry_count,
+                            "ledger_valid": self.ledger.verify_chain(),
+                        }
+                elif composed_decision == Decision.HARD_VETO.value:
+                    # No reservation is taken before the decision point (6a), so a
+                    # veto has nothing to release.
+                    self.registry.transition_to(idem_key, OperationState.FAILED)
+                elif composed_decision == Decision.HOLD.value:
+                    # Enter through HoldManager so the lifecycle record is initialized.
+                    # Do not invent a τ_K here: this generic Governor has no
+                    # organization-owned SLA. Scenario callers pass their bound explicitly.
+                    hold_entry = self.hold_manager.enter_hold(idem_key)
+                    if not hold_entry["entered"]:
+                        composed_rationale = (
+                            "HOLD decision could not initialize the lifecycle record: "
+                            + hold_entry["reason"]
+                        )
+                        self.ledger.append(
+                            kernel="hold_lifecycle",
+                            decision=Decision.HOLD.value,
+                            rationale=composed_rationale,
+                            passage_id=passage.passage_id,
+                            idempotency_key=idem_key,
+                        )
+
                 return {
                     "passage_id": passage.passage_id,
                     "idempotency_key": idem_key,
@@ -588,52 +633,13 @@ class DualKernelGovernor:
                     "membrane_decision": membrane_result["decision"] if membrane_result else None,
                     "membrane_rationale": membrane_result["rationale"] if membrane_result else None,
                     "membrane_checks": membrane_result.get("checks", []) if membrane_result else [],
-                    "composed_decision": Decision.HOLD.value,
-                    "composed_rationale": "PASS decision but RESERVED transition failed — fail-closed HOLD.",
-                    "execution_status": "pending",
+                    "composed_decision": composed_decision,
+                    "composed_rationale": composed_rationale,
+                    "execution_status": membrane_result.get("execution_status", "pending") if membrane_result else "unknown",
                     "operation_state": self.registry.get(idem_key).state.value if self.registry.get(idem_key) else "unknown",
                     "ledger_entries": self.ledger.entry_count,
                     "ledger_valid": self.ledger.verify_chain(),
                 }
-        elif composed_decision == Decision.HARD_VETO.value:
-            # No reservation is taken before the decision point (6a), so a
-            # veto has nothing to release.
-            self.registry.transition_to(idem_key, OperationState.FAILED)
-        elif composed_decision == Decision.HOLD.value:
-            # Enter through HoldManager so the lifecycle record is initialized.
-            # Do not invent a τ_K here: this generic Governor has no
-            # organization-owned SLA. Scenario callers pass their bound explicitly.
-            hold_entry = self.hold_manager.enter_hold(idem_key)
-            if not hold_entry["entered"]:
-                composed_rationale = (
-                    "HOLD decision could not initialize the lifecycle record: "
-                    + hold_entry["reason"]
-                )
-                self.ledger.append(
-                    kernel="hold_lifecycle",
-                    decision=Decision.HOLD.value,
-                    rationale=composed_rationale,
-                    passage_id=passage.passage_id,
-                    idempotency_key=idem_key,
-                )
-
-        return {
-            "passage_id": passage.passage_id,
-            "idempotency_key": idem_key,
-            "scoring_decision": scoring_result["decision"] if scoring_result else None,
-            "scoring_rationale": scoring_result["rationale"] if scoring_result else None,
-            "scoring_ces": scoring_result.get("ces_state") if scoring_result else None,
-            "scoring_s": scoring_result.get("s_score") if scoring_result else None,
-            "membrane_decision": membrane_result["decision"] if membrane_result else None,
-            "membrane_rationale": membrane_result["rationale"] if membrane_result else None,
-            "membrane_checks": membrane_result.get("checks", []) if membrane_result else [],
-            "composed_decision": composed_decision,
-            "composed_rationale": composed_rationale,
-            "execution_status": membrane_result.get("execution_status", "pending") if membrane_result else "unknown",
-            "operation_state": self.registry.get(idem_key).state.value if self.registry.get(idem_key) else "unknown",
-            "ledger_entries": self.ledger.entry_count,
-            "ledger_valid": self.ledger.verify_chain(),
-        }
 
     def _prospective_utilization(self, idempotency_key: str, resource, amount: float) -> float:
         """Budget utilization as it will be once this operation holds its budget.
@@ -885,14 +891,7 @@ class DualKernelGovernor:
         return bool(checker()) if callable(checker) else False
 
     def lock_quarantine(self, locked_by: str = "") -> None:
-        """Activate quarantine in the shared registry, then in this process.
-
-        Durable mark first: if this process dies before the local flag is set,
-        other workers still observe the lock.
-        """
-        setter = getattr(self.registry, "set_quarantine", None)
-        if callable(setter):
-            setter(True, locked_by=locked_by)
+        """Persist the shared guard through the bound membrane state."""
         self.membrane.lock_quarantine(locked_by)
 
     def release_quarantine(
@@ -902,15 +901,10 @@ class DualKernelGovernor:
         authorization: str,
         reason: str = "",
     ) -> dict[str, Any]:
-        """Release the local lock only when its receipt succeeds, then clear the shared mark."""
-        result = self.membrane.release_quarantine(
+        """Only a configured trusted verifier can authorize durable release."""
+        return self.membrane.release_quarantine(
             authorized_by, scope, authorization, reason,
         )
-        if result.get("released"):
-            setter = getattr(self.registry, "set_quarantine", None)
-            if callable(setter):
-                setter(False)
-        return result
 
     def dispatch(
         self,
@@ -923,13 +917,14 @@ class DualKernelGovernor:
     ) -> dict[str, Any]:
         # Linearize the quarantine check and dispatch claim against lock/unlock.
         with self.membrane.state._quarantine_lock:
-            result = self._dispatch_under_quarantine_lock(
-                idempotency_key, resource_id, amount, payload=payload,
-            )
-            if result.get("dispatched") and _active_provider_call:
-                with self._active_dispatches_lock:
-                    self._active_dispatches.add(idempotency_key)
-            return result
+            with self.registry.quarantine_guard():
+                result = self._dispatch_under_quarantine_lock(
+                    idempotency_key, resource_id, amount, payload=payload,
+                )
+                if result.get("dispatched") and _active_provider_call:
+                    with self._active_dispatches_lock:
+                        self._active_dispatches.add(idempotency_key)
+                return result
 
     def _dispatch_under_quarantine_lock(
         self,

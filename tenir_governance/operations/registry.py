@@ -35,6 +35,7 @@ import os
 import tempfile
 import threading
 import hashlib
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict, replace
 from enum import Enum
@@ -43,6 +44,44 @@ from uuid import uuid4
 
 from .payload_binding import EMPTY_PAYLOAD_HASH
 from .file_lock import acquire_file_lock
+
+
+
+def _verify_quarantine_release(
+    verifier, *, authorized_by: str, scope: str, authorization: str,
+    reason: str, lock_id: str,
+) -> dict | None:
+    """Accept only a trusted verifier's scoped, lock-bound attestation.
+
+    The input strings and the ceremony label are NOT authentication.
+    A caller cannot supply the attestation directly. Integrations must
+    configure a verifier that authenticates the claimant and validates
+    the token/signature, scope, nonce and replay rules.
+    """
+    if not callable(verifier) or not lock_id:
+        return None
+    try:
+        proof = verifier(
+            authorized_by=authorized_by, scope=scope, authorization=authorization,
+            reason=reason, lock_id=lock_id,
+        )
+    except Exception:
+        return None
+    if not isinstance(proof, dict):
+        return None
+    if (proof.get("authorized") is not True
+            or proof.get("principal") != authorized_by
+            or proof.get("scope") != scope
+            or proof.get("lock_id") != lock_id
+            or not isinstance(proof.get("authorization_id"), str)
+            or not proof["authorization_id"].strip()):
+        return None
+    return {
+        "principal": authorized_by,
+        "scope": scope,
+        "lock_id": lock_id,
+        "authorization_id": proof["authorization_id"],
+    }
 
 
 class OperationState(str, Enum):
@@ -287,7 +326,7 @@ class DurableOperationRegistry:
     exactly one succeeds. The other gets (False, current_state).
     """
 
-    def __init__(self, store_path: str | None = None):
+    def __init__(self, store_path: str | None = None, *, quarantine_release_verifier=None):
         self._lock = threading.Lock()
         self._records: dict[str, OperationRecord] = {}
         self._store_path = store_path
@@ -296,7 +335,10 @@ class DurableOperationRegistry:
         self._local_settlement_locks: dict[str, threading.Lock] = {}
         self._local_settlement_locks_guard = threading.Lock()
         self._corrupted = False
-        self._quarantine_memory = False
+        self._quarantine_memory = {"active": False}
+        self._quarantine_release_verifier = quarantine_release_verifier
+        self._quarantine_gate_local = threading.RLock()
+        self._quarantine_gate_depth = threading.local()
         if store_path and os.path.exists(store_path):
             self._load()
 
@@ -390,66 +432,160 @@ class DurableOperationRegistry:
         """True when registry records are backed by a durable file store."""
         return bool(self._store_path)
 
+    @contextmanager
+    def quarantine_guard(self):
+        """Shared single-host admission/dispatch/quarantine linearization gate.
+
+        A separate lock file is used: registry transition APIs also acquire
+        their own lock and must not re-enter the same OS flock descriptor.
+        Nested use from the same registry/thread is supported explicitly.
+        """
+        with self._quarantine_gate_local:
+            depth = getattr(self._quarantine_gate_depth, "depth", 0)
+            lease = None
+            if depth == 0 and self._store_path:
+                lease = acquire_file_lock(self._store_path + ".quarantine.gate.lock")
+            self._quarantine_gate_depth.depth = depth + 1
+            try:
+                yield
+            finally:
+                self._quarantine_gate_depth.depth -= 1
+                if lease is not None:
+                    lease.close()
+
     def _quarantine_path(self) -> str | None:
-        if not self._store_path:
-            return None
-        return self._store_path + ".quarantine.json"
+        return self._store_path + ".quarantine.json" if self._store_path else None
+
+    def _quarantine_read_locked(self) -> dict:
+        """Call only while the shared quarantine_guard is held."""
+        path = self._quarantine_path()
+        if path is None:
+            return dict(self._quarantine_memory)
+        if not os.path.exists(path):
+            return {"active": False}
+        try:
+            with open(path, "r", encoding="utf-8") as stream:
+                item = json.load(stream)
+        except (OSError, ValueError, TypeError):
+            return {"active": True, "corrupted": True}
+        if not isinstance(item, dict) or type(item.get("active")) is not bool:
+            return {"active": True, "corrupted": True}
+        if item["active"] and (
+            not isinstance(item.get("lock_id"), str)
+            or not item["lock_id"].strip()
+        ):
+            return {"active": True, "corrupted": True}
+        return item
+
+    def _quarantine_write_locked(self, mark: dict) -> None:
+        """Atomic durable replace under quarantine_guard; never writes unlocked."""
+        path = self._quarantine_path()
+        if path is None:
+            self._quarantine_memory = dict(mark)
+            return
+        directory = os.path.dirname(os.path.abspath(path))
+        fd, tmp = tempfile.mkstemp(prefix="quarantine.", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(mark, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, path)
+            if os.name != "nt":
+                directory_fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        self._quarantine_memory = dict(mark)
 
     def set_quarantine(self, active: bool, *, locked_by: str = "") -> None:
-        """Persist the LEI quarantine mark shared by every registry on this store.
-
-        An in-memory registry keeps the mark in this process only. A file-backed
-        registry writes it under the same cross-process lock as operation
-        transitions. A corrupt mark file is not cleared here.
-        """
-        with self._lock:
-            path = self._quarantine_path()
-            if path is None:
-                self._quarantine_memory = bool(active)
-                return
-            flock = self._lock_file()
-            try:
-                payload = {
-                    "active": bool(active),
-                    "locked_by": locked_by if active else "",
-                }
-                directory = os.path.dirname(os.path.abspath(path))
-                fd, tmp = tempfile.mkstemp(prefix="quarantine.", suffix=".tmp", dir=directory)
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                        json.dump(payload, stream)
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                    os.replace(tmp, path)
-                finally:
-                    if os.path.exists(tmp):
-                        os.unlink(tmp)
-                self._quarantine_memory = bool(active)
-            finally:
-                if flock:
-                    flock.close()
+        """Activation only. Never permit an unauthenticated public unlock."""
+        if active is not True:
+            raise PermissionError(
+                "QUARANTINE_LOCK cannot be cleared through set_quarantine; "
+                "a trusted, lock-bound authorization verifier is mandatory."
+            )
+        with self.quarantine_guard():
+            with self._lock:
+                old = self._quarantine_read_locked()
+                if old.get("corrupted"):
+                    raise RuntimeError("QUARANTINE_LOCK mark is corrupt; recovery required.")
+                if old["active"]:
+                    return  # Idempotent; preserve the original lock identity.
+                self._quarantine_write_locked({
+                    "active": True,
+                    "lock_id": uuid4().hex,
+                    "locked_by": locked_by,
+                })
 
     def quarantine_is_active(self) -> bool:
-        """Return the shared quarantine mark. Corrupt durable state fails closed."""
-        with self._lock:
-            path = self._quarantine_path()
-            if path is None:
-                return self._quarantine_memory
-            if not os.path.exists(path):
-                return False
-            flock = self._lock_file()
-            try:
-                try:
-                    with open(path, "r", encoding="utf-8") as stream:
-                        payload = json.load(stream)
-                except (OSError, json.JSONDecodeError, ValueError, TypeError):
-                    return True
-                if not isinstance(payload, dict) or "active" not in payload:
-                    return True
-                return bool(payload["active"])
-            finally:
-                if flock:
-                    flock.close()
+        """Fail closed on malformed durable state; reflects all local workers."""
+        with self.quarantine_guard():
+            with self._lock:
+                return bool(self._quarantine_read_locked()["active"])
+
+    def authorized_release_quarantine(
+        self, *, authorized_by: str, scope: str,
+        authorization: str, reason: str = "",
+    ) -> dict[str, Any]:
+        """Validate externally authenticated proof inside the shared gate.
+
+        Refuses absent/corrupt records and unconfigured verifiers; an opaque
+        caller-supplied ceremony string alone never authorizes a release.
+        """
+        with self.quarantine_guard():
+            with self._lock:
+                mark = self._quarantine_read_locked()
+                if mark.get("corrupted"):
+                    return {
+                        "released": False,
+                        "reason": "QUARANTINE_LOCK mark corrupt; manual recovery required.",
+                        "receipt": None,
+                    }
+                if not mark["active"]:
+                    return {
+                        "released": False,
+                        "reason": "No quarantine lock active.",
+                        "receipt": None,
+                    }
+                proof = _verify_quarantine_release(
+                    self._quarantine_release_verifier,
+                    authorized_by=authorized_by, scope=scope,
+                    authorization=authorization, reason=reason,
+                    lock_id=mark["lock_id"],
+                )
+                if proof is None:
+                    return {
+                        "released": False,
+                        "reason": "QUARANTINE_LOCK release denied: authorization not verified.",
+                        "receipt": None,
+                    }
+                receipt = {
+                    "authorized_by": proof["principal"],
+                    "scope": proof["scope"],
+                    "authorization": authorization,
+                    "authorization_id": proof["authorization_id"],
+                    "lock_id": proof["lock_id"],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "reason": reason,
+                    "locked_by": mark.get("locked_by", ""),
+                }
+                # Persist unlocked state BEFORE returning a success receipt.
+                # A failure to persist cannot falsely unlock another worker.
+                self._quarantine_write_locked({
+                    "active": False,
+                    "lock_id": mark["lock_id"],
+                    "release_receipt": receipt,
+                })
+                return {
+                    "released": True,
+                    "reason": "QUARANTINE_LOCK release verified and persisted.",
+                    "receipt": receipt,
+                }
 
     def register(self, record: OperationRecord) -> bool:
         """Register a new operation. Returns False if key already exists.
