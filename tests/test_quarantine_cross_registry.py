@@ -329,3 +329,55 @@ def test_originating_worker_observes_release_by_independent_worker(tmp_path):
     origin.lock_quarantine("next-incident")
     assert origin.membrane.state.quarantine_active is True
     assert _governor(store).registry.quarantine_is_active() is True
+
+
+def test_removed_quarantine_mark_is_not_interpreted_as_unlocked(tmp_path):
+    """Deleting the active mark after initialization cannot reopen admission."""
+    store = tmp_path / "ops.json"
+    owner = _governor(store, verifier=_trusted_test_verifier)
+    _register_reserved(owner, "op-deleted-mark")
+    owner.lock_quarantine("incident")
+    mark = Path(str(store) + ".quarantine.json")
+    initialized = Path(str(store) + ".quarantine.initialized")
+    assert mark.exists() and initialized.exists()
+
+    mark.unlink()
+    fresh = _governor(store, verifier=_trusted_test_verifier)
+    assert fresh.registry.quarantine_is_active() is True
+    assert fresh.dispatch("op-deleted-mark")["dispatched"] is False
+    denied = fresh.release_quarantine("operator", "lei", "ceremony-G-R5-001")
+    assert denied["released"] is False
+    assert "corrupt" in denied["reason"]
+    with pytest.raises(RuntimeError, match="corrupt"):
+        fresh.lock_quarantine("second-incident")
+
+
+def test_pre_sentinel_mark_is_migrated_and_deletion_fails_closed(tmp_path):
+    """Old active and released marks receive a durable initialization sentinel."""
+    for active in (True, False):
+        store = tmp_path / f"legacy-{active}.json"
+        old_mark = {
+            "active": active,
+            "lock_id": "legacy-quarantine-id",
+        }
+        mark = Path(str(store) + ".quarantine.json")
+        mark.write_text(json.dumps(old_mark), encoding="utf-8")
+        sentinel = Path(str(store) + ".quarantine.initialized")
+        assert not sentinel.exists()
+
+        migrated = DurableOperationRegistry(str(store))
+        assert migrated.quarantine_is_active() is active
+        assert sentinel.exists()
+        mark.unlink()
+        recovered = DurableOperationRegistry(str(store))
+        assert recovered.quarantine_is_active() is True
+        with pytest.raises(RuntimeError, match="corrupt"):
+            recovered.set_quarantine(True, locked_by="must-not-reinitialize")
+
+
+def test_never_initialized_quarantine_store_is_not_blocked(tmp_path):
+    """An untouched registry is not mistaken for a deleted quarantine mark."""
+    store = tmp_path / "brand-new-ops.json"
+    fresh = DurableOperationRegistry(str(store))
+    assert fresh.quarantine_is_active() is False
+    assert not Path(str(store) + ".quarantine.initialized").exists()
