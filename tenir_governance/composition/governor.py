@@ -2218,22 +2218,21 @@ class DualKernelGovernor:
                             "operation_state": current.state.value,
                             "reason": reason,
                         }
-                    # HOLD -> RESERVED is a fresh admission. Serialize its
-                    # re-adjudication and durable transition with the same
-                    # shared gate as ordinary admission/dispatch.
-                    with self.membrane.state._quarantine_lock:
-                        with self.registry.quarantine_guard():
-                            if self._quarantine_blocks():
-                                return {
-                                    "hold_resolved": False,
-                                    "operation_state": current.state.value,
-                                    "reason": "QUARANTINE_LOCK is active; HOLD cannot resolve to admission.",
-                                }
-                            return self._re_adjudicate_hold(
-                                passage, pressure, velocity, capacity, option_space,
-                                authority, context_fit, evidence_quality, irreversibility_materiality,
-                                delegation, resource_id, amount, trajectory_id,
-                            )
+                    # First check avoids needless kernel evaluation under a
+                    # known quarantine. Re-check under the shared gate at the
+                    # actual HOLD -> RESERVED transition: scoring and membrane
+                    # evaluation must not block emergency lock activation.
+                    if self._quarantine_blocks():
+                        return {
+                            "hold_resolved": False,
+                            "operation_state": current.state.value,
+                            "reason": "QUARANTINE_LOCK is active; HOLD cannot resolve to admission.",
+                        }
+                    return self._re_adjudicate_hold(
+                        passage, pressure, velocity, capacity, option_space,
+                        authority, context_fit, evidence_quality, irreversibility_materiality,
+                        delegation, resource_id, amount, trajectory_id,
+                    )
         except Exception:
             current = self.registry.get(idempotency_key)
             return {
@@ -2334,17 +2333,31 @@ class DualKernelGovernor:
         # 6. State transitions from HOLD
         hold_resolved = False
         if composed_decision in (Decision.PASS.value, Decision.FLAG.value):
-            # No new reservation here: the HOLD already holds it (budget_reserved).
-            success, _prev = self.registry.transition_to(
-                idem_key, OperationState.RESERVED,
-                hold_record_changes={"exit_reason": "resolved"},
-            )
-            if success:
-                hold_resolved = True
-            else:
-                # Transition failed — stay in HOLD
-                composed_decision = Decision.HOLD.value
-                composed_rationale = "Re-adjudication produced PASS/FLAG but RESERVED transition failed — staying in HOLD."
+            # No new reservation here: the HOLD already holds it. Serialize
+            # the final admission, not the potentially slow kernel evaluation.
+            with self.membrane.state._quarantine_lock:
+                with self.registry.quarantine_guard():
+                    if self._quarantine_blocks():
+                        # A lock activated during scoring: retain HOLD even
+                        # when both kernels would otherwise permit admission.
+                        composed_decision = Decision.HOLD.value
+                        composed_rationale = (
+                            "QUARANTINE_LOCK activated during HOLD re-adjudication; "
+                            "HOLD retained, no RESERVED transition."
+                        )
+                    else:
+                        success, _prev = self.registry.transition_to(
+                            idem_key, OperationState.RESERVED,
+                            hold_record_changes={"exit_reason": "resolved"},
+                        )
+                        if success:
+                            hold_resolved = True
+                        else:
+                            composed_decision = Decision.HOLD.value
+                            composed_rationale = (
+                                "Re-adjudication produced PASS/FLAG but RESERVED "
+                                "transition failed — staying in HOLD."
+                            )
         elif composed_decision == Decision.HARD_VETO.value:
             held_record = self.registry.get(idem_key)
             # Only release a reservation that this durable operation actually owns.
