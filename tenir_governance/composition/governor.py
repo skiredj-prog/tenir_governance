@@ -537,8 +537,7 @@ class DualKernelGovernor:
         # the final admission decision and state claim under the gate. If an
         # emergency lock wins while reserve() is in flight, compensate the
         # reservation only after leaving the gate.
-        external_reservation_acquired = False
-        external_reservation_id = None
+        external_reservation_attempted = False
         retains_operation = composed_decision in (
             Decision.PASS.value, Decision.FLAG.value, Decision.HOLD.value,
         )
@@ -563,7 +562,21 @@ class DualKernelGovernor:
                     idempotency_key=idem_key,
                 )
             else:
-                if not self._reserve_budget(idem_key, resource_id, amount):
+                # Recovery may discover this CREATED operation while reserve
+                # is still running. Serialize settlement for this key without
+                # holding the shared emergency quarantine gate.
+                external_reservation_attempted = True
+                try:
+                    with self.registry.settlement_lock(idem_key, require_persistent=True):
+                        current = self.registry.get(idem_key)
+                        reserved = bool(
+                            current is not None
+                            and current.state == OperationState.CREATED
+                            and self._reserve_budget(idem_key, resource_id, amount)
+                        )
+                except Exception:
+                    reserved = False
+                if not reserved:
                     composed_decision = Decision.HARD_VETO.value
                     composed_rationale = (
                         "Budget reservation failed at commit point (concurrent consumption) "
@@ -576,25 +589,14 @@ class DualKernelGovernor:
                         passage_id=passage.passage_id,
                         idempotency_key=idem_key,
                     )
-                else:
-                    reservation_record = self.registry.get(idem_key)
-                    external_reservation_id = (
-                        reservation_record.reservation_id if reservation_record else None
-                    )
-                    external_reservation_acquired = bool(
-                        reservation_record
-                        and reservation_record.budget_reserved
-                        and reservation_record.reservation_id
-                    )
 
         # The cross-process gate linearizes quarantine activation against the
         # final admission/HOLD claim. No external budget call runs inside it.
         with self.membrane.state._quarantine_lock:
             with self.registry.quarantine_guard():
-                # 6a. Budget ownership: a reservation is taken here, exactly once,
-                # for every outcome that keeps the operation alive (PASS/FLAG/HOLD).
-                # A failed reservation at this point (concurrent consumption since
-                # the membrane check) is fail-closed to HARD_VETO.
+                # 6a. Claim final admission and any local budget reservation.
+                # External reservations were attempted before taking this gate;
+                # quarantine can veto admission even if the backend reserved.
                 if composed_decision in (
                     Decision.PASS.value, Decision.FLAG.value, Decision.HOLD.value,
                 ):
@@ -644,7 +646,8 @@ class DualKernelGovernor:
                         composed_rationale = (
                             "RESERVED transition failed; fail-closed HARD_VETO."
                         )
-                        self.registry.transition_to(idem_key, OperationState.FAILED)
+                        if not external_reservation_attempted:
+                            self.registry.transition_to(idem_key, OperationState.FAILED)
                         self.ledger.append(
                             kernel="composed",
                             decision=composed_decision,
@@ -655,7 +658,8 @@ class DualKernelGovernor:
                 elif composed_decision == Decision.HARD_VETO.value:
                     # Any external reservation rejected by the final check is
                     # compensated below, after leaving the shared gate.
-                    self.registry.transition_to(idem_key, OperationState.FAILED)
+                    if not external_reservation_attempted:
+                        self.registry.transition_to(idem_key, OperationState.FAILED)
                 elif composed_decision == Decision.HOLD.value:
                     # Enter through HoldManager so the lifecycle record is initialized.
                     # Do not invent a τ_K here: this generic Governor has no
@@ -692,10 +696,11 @@ class DualKernelGovernor:
                     "ledger_valid": self.ledger.verify_chain(),
                 }
 
-        if external_reservation_acquired and composed_decision == Decision.HARD_VETO.value:
-            compensated = self._compensate_aborted_external_reservation(
-                idem_key, external_reservation_id,
-            )
+        if external_reservation_attempted and composed_decision == Decision.HARD_VETO.value:
+            # Keep CREATED until compensation and durable ownership updates
+            # complete. fail() also recovers reservations by key if reserve
+            # persisted before ownership flags, and accepts ALREADY_RELEASED.
+            compensated = self.fail(idem_key)
             if not compensated:
                 composed_rationale = (
                     composed_rationale + " External reservation release is uncertain; "
@@ -706,38 +711,6 @@ class DualKernelGovernor:
             if current is not None:
                 response["operation_state"] = current.state.value
         return response
-
-    def _compensate_aborted_external_reservation(
-        self, idempotency_key: str, reservation_id: str | None,
-    ) -> bool:
-        """Release a reservation rejected by the final quarantine check.
-
-        Keep durable ownership flags intact if release is uncertain so that
-        later reconciliation can recover the external reservation safely.
-        This method must be called outside the shared quarantine gate.
-        """
-        if not reservation_id or self.consensus_backend is None:
-            return False
-        try:
-            with self.registry.settlement_lock(
-                idempotency_key, require_persistent=True,
-            ):
-                current = self.registry.get(idempotency_key)
-                if (current is None or not current.budget_reserved
-                        or current.reservation_id != reservation_id):
-                    return False
-                released = self.consensus_backend.release(reservation_id)
-                if getattr(released, "status", None) != "RELEASED":
-                    return False
-                return self.registry.set_budget_flags(
-                    idempotency_key,
-                    budget_reserved=False,
-                    budget_committed=False,
-                    reservation_id="",
-                )
-        except Exception:
-            # Do not clear ownership when release or persistence is uncertain.
-            return False
 
     def _prospective_utilization(self, idempotency_key: str, resource, amount: float) -> float:
         """Budget utilization as it will be once this operation holds its budget.
@@ -845,7 +818,7 @@ class DualKernelGovernor:
 
         | State         | Resume action                                    |
         |---------------|--------------------------------------------------|
-        | CREATED       | Re-adjudicate (no checks were run yet)            |
+        | CREATED       | Reconcile durable budget; re-adjudicate legacy   |
         | HOLD          | Resolve with new evidence or escalate            |
         | RESERVED      | Safe to dispatch (checks passed, budget reserved) |
         | DISPATCHING   | Reconcile — do NOT resend                        |
@@ -866,6 +839,17 @@ class DualKernelGovernor:
 
         state = record.state
         if state == OperationState.CREATED:
+            if self.consensus_backend is not None and record.resource_id and record.amount > 0:
+                return {
+                    "idempotency_key": idempotency_key,
+                    "action": "reconcile_budget",
+                    "reason": (
+                        "Durable admission did not complete. Use fail() to reconcile and "
+                        "release any reservation before closing this operation; do not dispatch."
+                    ),
+                    "operation_state": state.value,
+                    "passage_id": record.passage_id,
+                }
             return {
                 "idempotency_key": idempotency_key,
                 "action": "re_adjudicate",
@@ -2181,15 +2165,23 @@ class DualKernelGovernor:
         """Recovery procedure: find all unresolved operations and report them.
 
         Includes operations in DISPATCHING, UNKNOWN (dispatch-related),
-        HOLD, and ESCALATED (hold-lifecycle) states.
+        HOLD, ESCALATED, and budgeted CREATED operations whose durable
+        reservation may need settlement. Recovery reports; it never redispatches.
         """
         unresolved = self.registry.find_unresolved()
         holds = self.hold_manager.find_holds()
         escalated = self.hold_manager.find_escalated()
         all_unresolved = unresolved + holds + escalated
+        if self.consensus_backend is not None:
+            all_unresolved += [
+                record for record in self.registry.find_by_state(OperationState.CREATED)
+                if record.resource_id and record.amount > 0
+            ]
 
         def _recommendation(state: OperationState) -> str:
-            if state == OperationState.DISPATCHING:
+            if state == OperationState.CREATED:
+                return "reconcile_budget"
+            elif state == OperationState.DISPATCHING:
                 return "reconcile"
             elif state == OperationState.UNKNOWN:
                 return "reconcile" if self.provider is not None else "human_review"
