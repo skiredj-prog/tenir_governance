@@ -16,6 +16,7 @@ on:
       - "tests/test_linearizability_checker.py"
       - "tests/test_liveness.py"
       - "tests/test_hold_lifecycle.py"
+      - "tests/test_sqlite_governor_crash_recovery.py"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
   push:
@@ -33,6 +34,7 @@ on:
       - "tests/test_linearizability_checker.py"
       - "tests/test_liveness.py"
       - "tests/test_hold_lifecycle.py"
+      - "tests/test_sqlite_governor_crash_recovery.py"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
 
@@ -62,3 +64,5 @@ jobs:
         run: pytest -q tests/test_liveness.py
       - name: Run HOLD lifecycle regressions
         run: pytest -q tests/test_hold_lifecycle.py
+      - name: Run SQLite cross-store crash recovery campaign
+        run: pytest -q tests/test_sqlite_governor_crash_recovery.py
