@@ -5,7 +5,8 @@
 | Version / Line                         | Supported | Notes |
 |----------------------------------------|-----------|-------|
 | 5.6.1 (release candidate)              | ⏳ Not released | Raft development/test loopback only; production/multi-host Raft blocked while FM-20 is open. |
-| 5.5.x (Agentic Governance Profile)     | ✅        | Latest published line; single-host operational guarantees only. |
+| 5.6.0 (published GitHub release)       | ⚠️ Limited | Experimental PySyncObj transport; FM-20 open; not approved for production or physical multi-host. |
+| 5.5.x (Agentic Governance Profile)     | ✅        | Prior published line; single-host operational guarantees only. |
 | 5.4.x (Agentic Governance Profile)     | ✅        | Prior supported release line, including HOLD lifecycle and post-execution assessment. |
 | 5.3.x (Agentic Governance Profile)     | ✅        | Supported prior line. Includes two-kernel composition, DurableOperationRegistry, and schema 1.2 conformance; it does not include the v5.4.x assessment layer. |
 | 5.2.x (TENIR 2.0 kernel + R5 hardening)| ✅        | Still supported. |
