@@ -10,13 +10,11 @@ discrete invariant-enforcer decision. Fail-closed semantics: if either
 kernel returns no decision (exception, missing data), the result is HOLD,
 never PASS.
 
-KB3 posture mapping (implementation → canonical):
-    PASS      → NORMAL
-    FLAG      → CAUTION
-    HOLD      → HOLDING-FIRST
-    HARD_VETO → HOLDING-FIRST (with block disposition)
-
-These mappings are rendered at the schema conformance boundary, not here.
+Execution verdict and posture are distinct fields. They are computed
+and returned separately; this module does not map one onto the other.
+    Verdict (what is): PASS / FLAG / HOLD / HARD_VETO
+    Posture (what we do): NORMAL / CAUTION / HOLDING-FIRST
+schema_adapter.py returns posture in its own field.
 This module operates on implementation-level Decision enums.
 """
 from __future__ import annotations
