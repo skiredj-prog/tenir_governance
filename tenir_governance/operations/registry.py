@@ -456,13 +456,53 @@ class DurableOperationRegistry:
     def _quarantine_path(self) -> str | None:
         return self._store_path + ".quarantine.json" if self._store_path else None
 
+    def _quarantine_initialized_path(self) -> str | None:
+        return self._store_path + ".quarantine.initialized" if self._store_path else None
+
+    def _quarantine_ensure_initialized_locked(self) -> None:
+        """Durably remember that a quarantine mark has existed.
+
+        Write the sentinel BEFORE the first active mark. If a crash occurs
+        between those writes, the next worker sees a missing mark as corrupt
+        rather than silently treating it as no quarantine.
+        """
+        path = self._quarantine_initialized_path()
+        if path is None or os.path.exists(path):
+            return
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if os.name != "nt":
+            directory = os.path.dirname(os.path.abspath(path))
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+
     def _quarantine_read_locked(self) -> dict:
         """Call only while the shared quarantine_guard is held."""
         path = self._quarantine_path()
         if path is None:
             return dict(self._quarantine_memory)
         if not os.path.exists(path):
+            # An untouched store may have no quarantine mark. Once any mark
+            # was written, its disappearance is corruption, not an unlock.
+            initialized_path = self._quarantine_initialized_path()
+            if initialized_path and os.path.exists(initialized_path):
+                return {"active": True, "corrupted": True}
             return {"active": False}
+        # Migrate existing marks written before the sentinel was introduced.
+        # A failed migration must not turn a known mark into a permissive read.
+        try:
+            self._quarantine_ensure_initialized_locked()
+        except OSError:
+            return {"active": True, "corrupted": True}
         try:
             with open(path, "r", encoding="utf-8") as stream:
                 item = json.load(stream)
@@ -483,6 +523,9 @@ class DurableOperationRegistry:
         if path is None:
             self._quarantine_memory = dict(mark)
             return
+        # Persist this marker first so a crash/delete never looks like a
+        # fresh, never-locked store to independent workers.
+        self._quarantine_ensure_initialized_locked()
         directory = os.path.dirname(os.path.abspath(path))
         fd, tmp = tempfile.mkstemp(prefix="quarantine.", suffix=".tmp", dir=directory)
         try:
