@@ -306,3 +306,26 @@ def test_hold_readjudication_cannot_admit_under_shared_quarantine(tmp_path):
     assert result["hold_resolved"] is False
     assert "QUARANTINE_LOCK" in result["reason"]
     assert gov.registry.get(key).state == OperationState.HOLD
+
+
+def test_originating_worker_observes_release_by_independent_worker(tmp_path):
+    """Local lock flag must not outlive the canonical cross-process release."""
+    store = tmp_path / "ops.json"
+    origin = _governor(store)
+    releaser = _governor(store, verifier=_trusted_test_verifier)
+    _register_reserved(origin, "op-stale")
+    origin.lock_quarantine("incident-watch")
+    assert origin.membrane.state.quarantine is True
+    assert origin.membrane.state.quarantine_active is True
+
+    assert _release(releaser, store)["released"] is True
+    # This worker did not call release_quarantine; its cache is still stale.
+    assert origin.membrane.state.quarantine is True
+    assert origin.registry.quarantine_is_active() is False
+    assert origin.membrane.state.quarantine_active is False
+    assert origin.dispatch("op-stale")["dispatched"] is True
+
+    # A new incident on the same worker must reactivate the shared gate.
+    origin.lock_quarantine("next-incident")
+    assert origin.membrane.state.quarantine_active is True
+    assert _governor(store).registry.quarantine_is_active() is True
