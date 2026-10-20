@@ -2023,6 +2023,7 @@ class DualKernelGovernor:
         resource_id: str | None = None,
         amount: float = 0.0,
         trajectory_id: str | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Re-adjudicate a HOLD operation with new evidence.
 
@@ -2031,9 +2032,11 @@ class DualKernelGovernor:
         transition HOLD → RESERVED. If still HOLD, stay in HOLD. If
         HARD_VETO, transition to FAILED.
 
-        The caller MUST provide the same passage (or a new one with the
-        same idempotency key) and the updated evidence parameters. Omitting
-        passage is rejected: it must never bypass fresh adjudication.
+        The caller MUST provide the original passage identity (including
+        idempotency key, passage ID, agent and action type) and updated
+        evidence. The canonical payload must also match the durable
+        authorization record; no substituted or missing payload is accepted.
+        Omitting the passage is rejected; it cannot bypass re-adjudication.
 
         Returns the adjudication result dict with an additional
         'hold_resolved' field indicating whether the hold was resolved.
@@ -2098,10 +2101,9 @@ class DualKernelGovernor:
                 "reason": reason,
             }
 
-        # Re-run adjudication with new evidence
-        # The passage must have the same idempotency key
-        if passage.idempotency_key != idempotency_key:
-            passage.idempotency_key = idempotency_key
+        # Do not mutate the supplied passage: operation identity is
+        # immutable. Verify it under the durable settlement lock below,
+        # against the current HOLD record, before either kernel is invoked.
 
         # Serialize re-adjudication with expiry and authorized exit so a
         # terminal transition cannot release a reservation mid-resolution.
@@ -2130,6 +2132,46 @@ class DualKernelGovernor:
                             "operation_state": current.state.value,
                             "budget_reconciliation_required": True,
                             "reason": "Durable HOLD re-adjudication requires a persistent operation registry.",
+                        }
+
+                    # Bind HOLD resolution to the exact durable operation.
+                    # Recheck under the lock so a stale caller cannot
+                    # substitute identity while another worker settles HOLD.
+                    expected_identity = {
+                        "idempotency_key": idempotency_key,
+                        "passage_id": current.passage_id,
+                        "agent_id": current.agent_id,
+                        "action_type": current.action_type,
+                    }
+                    mismatch = next((
+                        name for name, expected in expected_identity.items()
+                        if getattr(passage, name, None) != expected
+                    ), None)
+                    if mismatch is not None:
+                        reason = f"HOLD identity mismatch: {mismatch} differs from the durable operation."
+                    else:
+                        try:
+                            supplied_payload_hash = canonical_payload_hash(payload)
+                        except (TypeError, ValueError) as exc:
+                            reason = f"HOLD payload invalid: {exc}"
+                        else:
+                            reason = (
+                                "HOLD payload mismatch: the supplied action payload "
+                                "differs from the authorized payload."
+                                if supplied_payload_hash != current.payload_hash else ""
+                            )
+                    if reason:
+                        self.ledger.append(
+                            kernel="hold_resolution",
+                            decision=Decision.HOLD.value,
+                            rationale=reason,
+                            passage_id=current.passage_id,
+                            idempotency_key=idempotency_key,
+                        )
+                        return {
+                            "hold_resolved": False,
+                            "operation_state": current.state.value,
+                            "reason": reason,
                         }
                     return self._re_adjudicate_hold(
                         passage, pressure, velocity, capacity, option_space,

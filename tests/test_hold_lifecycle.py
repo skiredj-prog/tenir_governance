@@ -47,6 +47,100 @@ def _setup_governor(budget_capacity=100.0, policy=None, registry=None):
     return DualKernelGovernor(scoring, membrane, policy=policy, registry=registry), state
 
 
+def _identity_hold_fixture(payload=None):
+    """Create a pending HOLD with immutable, durably recorded action identity."""
+    from tenir_governance.operations.payload_binding import canonical_payload_hash
+
+    gov, _ = _setup_governor()
+    original = Passage(
+        passage_id="hold-identity-passage-1",
+        idempotency_key="hold-identity-operation-1",
+        agent_id="alice",
+        action_type="payment",
+    )
+    assert gov.registry.register(OperationRecord(
+        idempotency_key=original.idempotency_key,
+        passage_id=original.passage_id,
+        agent_id=original.agent_id,
+        action_type=original.action_type,
+        payload_hash=canonical_payload_hash(payload),
+    ))
+    assert gov.hold_manager.enter_hold(original.idempotency_key, tau_k_seconds=3600)["entered"]
+
+    class AlwaysPassScoring:
+        def adjudicate(self, **kwargs):
+            return {"decision": Decision.PASS.value, "rationale": "controlled fixture"}
+
+    gov.scoring = AlwaysPassScoring()
+    return gov, original
+
+
+def _resolve_identity_hold(gov, key, passage, **kwargs):
+    return gov.resolve_hold(
+        key, passage=passage,
+        authority=0.9, context_fit=0.9, evidence_quality=0.9,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("overrides,field", [
+    ({"idempotency_key": "forged-operation"}, "idempotency_key"),
+    ({"passage_id": "forged-passage"}, "passage_id"),
+    ({"agent_id": "bob"}, "agent_id"),
+    ({"action_type": "infrastructure_change"}, "action_type"),
+])
+def test_hold_rejects_substituted_durable_identity_without_mutation(overrides, field):
+    gov, original = _identity_hold_fixture()
+    identity = {
+        "idempotency_key": original.idempotency_key,
+        "passage_id": original.passage_id,
+        "agent_id": original.agent_id,
+        "action_type": original.action_type,
+    }
+    identity.update(overrides)
+    attempted = Passage(**identity)
+    result = _resolve_identity_hold(gov, original.idempotency_key, attempted)
+
+    assert result["hold_resolved"] is False
+    assert result["operation_state"] == OperationState.HOLD.value
+    assert field in result["reason"]
+    assert gov.registry.get(original.idempotency_key).state == OperationState.HOLD
+    assert attempted.idempotency_key == identity["idempotency_key"]
+    assert gov.ledger.verify_chain()
+
+
+@pytest.mark.parametrize("supplied_payload", [
+    None,
+    {"beneficiary": "mallory", "amount": 10},
+    {"beneficiary": "bob", "amount": 10, "extra": "unapproved"},
+])
+def test_hold_rejects_missing_or_changed_authorized_payload(supplied_payload):
+    authorized_payload = {"beneficiary": "bob", "amount": 10}
+    gov, original = _identity_hold_fixture(payload=authorized_payload)
+    result = _resolve_identity_hold(
+        gov, original.idempotency_key, original, payload=supplied_payload,
+    )
+
+    assert result["hold_resolved"] is False
+    assert result["operation_state"] == OperationState.HOLD.value
+    assert "payload mismatch" in result["reason"]
+    assert gov.registry.get(original.idempotency_key).state == OperationState.HOLD
+    assert gov.ledger.verify_chain()
+
+
+def test_hold_matching_payload_and_identity_re_adjudicates_normally():
+    authorized_payload = {"beneficiary": "bob", "amount": 10}
+    gov, original = _identity_hold_fixture(payload=authorized_payload)
+    result = _resolve_identity_hold(
+        gov, original.idempotency_key, original,
+        payload={"amount": 10, "beneficiary": "bob"},
+    )
+
+    assert result["hold_resolved"] is True
+    assert result["operation_state"] == OperationState.RESERVED.value
+    assert gov.registry.get(original.idempotency_key).state == OperationState.RESERVED
+
+
 
 @pytest.mark.parametrize("persistent", [False, True])
 def test_failed_escalation_does_not_leave_false_exit_metadata(monkeypatch, tmp_path, persistent):
