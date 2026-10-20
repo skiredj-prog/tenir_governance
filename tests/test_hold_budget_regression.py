@@ -44,6 +44,28 @@ def _setup_governor(budget_capacity=100.0, provider=None):
     return gov, state
 
 
+def _adjudicate_with_evidence(gov, passage, **kwargs):
+    """State-machine tests must supply measured, nominal epistemic inputs."""
+    return gov.adjudicate(
+        passage,
+        authority=0.9,
+        context_fit=0.9,
+        evidence_quality=0.9,
+        **kwargs,
+    )
+
+
+def _resolve_hold_with_evidence(gov, idempotency_key, **kwargs):
+    """HOLD readjudication carries newly measured epistemic inputs."""
+    return gov.resolve_hold(
+        idempotency_key,
+        authority=0.9,
+        context_fit=0.9,
+        evidence_quality=0.9,
+        **kwargs,
+    )
+
+
 class _BrokenScoring:
     """Scoring kernel that always raises → fail-closed HOLD."""
 
@@ -59,7 +81,7 @@ def test_hold_resolve_then_dispatch_does_not_double_reserve():
     # Forcer HOLD : scoring en échec, membrane passe et réserve.
     gov.scoring = _BrokenScoring()
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-    adj = gov.adjudicate(
+    adj = _adjudicate_with_evidence(gov, 
         p, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
@@ -71,7 +93,7 @@ def test_hold_resolve_then_dispatch_does_not_double_reserve():
 
     # Ré-adjudication : scoring restauré, membrane passe.
     gov.scoring = ScoringKernelAdapter(TenirKernel())
-    res = gov.resolve_hold(
+    res = _resolve_hold_with_evidence(gov, 
         p.idempotency_key, passage=p,
         pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
@@ -103,7 +125,7 @@ def test_reconcile_from_escalated_unknown_releases_reservation():
 
     gov.scoring = _BrokenScoring()
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-    gov.adjudicate(
+    _adjudicate_with_evidence(gov, 
         p, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
@@ -134,7 +156,7 @@ def test_reconciliation_flag_write_failure_leaves_budget_untouched(monkeypatch):
     gov, state = _setup_governor(provider=provider, budget_capacity=100.0)
     budget = state.resources["budget"]
     passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
-    result = gov.adjudicate(
+    result = _adjudicate_with_evidence(gov, 
         passage, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
@@ -172,7 +194,7 @@ def test_concurrent_adjudication_reserves_budget_once():
     def attempt(amount):
         barrier.wait()
         p = Passage(agent_id="alice", action_type="payment", amount=amount)
-        r = gov.adjudicate(
+        r = _adjudicate_with_evidence(gov, 
             p, pressure=0.2, velocity=0.2, capacity=0.9,
             resource_id="budget", amount=amount,
         )
@@ -202,7 +224,7 @@ def test_authorize_exit_deny_releases_reservation():
     # Force HOLD via broken scoring.
     gov.scoring = _BrokenScoring()
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-    gov.adjudicate(
+    _adjudicate_with_evidence(gov, 
         p, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
@@ -243,7 +265,7 @@ def test_authorize_exit_approve_keeps_reservation():
     # Force HOLD via broken scoring.
     gov.scoring = _BrokenScoring()
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-    gov.adjudicate(
+    _adjudicate_with_evidence(gov, 
         p, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
@@ -301,7 +323,7 @@ def test_concurrent_adjudication_fails_without_lock():
     def attempt(amount):
         barrier.wait()
         p = Passage(agent_id="alice", action_type="payment", amount=amount)
-        r = gov.adjudicate(
+        r = _adjudicate_with_evidence(gov, 
             p, pressure=0.2, velocity=0.2, capacity=0.9,
             resource_id="budget", amount=amount,
         )

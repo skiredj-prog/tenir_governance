@@ -23,7 +23,66 @@ import pytest
 # Skip all tests if pysyncobj is not installed
 pysyncobj = pytest.importorskip("pysyncobj")
 
-from tenir_governance.operations.raft_backend import RaftConsensusBackend, _RaftStateMachine
+from tenir_governance.operations.raft_backend import (
+    RaftConsensusBackend, _RaftStateMachine, _enforce_raft_dev_loopback,
+)
+
+
+@pytest.fixture(autouse=True)
+def _explicit_raft_test_environment(monkeypatch):
+    """All Raft integration tests explicitly run in a test-only scope."""
+    monkeypatch.setenv("TENIR_ENV", "test")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("HOST_SCOPE", raising=False)
+    monkeypatch.delenv("TENIR_HOST_SCOPE", raising=False)
+
+
+@pytest.mark.parametrize("environment", [None, "", "production", "staging", "bogus"])
+def test_fm20_denies_raft_without_explicit_nonproduction_environment(monkeypatch, environment):
+    if environment is None:
+        monkeypatch.delenv("TENIR_ENV", raising=False)
+    else:
+        monkeypatch.setenv("TENIR_ENV", environment)
+    with pytest.raises(RuntimeError, match="FM-20"):
+        RaftConsensusBackend("127.0.0.1:6100", [])
+
+
+def test_fm20_denies_conflicting_environment_alias(monkeypatch):
+    monkeypatch.setenv("TENIR_ENV", "test")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    with pytest.raises(RuntimeError, match="FM-20"):
+        RaftConsensusBackend("127.0.0.1:6100", [])
+
+
+@pytest.mark.parametrize("self_addr, peers", [
+    ("0.0.0.0:6100", []),
+    ("192.0.2.11:6100", []),
+    ("localhost:6100", ["192.0.2.12:6101"]),
+    ("localhost:6100", ["example.org:6101"]),
+    ("localhost:6100", ["localhost.example:6101"]),
+    ("localhost:6100", ["0.0.0.0:6101"]),
+    ("localhost:6100", ["localhost:0"]),
+    ("localhost:6100", ["localhost:70000"]),
+])
+def test_fm20_denies_nonloopback_or_invalid_endpoints(self_addr, peers):
+    with pytest.raises(RuntimeError, match="FM-20"):
+        RaftConsensusBackend(self_addr, peers)
+
+
+@pytest.mark.parametrize("key,value", [
+    ("HOST_SCOPE", "multi-host"),
+    ("TENIR_HOST_SCOPE", "multi-host"),
+])
+def test_fm20_denies_multi_host_scope(monkeypatch, key, value):
+    monkeypatch.setenv(key, value)
+    with pytest.raises(RuntimeError, match="FM-20"):
+        RaftConsensusBackend("127.0.0.1:6100", [])
+
+
+def test_fm20_allows_only_declared_loopback_test_scope_without_starting_network():
+    _enforce_raft_dev_loopback("localhost:6100", ["127.0.0.1:6101", "[::1]:6102"])
+
+
 from tenir_governance.operations.consensus_backend import ConsensusState
 
 
