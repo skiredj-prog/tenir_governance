@@ -789,3 +789,79 @@ def test_direct_claim_and_activation_serialize_under_shared_gate(tmp_path, monke
     assert locker.quarantine_is_active()
     assert claimant.transition_to(key, OperationState.DISPATCHING)[0] is False
     assert locker.get(key).state == OperationState.RESERVED
+
+
+def _child_crash_after_inactive_quarantine_write(store_path):
+    """Spawned worker: simulated crash before release-pending cleanup."""
+    reg = DurableOperationRegistry(str(store_path), quarantine_release_verifier=_trusted_test_verifier)
+    original = reg._quarantine_write_locked
+
+    def write_then_crash(mark):
+        original(mark)
+        if mark["active"] is False:
+            os._exit(0)
+
+    reg._quarantine_write_locked = write_then_crash
+    reg.authorized_release_quarantine(
+        authorized_by="operator", scope="lei",
+        authorization=_test_token(_lock_id(store_path)), reason="test crash window",
+    )
+
+
+def test_release_mark_write_error_remains_locked_across_workers(tmp_path, monkeypatch):
+    """An error after inactive os.replace cannot expose an unlocked store."""
+    store = tmp_path / "release-write-failed.json"
+    owner = _governor(store, verifier=_trusted_test_verifier)
+    _register_reserved(owner, "pending-release")
+    owner.lock_quarantine("watch")
+    original = owner.registry._quarantine_write_locked
+
+    def write_then_fail(mark):
+        original(mark)
+        if mark["active"] is False:
+            raise OSError("simulated directory fsync failure after replace")
+
+    monkeypatch.setattr(owner.registry, "_quarantine_write_locked", write_then_fail)
+    with pytest.raises(OSError, match="simulated directory fsync failure"):
+        _release(owner, store)
+    pending = Path(str(store) + ".quarantine.release-pending")
+    assert pending.exists()
+    assert json.loads(Path(str(store) + ".quarantine.json").read_text())["active"] is False
+
+    second = _governor(store, verifier=_trusted_test_verifier)
+    assert second.registry.quarantine_is_active() is True
+    assert second.dispatch("pending-release")["dispatched"] is False
+    refused = _release(second, store)
+    assert refused["released"] is False
+    assert "corrupt" in refused["reason"]
+    with pytest.raises(RuntimeError, match="corrupt"):
+        second.lock_quarantine("must-not-clear")
+
+
+def test_release_crash_after_inactive_write_remains_locked_on_restart(tmp_path):
+    """The on-disk pending sidecar survives an independent process crash."""
+    store = tmp_path / "release-crash.json"
+    owner = _governor(store)
+    _register_reserved(owner, "crash-release")
+    owner.lock_quarantine("watch")
+    ctx = multiprocessing.get_context("spawn")
+    child = ctx.Process(target=_child_crash_after_inactive_quarantine_write, args=(str(store),))
+    child.start()
+    child.join(15)
+    assert child.exitcode == 0
+
+    assert Path(str(store) + ".quarantine.release-pending").exists()
+    restarted = _governor(store)
+    assert restarted.registry.quarantine_is_active() is True
+    assert restarted.dispatch("crash-release")["dispatched"] is False
+
+
+def test_successful_quarantine_release_cleans_pending_guard(tmp_path):
+    store = tmp_path / "release-guard-complete.json"
+    owner = _governor(store, verifier=_trusted_test_verifier)
+    owner.lock_quarantine("watch", incident_id="guard-test")
+    released = _release(owner, store)
+    assert released["released"] is True
+    assert Path(str(store) + ".quarantine.initialized").exists()
+    assert not Path(str(store) + ".quarantine.release-pending").exists()
+    assert _governor(store).registry.quarantine_is_active() is False
