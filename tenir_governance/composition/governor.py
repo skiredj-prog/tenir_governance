@@ -1036,6 +1036,9 @@ class DualKernelGovernor:
     def reconcile_unknown(
         self,
         idempotency_key: str,
+        *,
+        qualification: dict[str, Any] | None = None,
+        evidence_verifier: Any = None,
     ) -> dict[str, Any]:
         """Reconcile UNKNOWN or interrupted DISPATCHING with the provider.
 
@@ -1099,6 +1102,62 @@ class DualKernelGovernor:
                 "provider_error": str(e),
                 "recommendation": "human_review",
             }
+
+        # Explicit opt-in qualification preflight. A provider response or a
+        # caller-supplied reference is NOT itself authenticated evidence.
+        # Existing reconciliations remain unchanged unless qualification is
+        # requested. In qualified mode, fail closed before state/budget changes.
+        if qualification is not None:
+            from ..operations.provider import ProviderOutcome
+            def _qualification_rejected(reason: str) -> dict[str, Any]:
+                latest = self.registry.get(idempotency_key)
+                return {
+                    "reconciled": False,
+                    "idempotency_key": idempotency_key,
+                    "operation_state": latest.state.value if latest else "not_found",
+                    "recommendation": "human_review",
+                    "reason": reason,
+                }
+            if record.state != OperationState.UNKNOWN:
+                return _qualification_rejected(
+                    "Qualified reconciliation requires an UNKNOWN operation.")
+            if not recon.resolved or recon.outcome not in (
+                ProviderOutcome.CONFIRMED, ProviderOutcome.FAILED
+            ):
+                return _qualification_rejected(
+                    "Provider outcome remains indeterminate; no qualification possible.")
+            if not callable(evidence_verifier):
+                return _qualification_rejected(
+                    "Evidence verifier required for qualified reconciliation.")
+            if not isinstance(qualification, dict):
+                return _qualification_rejected("Invalid qualification payload.")
+            attempt_id = qualification.get("attempt_id")
+            evidence_ref = qualification.get("evidence_ref")
+            kind = ("effect_confirmed" if recon.outcome == ProviderOutcome.CONFIRMED
+                    else "non_effect_confirmed")
+            if not (isinstance(attempt_id, str) and attempt_id.strip()
+                    and isinstance(evidence_ref, str) and evidence_ref.strip()):
+                return _qualification_rejected(
+                    "Nonempty attempt_id and evidence_ref required.")
+            try:
+                verified = evidence_verifier(
+                    qualification, recon, idempotency_key
+                ) is True
+            except Exception:
+                verified = False
+            if not verified:
+                return _qualification_rejected(
+                    "Evidence qualification rejected or verifier failed.")
+            try:
+                bound = self.registry.bind_unknown_qualification(
+                    idempotency_key, attempt_id=attempt_id,
+                    evidence_ref=evidence_ref, qualification_kind=kind,
+                )
+            except (ValueError, RuntimeError, OSError):
+                bound = False
+            if not bound:
+                return _qualification_rejected(
+                    "Qualification conflict or durable binding failure.")
 
         if recon.resolved and recon.outcome == ProviderOutcome.CONFIRMED:
             success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
