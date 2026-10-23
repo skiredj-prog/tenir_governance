@@ -220,6 +220,11 @@ class OperationRecord:
     #   budget_committed — the reservation was committed (consumed) at dispatch
     budget_reserved: bool = False
     budget_committed: bool = False
+    # Optional RFC-4 lifecycle bridge metadata. Recording a reference is NOT
+    # evidence verification and never changes the external-effect state.
+    attempt_id: str = ""
+    qualification_evidence_ref: str = ""
+    qualification_kind: str = ""
     # HOLD lifecycle metadata (None unless operation has been in HOLD)
     hold_record: HoldRecord | None = None
 
@@ -495,6 +500,50 @@ class DurableOperationRegistry:
                     record.dispatch_claimed_by = claimed_by
                 self._persist()
                 return True, prev_state
+            finally:
+                if flock:
+                    flock.close()
+
+    def bind_unknown_qualification(
+        self,
+        idempotency_key: str,
+        *,
+        attempt_id: str,
+        evidence_ref: str,
+        qualification_kind: str,
+    ) -> bool:
+        """Persist an immutable evidence *reference* for an UNKNOWN operation.
+
+        This is a provenance binding, NOT an evidence verifier or a T6/T7
+        transition. Callers must independently authenticate and qualify evidence
+        before changing an outcome via the governed reconciliation path.
+        """
+        if not all(isinstance(v, str) and v.strip()
+                   for v in (attempt_id, evidence_ref, qualification_kind)):
+            raise ValueError("attempt_id, evidence_ref and qualification_kind must be nonempty")
+        if qualification_kind not in ("effect_confirmed", "non_effect_confirmed"):
+            raise ValueError("unsupported qualification_kind")
+        with self._lock:
+            if self._corrupted:
+                raise RuntimeError("Registry store is corrupted — qualification refused.")
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                if self._corrupted:
+                    raise RuntimeError("Registry store became corrupted on reload.")
+                record = self._records.get(idempotency_key)
+                if record is None or record.state != OperationState.UNKNOWN:
+                    return False
+                if record.attempt_id or record.qualification_evidence_ref:
+                    return (record.attempt_id == attempt_id
+                            and record.qualification_evidence_ref == evidence_ref
+                            and record.qualification_kind == qualification_kind)
+                record.attempt_id = attempt_id
+                record.qualification_evidence_ref = evidence_ref
+                record.qualification_kind = qualification_kind
+                self._persist()
+                return True
             finally:
                 if flock:
                     flock.close()
