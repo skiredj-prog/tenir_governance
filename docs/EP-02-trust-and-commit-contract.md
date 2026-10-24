@@ -57,3 +57,19 @@ performs a runtime commit.
 A root key itself is out-of-band provisioned. Replacing root keys is
 outside the tested issuer-key rotation scenario and must not be inferred
 from these tests.
+
+## Signed external anchor observation
+
+Experimental `ep02_authenticated_anchor` verifies an Ed25519 signature
+over an anchor identity, checkpoint revision, snapshot fingerprint and
+caller-supplied unpredictable challenge (minimum 16 bytes). It fails closed
+on missing trust key, incorrect challenge, invalid signature or divergent
+checkpoint. The caller MUST generate a fresh, unguessable challenge for
+each verification. The prototype itself does not generate challenges or
+track replayed values.
+
+**Not implemented:** remote monotonic compare-and-swap, independent
+durable high-water authority, atomicity with governance commits, anchor
+key rotation, distributed quorum, transport authentication and freshness
+beyond the caller-provided challenge. An authenticated observation is
+not equivalent to an atomic reservation of the authority's revision.
