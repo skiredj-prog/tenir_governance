@@ -1,9 +1,10 @@
 """Experimental single-host EP-02 commit authorization authority.
 
-This module deliberately remains detached from the governor.  It adds an
-operation-bound, request-idempotent authorization and single-consumption
-ledger to the same SQLite database used by :mod:`ep02_durable_cas`.  Generic
-CAS or preflight receipts are not dispatch authorizations.
+This module provides the Profile S authority used by the optional governor
+commit gate.  It adds an operation-bound, request-idempotent authorization
+and single-consumption ledger to the same SQLite database used by
+:mod:`ep02_durable_cas`.  Generic CAS or preflight receipts are not dispatch
+authorizations.
 
 The implementation is Profile S only: one controlled host, SQLite WAL and
 multiple local processes.  It does not provide network transport, consensus,
@@ -16,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from hashlib import sha256
 import json
+import math
 import re
 import sqlite3
 from typing import Mapping
@@ -47,6 +49,9 @@ _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_TEXT = 256
 _MAX_ENVELOPE_BYTES = 32_768
+_MAX_PAYLOAD_BYTES = 1_048_576
+_MAX_PAYLOAD_DEPTH = 32
+_MAX_PAYLOAD_NODES = 10_000
 _BINDING_FIELDS = {
     "authority_id", "profile_id", "profile_generation",
     "institutional_scope", "operation_id", "idempotency_key",
@@ -164,6 +169,87 @@ def _canonical(value) -> bytes:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     ).encode("utf-8")
+
+
+def canonical_payload_bytes(payload: Mapping | None) -> bytes:
+    """Return the exact bounded JSON bytes bound by ``payload_digest``.
+
+    Profile S treats the provider ``metadata`` mapping as the external payload.
+    Callers use this helper before adjudication and the governor repeats the
+    same canonicalization immediately before dispatch.  Non-JSON values,
+    non-finite numbers and oversized payloads fail closed.
+    """
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, Mapping):
+        raise TypeError("payload must be a mapping")
+
+    nodes = 0
+    active_containers: set[int] = set()
+
+    def validate(value, depth=0):
+        nonlocal nodes
+        nodes += 1
+        if nodes > _MAX_PAYLOAD_NODES:
+            raise ValueError("payload has too many values")
+        if depth > _MAX_PAYLOAD_DEPTH:
+            raise ValueError("payload is too deeply nested")
+        if value is None or isinstance(value, bool):
+            return
+        if isinstance(value, str):
+            if len(value) > _MAX_PAYLOAD_BYTES:
+                raise ValueError("payload string is too large")
+            return
+        if isinstance(value, int):
+            if value.bit_length() > 4096:
+                raise ValueError("payload integer is too large")
+            return
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError("payload contains a non-finite number")
+            return
+        if isinstance(value, Mapping):
+            marker = id(value)
+            if marker in active_containers:
+                raise ValueError("payload contains a cycle")
+            active_containers.add(marker)
+            try:
+                for key, item in value.items():
+                    if not isinstance(key, str):
+                        raise ValueError("payload object keys must be strings")
+                    if len(key) > _MAX_PAYLOAD_BYTES:
+                        raise ValueError("payload object key is too large")
+                    validate(item, depth + 1)
+            finally:
+                active_containers.remove(marker)
+            return
+        if isinstance(value, list):
+            marker = id(value)
+            if marker in active_containers:
+                raise ValueError("payload contains a cycle")
+            active_containers.add(marker)
+            try:
+                for item in value:
+                    validate(item, depth + 1)
+            finally:
+                active_containers.remove(marker)
+            return
+        raise ValueError("payload contains a non-JSON value")
+
+    validate(payload)
+    try:
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("payload is not canonical JSON") from exc
+    if len(encoded) > _MAX_PAYLOAD_BYTES:
+        raise ValueError("payload is too large")
+    return encoded
 
 
 def _name(value, label, *, empty=False):
@@ -388,6 +474,128 @@ def _consumption_body(receipt):
         "trust_checkpoint": _checkpoint_body(receipt.trust_checkpoint),
         "sequence": receipt.sequence,
     }
+
+
+def authorization_request_to_dict(request):
+    """Return the canonical, JSON-safe authorization request envelope."""
+    envelope, _, _, _ = _request_context(request)
+    return envelope
+
+
+def authorization_request_from_dict(value):
+    """Reconstruct and validate a canonical authorization request envelope."""
+    if not isinstance(value, dict) or set(value) != {
+        "version", "domain", "request_id", "binding",
+    }:
+        raise ValueError("invalid authorization request envelope")
+    if (
+        value["version"] != 1
+        or value["domain"] != "TENIR-EP02-PROFILE-S-COMMIT-AUTHORIZATION"
+    ):
+        raise ValueError("unsupported authorization request envelope")
+    request = CommitAuthorizationRequest(
+        _name(value["request_id"], "authorization request identity"),
+        _binding_from_body(value["binding"]),
+    )
+    _request_context(request)
+    return request
+
+
+def authorization_receipt_to_dict(receipt):
+    """Return a JSON-safe signed authorization receipt."""
+    if not isinstance(receipt, CommitAuthorizationReceipt):
+        raise TypeError("expected CommitAuthorizationReceipt")
+    return {
+        "body": _authorization_body(receipt),
+        "signature": receipt.signature.hex(),
+    }
+
+
+def authorization_receipt_from_dict(value):
+    """Reconstruct a signed authorization receipt for verification."""
+    if not isinstance(value, dict) or set(value) != {"body", "signature"}:
+        raise ValueError("invalid authorization receipt envelope")
+    body = value["body"]
+    required = {
+        "version", "domain", "authority_id", "profile_id",
+        "profile_generation", "receipt_key_id", "receipt_key_generation",
+        "request_id", "request_digest", "binding_digest", "decision",
+        "reason", "trust_checkpoint", "sequence",
+    }
+    if not isinstance(body, dict) or set(body) != required:
+        raise ValueError("invalid authorization receipt body")
+    if body["version"] != 1 or body["domain"] != "TENIR-EP02-PROFILE-S-COMMIT-RECEIPT":
+        raise ValueError("unsupported authorization receipt")
+    try:
+        signature = bytes.fromhex(value["signature"])
+        decision = AuthorizationDecision(body["decision"])
+    except (TypeError, ValueError):
+        raise ValueError("invalid authorization receipt") from None
+    return CommitAuthorizationReceipt(
+        authority_id=body["authority_id"],
+        profile_id=body["profile_id"],
+        profile_generation=body["profile_generation"],
+        receipt_key_id=body["receipt_key_id"],
+        receipt_key_generation=body["receipt_key_generation"],
+        request_id=body["request_id"],
+        request_digest=body["request_digest"],
+        binding_digest=body["binding_digest"],
+        decision=decision,
+        reason=body["reason"],
+        trust_checkpoint=_checkpoint_from_body(body["trust_checkpoint"]),
+        sequence=body["sequence"],
+        signature=signature,
+    )
+
+
+def consumption_receipt_to_dict(receipt):
+    """Return a JSON-safe signed consumption receipt."""
+    if not isinstance(receipt, CommitConsumptionReceipt):
+        raise TypeError("expected CommitConsumptionReceipt")
+    return {
+        "body": _consumption_body(receipt),
+        "signature": receipt.signature.hex(),
+    }
+
+
+def consumption_receipt_from_dict(value):
+    """Reconstruct a signed consumption receipt for verification."""
+    if not isinstance(value, dict) or set(value) != {"body", "signature"}:
+        raise ValueError("invalid consumption receipt envelope")
+    body = value["body"]
+    required = {
+        "version", "domain", "authority_id", "profile_id",
+        "profile_generation", "receipt_key_id", "receipt_key_generation",
+        "request_id", "request_digest", "binding_digest",
+        "authorization_sequence", "dispatch_claim_id", "decision", "reason",
+        "trust_checkpoint", "sequence",
+    }
+    if not isinstance(body, dict) or set(body) != required:
+        raise ValueError("invalid consumption receipt body")
+    if body["version"] != 1 or body["domain"] != "TENIR-EP02-PROFILE-S-CONSUMPTION-RECEIPT":
+        raise ValueError("unsupported consumption receipt")
+    try:
+        signature = bytes.fromhex(value["signature"])
+        decision = ConsumptionDecision(body["decision"])
+    except (TypeError, ValueError):
+        raise ValueError("invalid consumption receipt") from None
+    return CommitConsumptionReceipt(
+        authority_id=body["authority_id"],
+        profile_id=body["profile_id"],
+        profile_generation=body["profile_generation"],
+        receipt_key_id=body["receipt_key_id"],
+        receipt_key_generation=body["receipt_key_generation"],
+        request_id=body["request_id"],
+        request_digest=body["request_digest"],
+        binding_digest=body["binding_digest"],
+        authorization_sequence=body["authorization_sequence"],
+        dispatch_claim_id=body["dispatch_claim_id"],
+        decision=decision,
+        reason=body["reason"],
+        trust_checkpoint=_checkpoint_from_body(body["trust_checkpoint"]),
+        sequence=body["sequence"],
+        signature=signature,
+    )
 
 
 def verify_authorization_receipt(receipt, request, *, trusted_keys):
@@ -1003,6 +1211,10 @@ class ProfileSCommitAuthority:
             )
         finally:
             connection.close()
+
+    def trusted_receipt_keys(self):
+        """Return the pinned public keys accepted for receipt verification."""
+        return dict(self._trusted_keys())
 
     def _fault(self, point):
         """No-op test seam for crash and lost-reply characterization."""

@@ -7,7 +7,7 @@ name: TENIR Governance CI Gate
 
 on:
   push:
-    branches: ["main", "governance/**", "r4/**", "r5/**", "sdk/**", "design/ep02-trust-versioned-commit", "design/ep02-a2-a3-integration-gate", "test/ep02-crash-retry-characterization", "feat/ep02-durable-request-outcomes", "feat/ep02-external-monotone-cas", "feat/ep02-profile-s-commit-authorization", "fix/ep02-trust-input-hardening"]
+    branches: ["main", "governance/**", "r4/**", "r5/**", "sdk/**", "design/ep02-trust-versioned-commit", "design/ep02-a2-a3-integration-gate", "test/ep02-crash-retry-characterization", "feat/ep02-durable-request-outcomes", "feat/ep02-external-monotone-cas", "feat/ep02-profile-s-commit-authorization", "feat/ep02-governor-commit-gate", "fix/ep02-trust-input-hardening"]
   pull_request:
     branches: ["main"]
 
