@@ -12,8 +12,10 @@ It does not replace an LLM, an identity system, an observability stack, a policy
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
-[![CI](https://github.com/skiredj-prog/tenir-gov/actions/workflows/tenir-ci.yml/badge.svg)](https://github.com/skiredj-prog/tenir-gov/actions/workflows/tenir-ci.yml)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21277138.svg)](https://doi.org/10.5281/zenodo.21277138)
+[![Governance CI](https://github.com/skiredj-prog/tenir_governance/actions/workflows/tenir-ci.yml/badge.svg)](https://github.com/skiredj-prog/tenir_governance/actions/workflows/tenir-ci.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21264802.svg)](https://doi.org/10.5281/zenodo.21264802)
+
+> **v5.7.0 deployment boundary:** This is a single-host release candidate. Production use requires the documented verified deployment manifest and durable store configuration. Multi-host Raft operation is blocked; C3 cross-host fault tolerance is **not claimed**. The v5.7.0 source line is not evidence of PyPI or Zenodo release publication. See [threat model](docs/threat-model-v1.md) and [changelog](CHANGELOG.md).
 
 ---
 
@@ -21,7 +23,7 @@ It does not replace an LLM, an identity system, an observability stack, a policy
 
 1. **Problem:** Models reason and agents propose actions — but a consequential action needs a runtime decision about whether it is admissible before execution.
 2. **Solution:** TENIR-Gov provides a deterministic execution-control layer at the decision → action boundary, with explicit policy thresholds and fail-closed defaults.
-3. **Proof:** The v5.4.2 package includes a two-kernel composition layer (continuous risk monitor + discrete invariant enforcer), a HOLD lifecycle for governed suspension of agency, a dispatch provider abstraction, post-execution assessment (τ⁻¹ and EVP), a hardened I8 aggregate budget invariant with governor-owned reservation, automated validation (733 tests across `tests/` and `r4/tests/`), and hash-chained decision records.
+3. **Evidence and limits:** The v5.7.0 source line includes a two-kernel composition, governed HOLD and provider reconciliation, payload binding, and single-host SQLite WAL budget accounting. The CI checks tests and Python distributions; those checks do not constitute independent certification, prove external provider effects, or establish multi-host fault tolerance (C3).
 
 ---
 
