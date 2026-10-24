@@ -1,6 +1,8 @@
 # TENIR-Gov 5.7.0 — Release qualification record (pre-tag)
 
-Status: **NO-GO for tagging/publishing pending final verification**. This document is an evidence index, not an approval, certificate, or release announcement.
+**Historical record, frozen at the pre-tag gate.** The NO-GO status below was the decision *before* publication on 2026-10-24; it does not describe the current release. GitHub release `v5.7.0` now points to SHA `47ef67e3efc5f3008896a7d88bebf929fa0a98f0`. This is a prepublication evidence index, not a postpublication certificate. For release-state evidence consult GitHub release, published PyPI artifacts, and the post-release documentary assessment.
+
+Status at record creation: **NO-GO for tagging/publishing pending final verification**.
 
 ## Candidate
 
@@ -8,7 +10,7 @@ Status: **NO-GO for tagging/publishing pending final verification**. This docume
 - Last verified merge commit: `992a42c2a5eed677494274f9c3688824c59004ef` (PR #53).
 - `pyproject.toml` version: `5.7.0`.
 - Merge sequence: PR #52 dependency audit in Raft/packaging preflight, then PR #53 README claim and provenance corrections.
-- No `v5.7.0` tag, PyPI publish, or Zenodo version record is claimed by this document.
+- **As-of pre-tag recording:** no `v5.7.0` tag, PyPI publication, or Zenodo version-specific archive had yet been confirmed. This is a historical assertion, not a current release status.
 
 ## Evidence available
 
