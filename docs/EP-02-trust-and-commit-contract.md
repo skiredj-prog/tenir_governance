@@ -35,6 +35,12 @@ This is a proposed contract, not a native REG conformant verifier.
 The prototype must not be connected to the critical governor or used as
 an execution guarantee. A2/A3 remain independent.
 
+The legacy v1 `verified_preflight` path receives issuer keys separately from
+the root-signed snapshot. It is disabled by default and requires an explicit
+`allow_legacy_unbound_issuer_keys=True` compatibility acknowledgment. New work
+uses the v2 bound-key path; the acknowledgment records a weaker assumption and
+does not convert v1 into root-bound authority.
+
 ## Rotation / rollback characterization added (2026-10-24)
 
 The experimental `ep02_rotation.validate_successor` function verifies a
@@ -65,11 +71,13 @@ over an anchor identity, checkpoint revision, snapshot fingerprint and
 caller-supplied unpredictable challenge (minimum 16 bytes). It fails closed
 on missing trust key, incorrect challenge, invalid signature or divergent
 checkpoint. The caller MUST generate a fresh, unguessable challenge for
-each verification. The prototype itself does not generate challenges or
-track replayed values.
+each verification. `new_anchor_challenge()` generates a 256-bit challenge; the
+pure verifier does not track replayed values.
 
-**Not implemented:** remote monotonic compare-and-swap, independent
-durable high-water authority, atomicity with governance commits, anchor
-key rotation, distributed quorum, transport authentication and freshness
-beyond the caller-provided challenge. An authenticated observation is
-not equivalent to an atomic reservation of the authority's revision.
+Experimental `ep02_external_cas` now defines authenticated canonical writes,
+signed receipts and lookup reconciliation against one central durable
+authority. It is transport neutral and does not implement HTTP/RPC, TLS,
+multi-server consensus, failover, anchor key rotation or atomicity with
+governance/provider commits. An authenticated read remains distinct from an
+atomic write, and a single authority can itself be rolled back unless an
+independent monotone witness detects it.

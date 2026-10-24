@@ -29,7 +29,8 @@ def fixture():
 def preflight(signed, proof, roots, issuers, minimum=1):
     return verified_preflight(proof, prior="A", scope="contracts", now=NOW,
                               trust=signed, root_keys=roots,
-                              issuer_keys=issuers, minimum_revision=minimum)
+                              issuer_keys=issuers, minimum_revision=minimum,
+                              allow_legacy_unbound_issuer_keys=True)
 
 
 def test_valid_signed_trust_still_only_preflight():
@@ -40,7 +41,8 @@ def test_valid_signed_trust_still_only_preflight():
     assert verified_revalidation(
         receipt, proof, prior="A", scope="contracts", now=NOW,
         current=signed, root_keys=roots, issuer_keys=issuers,
-        minimum_revision=1) == (
+        minimum_revision=1,
+        allow_legacy_unbound_issuer_keys=True) == (
             Verdict.ADMISSIBLE, "PREFLIGHT_STILL_VALID_NOT_COMMITTED")
 
 
@@ -66,7 +68,8 @@ def test_revocation_and_mandate_withdrawal_after_preflight():
         verdict, _ = verified_revalidation(
             receipt, proof, prior="A", scope="contracts", now=NOW,
             current=current, root_keys=roots, issuer_keys=issuers,
-            minimum_revision=2)
+            minimum_revision=2,
+            allow_legacy_unbound_issuer_keys=True)
         assert verdict != Verdict.ADMISSIBLE
 
 
@@ -86,5 +89,6 @@ def test_claim_change_after_preflight_not_reused():
     verdict, _ = verified_revalidation(
         receipt, changed, prior="A", scope="contracts", now=NOW,
         current=signed, root_keys=roots, issuer_keys=issuers,
-        minimum_revision=1)
+        minimum_revision=1,
+        allow_legacy_unbound_issuer_keys=True)
     assert verdict == Verdict.REJECT

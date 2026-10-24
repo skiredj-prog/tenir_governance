@@ -5,6 +5,8 @@ challenge response; it does not persist a remote checkpoint or provide CAS.
 """
 from dataclasses import dataclass
 import json
+import re
+import secrets
 from typing import Mapping
 
 from cryptography.exceptions import InvalidSignature
@@ -14,6 +16,10 @@ from tenir_governance.experimental.ep02_rotation import TrustCheckpoint
 from tenir_governance.experimental.ep02_external_anchor import (
     AnchorObservation, AnchorStatus, assess_anchor,
 )
+
+
+_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 @dataclass(frozen=True)
@@ -26,11 +32,18 @@ class SignedAnchorObservation:
 
 def anchor_payload(anchor_id: str, checkpoint: TrustCheckpoint,
                    challenge: bytes) -> bytes:
-    if not anchor_id or len(challenge) < 16:
+    if not isinstance(anchor_id, str) or not _IDENTITY.fullmatch(anchor_id):
         raise ValueError("invalid anchor identity or challenge")
-    if checkpoint.revision < 1 or len(checkpoint.snapshot_fingerprint) != 64:
+    if not isinstance(challenge, bytes) or not 16 <= len(challenge) <= 64:
+        raise ValueError("invalid anchor identity or challenge")
+    if (
+        not isinstance(checkpoint, TrustCheckpoint)
+        or type(checkpoint.revision) is not int
+        or checkpoint.revision < 1
+        or not isinstance(checkpoint.snapshot_fingerprint, str)
+        or not _HEX64.fullmatch(checkpoint.snapshot_fingerprint)
+    ):
         raise ValueError("invalid checkpoint")
-    bytes.fromhex(checkpoint.snapshot_fingerprint)
     return b"TENIR-EP02-ANCHOR-V1\\x00" + json.dumps({
         "anchor_id": anchor_id,
         "revision": checkpoint.revision,
@@ -39,10 +52,22 @@ def anchor_payload(anchor_id: str, checkpoint: TrustCheckpoint,
     }, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def new_anchor_challenge() -> bytes:
+    """Return a fresh 256-bit challenge for one anchor observation."""
+    return secrets.token_bytes(32)
+
+
 def verify_anchor(
     signed: SignedAnchorObservation, *, trusted_keys: Mapping[str, Ed25519PublicKey],
     expected_challenge: bytes,
 ) -> bool:
+    if (
+        not isinstance(signed, SignedAnchorObservation)
+        or not isinstance(expected_challenge, bytes)
+        or not 16 <= len(expected_challenge) <= 64
+        or not isinstance(trusted_keys, Mapping)
+    ):
+        return False
     key = trusted_keys.get(signed.anchor_id)
     if not isinstance(key, Ed25519PublicKey):
         return False

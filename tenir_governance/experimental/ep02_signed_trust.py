@@ -7,6 +7,7 @@ a consensus trust registry nor an atomic execution authorization.
 from dataclasses import dataclass
 from cryptography.hazmat.primitives import serialization
 import json
+import re
 from typing import Mapping
 
 from cryptography.exceptions import InvalidSignature
@@ -17,9 +18,36 @@ from tenir_governance.experimental.ep01_evidence import SignedClaim, verify_and_
 from tenir_governance.experimental.ep01_policy import Verdict
 
 
+_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+
+
+def _validated_trust_state(state: TrustState) -> TrustState:
+    if not isinstance(state, TrustState):
+        raise TypeError("expected TrustState")
+    if type(state.revision) is not int or state.revision < 1:
+        raise ValueError("invalid trust revision")
+    if not isinstance(state.policy_version, str) or not state.policy_version:
+        raise ValueError("invalid policy version")
+    if not isinstance(state.mandates, tuple) or any(
+        not isinstance(item, tuple)
+        or len(item) != 2
+        or not all(isinstance(value, str) and value for value in item)
+        for item in state.mandates
+    ):
+        raise ValueError("invalid trust mandate")
+    if len(set(state.mandates)) != len(state.mandates):
+        raise ValueError("duplicate trust mandate")
+    if not isinstance(state.revoked, tuple) or any(
+        not isinstance(value, str) or not value for value in state.revoked
+    ):
+        raise ValueError("invalid trust revocation")
+    if len(set(state.revoked)) != len(state.revoked):
+        raise ValueError("duplicate trust revocation")
+    return state
+
+
 def canonical_trust_bytes(state: TrustState) -> bytes:
-    if state.revision < 1 or not state.policy_version:
-        raise ValueError("invalid trust state")
+    state = _validated_trust_state(state)
     return json.dumps(
         {"revision": state.revision, "policy_version": state.policy_version,
          "mandates": sorted([list(x) for x in state.mandates]),
@@ -45,10 +73,25 @@ def verify_trust_snapshot(
     minimum_revision must be supplied from independently durable state;
     this function alone cannot prevent rollback to an older valid snapshot.
     """
+    if (
+        not isinstance(signed, SignedTrustState)
+        or type(minimum_revision) is not int
+        or minimum_revision < 1
+        or not isinstance(root_keys, Mapping)
+        or not isinstance(signed.signer_id, str)
+        or not _IDENTITY.fullmatch(signed.signer_id)
+        or not isinstance(signed.signature, bytes)
+        or len(signed.signature) != 64
+    ):
+        return False
+    try:
+        state = _validated_trust_state(signed.state)
+    except (TypeError, ValueError):
+        return False
     key = root_keys.get(signed.signer_id)
     if not isinstance(key, Ed25519PublicKey):
         return False
-    if signed.state.revision < minimum_revision:
+    if state.revision < minimum_revision:
         return False
     try:
         key.verify(signed.signature, canonical_trust_bytes(signed.state))
@@ -62,7 +105,10 @@ def verified_preflight(
     trust: SignedTrustState, root_keys: Mapping[str, Ed25519PublicKey],
     issuer_keys: Mapping[str, Ed25519PublicKey],
     minimum_revision: int = 1,
+    allow_legacy_unbound_issuer_keys: bool = False,
 ) -> tuple[Verdict, str, BoundFinding | None]:
+    if allow_legacy_unbound_issuer_keys is not True:
+        return Verdict.REJECT, "LEGACY_UNBOUND_ISSUER_KEYS_DISABLED", None
     if not verify_trust_snapshot(trust, root_keys=root_keys,
                                  minimum_revision=minimum_revision):
         return Verdict.REJECT, "TRUST_SNAPSHOT_UNVERIFIED", None
@@ -94,11 +140,13 @@ def verified_revalidation(
     root_keys: Mapping[str, Ed25519PublicKey],
     issuer_keys: Mapping[str, Ed25519PublicKey],
     minimum_revision: int,
+    allow_legacy_unbound_issuer_keys: bool = False,
 ) -> tuple[Verdict, str]:
     verdict, reason, current_receipt = verified_preflight(
         claim, prior=prior, scope=scope, now=now, trust=current,
         root_keys=root_keys, issuer_keys=issuer_keys,
         minimum_revision=minimum_revision,
+        allow_legacy_unbound_issuer_keys=allow_legacy_unbound_issuer_keys,
     )
     if verdict != Verdict.ADMISSIBLE or current_receipt is None:
         return verdict, reason
@@ -113,7 +161,8 @@ def bound_snapshot_bytes(signed: SignedTrustState) -> bytes:
     entries = list(signed.issuer_keys)
     if len({name for name, _ in entries}) != len(entries):
         raise ValueError("duplicate issuer key")
-    if any(not name or not isinstance(raw, bytes) or len(raw) != 32
+    if any(not isinstance(name, str) or not _IDENTITY.fullmatch(name)
+           or not isinstance(raw, bytes) or len(raw) != 32
            for name, raw in entries):
         raise ValueError("invalid issuer key entry")
     body = {"trust": json.loads(canonical_trust_bytes(signed.state)),
@@ -127,7 +176,22 @@ def verify_bound_snapshot(
     signed: SignedTrustState, *, root_keys: Mapping[str, Ed25519PublicKey],
     minimum_revision: int = 1,
 ) -> bool:
-    if signed.state.revision < minimum_revision:
+    if (
+        not isinstance(signed, SignedTrustState)
+        or type(minimum_revision) is not int
+        or minimum_revision < 1
+        or not isinstance(root_keys, Mapping)
+        or not isinstance(signed.signer_id, str)
+        or not _IDENTITY.fullmatch(signed.signer_id)
+        or not isinstance(signed.signature, bytes)
+        or len(signed.signature) != 64
+    ):
+        return False
+    try:
+        state = _validated_trust_state(signed.state)
+    except (TypeError, ValueError):
+        return False
+    if state.revision < minimum_revision:
         return False
     root = root_keys.get(signed.signer_id)
     if not isinstance(root, Ed25519PublicKey):
