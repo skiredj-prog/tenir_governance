@@ -7,7 +7,7 @@ name: TENIR Governance CI Gate
 
 on:
   push:
-    branches: ["main", "governance/**", "r4/**", "r5/**", "sdk/**", "design/ep02-trust-versioned-commit"]
+    branches: ["main", "governance/**", "r4/**", "r5/**", "sdk/**", "design/ep02-trust-versioned-commit", "test/ep02-crash-retry-characterization"]
   pull_request:
     branches: ["main"]
 
