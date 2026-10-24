@@ -386,42 +386,21 @@ It does not, by itself, prove that a policy was correct, that an input was truth
 
 # Test Suite
 
-The following measurements are **historical**, not results from the v5.7.0 release tag. Counts from separate test scopes must not be summed without checking overlap and collection configuration.
+The **published v5.7.0 source** is identified by tag `v5.7.0`, commit `47ef67e3efc5f3008896a7d88bebf929fa0a98f0`. Test counts and coverage are scoped to a specific GitHub Actions run, test selection, platform and source checkout; they are not universal release guarantees.
 
-| Suite            | Count | Scope                                           |
-| ---------------- | ----: | ----------------------------------------------- |
-| Kernel           |     8 | Core formula, policy, ledger and API validation |
-| Full middleware  |   672 | `tenir_governance` unit/integration coverage (`tests/`) |
-| R4 operational  |    61 | `r4/tests/` wired UAT lane                              |
-| Repository total |   733 | Published v5.4.4 validation set (`tests/` + `r4/tests/`) |
+The v5.7.0 [release workflow](.github/workflows/release.yml) installs `.[api,test,raft]`, runs the Raft integration suite separately, runs the full `tests/` suite, checks the JUnit Raft cases for skips and failures, and validates the built wheel and sdist before PyPI publishing. The separately executed Raft suite **overlaps** the full suite; do not add these two counts together.
 
-The historical reported coverage figure (not remeasured for v5.7.0) is:
+For historic figures and earlier release lines, consult the corresponding immutable Git tags and their CI results. Older statements of 733 tests or 96% statement coverage are **not** measurements of v5.7.0 and should not be carried forward without a versioned test report and exact configuration. The earlier R4 suite also has a different collection scope.
 
-```text
-96% statement coverage
-```
-
-for the `tenir_governance` package under the defined test configuration.
-
-Coverage does **not** imply that every runtime component, deployment configuration, integration, or operational environment has equivalent coverage.
-
-Run the kernel tests:
+Run the same repository test selection locally from a checkout of the tag, using a compatible Python 3.12 environment and dependencies:
 
 ```bash
-cd tenir-kernel
-pytest tests/ -v
+python -m pip install -e ".[api,test,raft]"
+python -m pytest tests/test_raft_backend.py -q
+python -m pytest tests/ -q
 ```
 
-Run the full validation configuration:
-
-```bash
-pytest tests/ r4/tests/ \
-       r5_hardened/IRON_OMEGA_R5/test_r5_all.py \
-       r5_hardened/IRON_OMEGA_R5/test_institutional_hardening.py \
-       r5_wired/test_r5_governance_integration.py \
-       --cov=tenir_governance \
-       --cov-report=term-missing
-```
+These commands exercise the tagged checkout when executed in that checkout; they do not themselves produce a production readiness certificate. Record PASS/FAIL/SKIP, JUnit output, selected test paths, operating system and Python version before publishing any count. If coverage is needed, execute and archive a **separately configured** coverage run, naming its omitted paths, measured package and exact source SHA.
 
 ---
 
