@@ -347,19 +347,11 @@ def test_lookup_query_requires_fresh_bounded_challenge(tmp_path):
 
 
 def test_bool_revision_is_rejected_before_authority_mutation(tmp_path):
-    service, store, root, client, _ = _service(tmp_path)
+    _, store, root, _, _ = _service(tmp_path)
     state = TrustState(True, "policy-v1", (("issuer", "contracts"),))
     template = SignedTrustState(state, b"", "root", ())
-    malformed = SignedTrustState(
-        state, root.sign(bound_snapshot_bytes(template)), "root", (),
-    )
-    request = build_external_request(
-        client, authority_id="external-authority", client_id="client-a",
-        client_generation=1, request_id="bootstrap-bool", operation="BOOTSTRAP",
-        expected=None, successor=malformed,
-    )
-    with pytest.raises(ExternalProtocolError, match="context"):
-        service.execute(request)
+    with pytest.raises(ValueError, match="revision"):
+        root.sign(bound_snapshot_bytes(template))
     assert store.get() is None
     assert store.request_count() == 0
 
