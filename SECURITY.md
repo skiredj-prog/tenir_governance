@@ -4,7 +4,7 @@
 
 | Version / Line                         | Supported | Notes |
 |----------------------------------------|-----------|-------|
-| 5.7.0 (source line; verify publication) | Conditional | Single-host only; FM-20 open; Raft remains development/test only. Publication status is determined by the official GitHub release and PyPI, not this static table. |
+| 5.7.0 (published 2026-10-24) | Conditional | Single-host only, with verified production manifest and durable registry. Raft restricted to development/test loopback; FM-20 open. No C3 multi-host or external exactly-once guarantee. |
 | 5.6.1 (published)                      | ✅        | Released 2026-10-20; Raft limited to declared development/test environments and loopback. |
 | 5.6.0 (published GitHub release)       | ⚠️ Limited | Experimental PySyncObj transport; FM-20 open; not approved for production or physical multi-host. |
 | 5.5.x (Agentic Governance Profile)     | ✅        | Prior published line; single-host operational guarantees only. |
@@ -16,13 +16,13 @@
 
 Only the latest patch release within a supported minor line receives security updates.
 
-The following commands pin the last release verified while this document was prepared (5.6.1). Confirm the current published version on PyPI before installation; a source-tree version is not proof of publication:
+The following commands install the published v5.7.0 distribution. Installation does not imply production suitability; configure the required manifest, durable store, security controls and environment independently:
 
 ```bash
-pip install "tenir-governance==5.6.1"
+pip install "tenir-governance==5.7.0"
 # or with extras
-pip install "tenir-governance[api]==5.6.1"
-pip install "tenir-governance[r5]==5.6.1"
+pip install "tenir-governance[api]==5.7.0"
+pip install "tenir-governance[r5]==5.7.0"
 ```
 
 ### FM-20: Raft execution boundary (v5.6.1 and v5.7.0)
@@ -134,7 +134,7 @@ Maintainers should enable **Trusted Publishing** (OIDC) from GitHub Actions to P
   - Single-host only. `fcntl.flock` does not coordinate across hosts.
   - No write-ahead log. A crash during persistence can lose the most recent in-memory transition (recovery path via `resume_existing()` exists).
   - Budget coordinator remains in-process (`threading.Lock`). Cross-process budget safety is not provided by the registry alone.
-  - **In-memory default**: If `store_path` is not provided, the registry is in-memory only. Idempotency claims are lost on restart. Use `require_persistence=True` or pass `store_path` in production.
+  - **In-memory default (operation registry)**: If `store_path` is not provided, the registry is in-memory only. Idempotency claims are lost on restart. Use `require_persistence=True` or pass `store_path` in production.
 
 ### Local Ledger (Hash Chain / Merkle)
 
@@ -165,7 +165,7 @@ No claim is made of resistance to a privileged attacker who can modify process m
 
 ## Deployment Recommendations
 
-1. **Pin versions** — Always install a specific release from PyPI (`tenir-governance==5.6.1`).
+1. **Pin versions** — Always install a specific release from PyPI (`tenir-governance==5.7.0`).
 2. **Network isolation** — Bind to localhost or a private interface; terminate TLS at a reverse proxy.
 3. **Secrets management** — Inject tokens and secrets via a secrets manager; never hard-code.
 4. **Least privilege** — Run under a dedicated low-privilege user; restrict filesystem permissions on ledger and registry store.
@@ -174,7 +174,9 @@ No claim is made of resistance to a privileged attacker who can modify process m
 7. **Multi-host** — Replace the file-backed registry and in-process budget coordinator with a transactional store that provides cross-host atomicity.
 8. **Supply-chain hygiene** — Use lock files / hash pinning, monitor advisories for core and optional dependencies, prefer Trusted Publishing for releases.
 
-## Guarantee Boundary Summary (v5.5.0)
+## Historical Guarantee Boundary Summary (v5.5.0)
+
+This table describes prior file-backed/in-process behavior, not every v5.7.0 backend. The v5.7.0 SQLite WAL budget backend has separately scoped local atomicity; the operation registry still requires durable configuration. Do not transfer either backend's guarantees to the other or to multiple hosts.
 
 | Guarantee                                      | Level                                      |
 |------------------------------------------------|--------------------------------------------|
