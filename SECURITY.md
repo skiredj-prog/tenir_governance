@@ -4,7 +4,7 @@
 
 | Version / Line                         | Supported | Notes |
 |----------------------------------------|-----------|-------|
-| 5.7.0 (release candidate)              | ⏳ Not released | Single-host candidate, FM-20 open; Raft remains development/test only. |
+| 5.7.0 (source line; verify publication) | Conditional | Single-host only; FM-20 open; Raft remains development/test only. Publication status is determined by the official GitHub release and PyPI, not this static table. |
 | 5.6.1 (published)                      | ✅        | Released 2026-10-20; Raft limited to declared development/test environments and loopback. |
 | 5.6.0 (published GitHub release)       | ⚠️ Limited | Experimental PySyncObj transport; FM-20 open; not approved for production or physical multi-host. |
 | 5.5.x (Agentic Governance Profile)     | ✅        | Prior published line; single-host operational guarantees only. |
@@ -16,7 +16,7 @@
 
 Only the latest patch release within a supported minor line receives security updates.
 
-Install from PyPI with an explicit version pin in production:
+The following commands pin the last release verified while this document was prepared (5.6.1). Confirm the current published version on PyPI before installation; a source-tree version is not proof of publication:
 
 ```bash
 pip install "tenir-governance==5.6.1"
@@ -28,7 +28,7 @@ pip install "tenir-governance[r5]==5.6.1"
 ### FM-20: Raft execution boundary (v5.6.1 and v5.7.0)
 
 PySyncObj uses pickle command serialization and has not been approved for
-production or physical multi-host use. The 5.6.1 released backend and the 5.7.0 candidate require an
+production or physical multi-host use. The 5.6.1 released backend and the 5.7.0 source line require an
 explicit `TENIR_ENV=test` or `TENIR_ENV=development` and all node endpoints
 on loopback (`localhost`, `127.0.0.0/8`, or `::1`). Missing/production/staging
 environment declarations, multi-host scope, wildcard bindings and remote peer
