@@ -211,6 +211,21 @@ jobs:
           "
 
 
+  a2-cas:
+    name: "A2 — Durable CAS regression tests"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install -e .
+          python -m pip install pytest
+      - name: Test CAS
+        run: python -m pytest tests/test_a2_durable_cas.py -v --tb=short
+
   # ── Final: all gates must be green ────────────────────────────────────────────
   all-clear:
     name: "TENIR CI — All Gates Clear"
@@ -222,6 +237,7 @@ jobs:
       - r5-suite
       - r4-suite
       - nomenclature-check
+      - a2-cas
     steps:
       - name: Summary
         run: |

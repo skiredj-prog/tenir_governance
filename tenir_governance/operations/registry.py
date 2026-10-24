@@ -220,6 +220,7 @@ class OperationRecord:
     #   budget_committed — the reservation was committed (consumed) at dispatch
     budget_reserved: bool = False
     budget_committed: bool = False
+    record_version: int = 0  # Monotone across all persistent record mutations
     # HOLD lifecycle metadata (None unless operation has been in HOLD)
     hold_record: HoldRecord | None = None
 
@@ -239,6 +240,18 @@ class OperationRecord:
         d.pop("hold_record", None)
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__},
                    hold_record=hold_record)
+
+
+class VersionConflict(RuntimeError):
+    """State changed since caller read it; re-read and re-evaluate."""
+
+    def __init__(self, operation_id: str, expected: int, current: int):
+        self.operation_id = operation_id
+        self.expected_version = expected
+        self.current_version = current
+        super().__init__(
+            f"VERSION_CONFLICT: {operation_id} expected={expected} current={current}"
+        )
 
 
 class DurableOperationRegistry:
@@ -413,6 +426,7 @@ class DurableOperationRegistry:
                     )
                 if record.idempotency_key in self._records:
                     return False
+                record.record_version = 1
                 self._records[record.idempotency_key] = record
                 self._persist()
                 return True
@@ -491,6 +505,7 @@ class DurableOperationRegistry:
                         return False, prev_state  # already dispatched
 
                 record.state = new_state
+                record.record_version += 1
                 if claimed_by:
                     record.dispatch_claimed_by = claimed_by
                 self._persist()
@@ -499,7 +514,7 @@ class DurableOperationRegistry:
                 if flock:
                     flock.close()
 
-    def set_budget_flags(self, idempotency_key: str, **flags: bool) -> bool:
+    def set_budget_flags(self, idempotency_key: str, *, expected_version: int | None = None, **flags: bool) -> bool:
         """Atomically update and persist budget ownership flags."""
         allowed = {"budget_reserved", "budget_committed"}
         unknown = set(flags) - allowed
@@ -523,10 +538,16 @@ class DurableOperationRegistry:
                 if record is None:
                     return False
 
+                if expected_version is not None and record.record_version != expected_version:
+                    raise VersionConflict(idempotency_key, expected_version, record.record_version)
+
                 previous = {name: getattr(record, name) for name in flags}
                 for name, value in flags.items():
                     setattr(record, name, bool(value))
                 desired = {name: getattr(record, name) for name in flags}
+                old_version = record.record_version
+                if desired != previous:
+                    record.record_version += 1
                 try:
                     self._persist()
                 except Exception:
@@ -550,10 +571,62 @@ class DurableOperationRegistry:
                             return True
                     current = self._records.get(idempotency_key)
                     if current is not None:
+                        current.record_version = old_version
                         for name, value in previous.items():
                             setattr(current, name, value)
                     raise
                 return True
+            finally:
+                if flock:
+                    flock.close()
+
+    def set_budget_flags_cas(
+        self, idempotency_key: str, *, expected_version: int, **flags: bool,
+    ) -> bool:
+        """Strict CAS for durable budget ownership flags.
+
+        The version is checked under the same process/file lock as persistence.
+        On a post-write failure callers must reload; never blindly retry.
+        """
+        if not isinstance(expected_version, int) or isinstance(expected_version, bool) or expected_version < 0:
+            raise ValueError("expected_version must be a nonnegative integer")
+        return self.set_budget_flags(
+            idempotency_key, expected_version=expected_version, **flags
+        )
+
+    def transition_cas(
+        self, idempotency_key: str, new_state: OperationState,
+        *, expected_version: int, claimed_by: str = "",
+    ) -> tuple[bool, OperationState | None]:
+        """Strict compare-and-swap for state transitions, under the store lock.
+
+        A stale caller is rejected, not silently retried. On an ambiguous
+        persist error the caller MUST reload before issuing another command.
+        """
+        with self._lock:
+            if self._corrupted:
+                raise RuntimeError("Registry store is corrupted — CAS refused.")
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                if self._corrupted:
+                    raise RuntimeError("Registry store became corrupted on reload.")
+                record = self._records.get(idempotency_key)
+                if record is None:
+                    return False, None
+                if record.record_version != expected_version:
+                    raise VersionConflict(idempotency_key, expected_version,
+                                          record.record_version)
+                previous = record.state
+                if new_state not in _LEGAL_TRANSITIONS.get(previous, set()):
+                    return False, previous
+                record.state = new_state
+                record.record_version += 1
+                if claimed_by:
+                    record.dispatch_claimed_by = claimed_by
+                self._persist()
+                return True, previous
             finally:
                 if flock:
                     flock.close()
