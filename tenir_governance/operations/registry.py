@@ -41,7 +41,35 @@ from uuid import uuid4
 try:
     import fcntl
 except ImportError:
-    fcntl = None  # Windows fallback (not used in tests)
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+
+class _WindowsFileLock:
+    """One-byte advisory lock whose close operation releases the lock."""
+
+    def __init__(self, path: str):
+        self._file = open(path, "a+b")
+        self._file.seek(0, os.SEEK_END)
+        if self._file.tell() == 0:
+            self._file.write(b"\0")
+            self._file.flush()
+        self._file.seek(0)
+        msvcrt.locking(self._file.fileno(), msvcrt.LK_LOCK, 1)
+
+    def close(self):
+        if self._file is None:
+            return
+        try:
+            self._file.seek(0)
+            msvcrt.locking(self._file.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            self._file.close()
+            self._file = None
 
 
 class OperationState(str, Enum):
@@ -222,6 +250,20 @@ class OperationRecord:
     budget_committed: bool = False
     # HOLD lifecycle metadata (None unless operation has been in HOLD)
     hold_record: HoldRecord | None = None
+    # Immutable execution identity used by the optional Profile S commit gate.
+    # These fields are appended after the legacy record fields to preserve the
+    # positional constructor contract for existing integrations.
+    operation_id: str = ""
+    institutional_scope: str = ""
+    payload_digest: str = ""
+    # Profile S commit authorization is opt-in per operation.  The request and
+    # signed receipts are stored as canonical JSON-safe envelopes so recovery
+    # can resume after either authority call commits but its reply is lost.
+    commit_gate_required: bool = False
+    commit_authorization_request: dict | None = None
+    commit_authorization_receipt: dict | None = None
+    commit_dispatch_claim_id: str = ""
+    commit_consumption_receipt: dict | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -353,13 +395,25 @@ class DurableOperationRegistry:
                 json.dump(data, f)
                 f.flush()
                 os.fsync(f.fileno())
-            os.rename(tmp, self._store_path)
+            # os.replace is the cross-platform overwrite form of atomic
+            # rename.  os.rename cannot replace an existing file on Windows.
+            os.replace(tmp, self._store_path)
             # fsync the parent directory so the rename survives power loss
-            dir_fd = os.open(os.path.dirname(self._store_path) or ".", os.O_RDONLY)
+            # Windows does not permit opening a directory with os.open().
+            # The file itself was already flushed before os.replace; retain
+            # the stronger parent-directory fsync on POSIX where supported.
             try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+                dir_fd = os.open(
+                    os.path.dirname(self._store_path) or ".", os.O_RDONLY,
+                )
+            except (PermissionError, OSError):
+                if os.name != "nt":
+                    raise
+            else:
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
 
     def _lock_file(self):
         """Acquire a cross-process exclusive lock on the store file.
@@ -368,10 +422,14 @@ class DurableOperationRegistry:
         close the returned file handle to release the lock.
         Returns None if no store path or fcntl is unavailable.
         """
-        if not self._store_path or fcntl is None:
+        if not self._store_path:
             return None
         # Ensure the lock target exists
         lock_path = self._store_path + ".lock"
+        if fcntl is None and msvcrt is not None:
+            return _WindowsFileLock(lock_path)
+        if fcntl is None:
+            return None
         if not os.path.exists(lock_path):
             fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
             os.close(fd)
@@ -432,6 +490,8 @@ class DurableOperationRegistry:
         idempotency_key: str,
         new_state: OperationState,
         claimed_by: str = "",
+        *,
+        commit_gate_verified: bool = False,
     ) -> tuple[bool, OperationState | None]:
         """Atomically transition an operation to a new state.
 
@@ -489,6 +549,16 @@ class DurableOperationRegistry:
                         return False, prev_state  # already dispatching
                     if record.state.is_dispatched:
                         return False, prev_state  # already dispatched
+                    if record.commit_gate_required:
+                        consumption = record.commit_consumption_receipt
+                        body = consumption.get("body", {}) if isinstance(consumption, dict) else {}
+                        if (
+                            body.get("decision") != "CONSUMED"
+                            or not record.commit_dispatch_claim_id
+                            or body.get("dispatch_claim_id") != record.commit_dispatch_claim_id
+                            or not commit_gate_verified
+                        ):
+                            return False, prev_state
 
                 record.state = new_state
                 if claimed_by:
@@ -557,6 +627,111 @@ class DurableOperationRegistry:
             finally:
                 if flock:
                     flock.close()
+
+    def _set_immutable_commit_value(
+        self,
+        idempotency_key: str,
+        field_name: str,
+        value,
+        *,
+        require_authorization: bool = False,
+    ) -> bool:
+        """Persist one immutable commit-gate value under the registry lock."""
+        with self._lock:
+            if self._corrupted:
+                raise RuntimeError(
+                    "Registry store is corrupted — refuse to update commit authorization."
+                )
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                record = self._records.get(idempotency_key)
+                if record is None or not record.commit_gate_required:
+                    return False
+                existing = getattr(record, field_name)
+                if existing not in (None, ""):
+                    return existing == value
+                if record.state != OperationState.RESERVED:
+                    return False
+                if require_authorization and record.commit_authorization_receipt is None:
+                    return False
+                setattr(record, field_name, value)
+                self._persist()
+                return True
+            finally:
+                if flock:
+                    flock.close()
+
+    def record_commit_authorization_request(
+        self, idempotency_key: str, request: dict,
+    ) -> bool:
+        """Persist the immutable request before contacting the authority."""
+        canonical = json.loads(json.dumps(request, sort_keys=True))
+        return self._set_immutable_commit_value(
+            idempotency_key, "commit_authorization_request", canonical,
+        )
+
+    def record_commit_authorization_receipt(
+        self, idempotency_key: str, receipt: dict,
+    ) -> bool:
+        """Persist the authority's signed decision without allowing replacement."""
+        canonical = json.loads(json.dumps(receipt, sort_keys=True))
+        return self._set_immutable_commit_value(
+            idempotency_key, "commit_authorization_receipt", canonical,
+        )
+
+    def ensure_commit_dispatch_claim(
+        self, idempotency_key: str, claim_id: str,
+    ) -> tuple[bool, str]:
+        """Claim one stable dispatch identity before consuming authorization."""
+        if not isinstance(claim_id, str) or not claim_id:
+            raise ValueError("dispatch claim identity must be non-empty")
+        with self._lock:
+            if self._corrupted:
+                raise RuntimeError(
+                    "Registry store is corrupted — refuse to claim commit authorization."
+                )
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                record = self._records.get(idempotency_key)
+                if (
+                    record is None
+                    or not record.commit_gate_required
+                    or record.state != OperationState.RESERVED
+                    or record.commit_authorization_receipt is None
+                ):
+                    return False, ""
+                if record.commit_dispatch_claim_id:
+                    return True, record.commit_dispatch_claim_id
+                record.commit_dispatch_claim_id = claim_id
+                self._persist()
+                return True, claim_id
+            finally:
+                if flock:
+                    flock.close()
+
+    def record_commit_consumption_receipt(
+        self, idempotency_key: str, receipt: dict,
+    ) -> bool:
+        """Persist the signed single-consumption result before dispatch claim."""
+        canonical = json.loads(json.dumps(receipt, sort_keys=True))
+        body = canonical.get("body", {}) if isinstance(canonical, dict) else {}
+        record = self.get(idempotency_key)
+        if (
+            record is None
+            or not record.commit_dispatch_claim_id
+            or body.get("dispatch_claim_id") != record.commit_dispatch_claim_id
+        ):
+            return False
+        return self._set_immutable_commit_value(
+            idempotency_key,
+            "commit_consumption_receipt",
+            canonical,
+            require_authorization=True,
+        )
 
     def find_by_state(self, state: OperationState) -> list[OperationRecord]:
         """Find all operations in a given state. Used for recovery.

@@ -1,9 +1,10 @@
 """Experimental single-host EP-02 commit authorization authority.
 
-This module deliberately remains detached from the governor.  It adds an
-operation-bound, request-idempotent authorization and single-consumption
-ledger to the same SQLite database used by :mod:`ep02_durable_cas`.  Generic
-CAS or preflight receipts are not dispatch authorizations.
+This module provides the Profile S authority used by the optional governor
+commit gate.  It adds an operation-bound, request-idempotent authorization
+and single-consumption ledger to the same SQLite database used by
+:mod:`ep02_durable_cas`.  Generic CAS or preflight receipts are not dispatch
+authorizations.
 
 The implementation is Profile S only: one controlled host, SQLite WAL and
 multiple local processes.  It does not provide network transport, consensus,
@@ -388,6 +389,128 @@ def _consumption_body(receipt):
         "trust_checkpoint": _checkpoint_body(receipt.trust_checkpoint),
         "sequence": receipt.sequence,
     }
+
+
+def authorization_request_to_dict(request):
+    """Return the canonical, JSON-safe authorization request envelope."""
+    envelope, _, _, _ = _request_context(request)
+    return envelope
+
+
+def authorization_request_from_dict(value):
+    """Reconstruct and validate a canonical authorization request envelope."""
+    if not isinstance(value, dict) or set(value) != {
+        "version", "domain", "request_id", "binding",
+    }:
+        raise ValueError("invalid authorization request envelope")
+    if (
+        value["version"] != 1
+        or value["domain"] != "TENIR-EP02-PROFILE-S-COMMIT-AUTHORIZATION"
+    ):
+        raise ValueError("unsupported authorization request envelope")
+    request = CommitAuthorizationRequest(
+        _name(value["request_id"], "authorization request identity"),
+        _binding_from_body(value["binding"]),
+    )
+    _request_context(request)
+    return request
+
+
+def authorization_receipt_to_dict(receipt):
+    """Return a JSON-safe signed authorization receipt."""
+    if not isinstance(receipt, CommitAuthorizationReceipt):
+        raise TypeError("expected CommitAuthorizationReceipt")
+    return {
+        "body": _authorization_body(receipt),
+        "signature": receipt.signature.hex(),
+    }
+
+
+def authorization_receipt_from_dict(value):
+    """Reconstruct a signed authorization receipt for verification."""
+    if not isinstance(value, dict) or set(value) != {"body", "signature"}:
+        raise ValueError("invalid authorization receipt envelope")
+    body = value["body"]
+    required = {
+        "version", "domain", "authority_id", "profile_id",
+        "profile_generation", "receipt_key_id", "receipt_key_generation",
+        "request_id", "request_digest", "binding_digest", "decision",
+        "reason", "trust_checkpoint", "sequence",
+    }
+    if not isinstance(body, dict) or set(body) != required:
+        raise ValueError("invalid authorization receipt body")
+    if body["version"] != 1 or body["domain"] != "TENIR-EP02-PROFILE-S-COMMIT-RECEIPT":
+        raise ValueError("unsupported authorization receipt")
+    try:
+        signature = bytes.fromhex(value["signature"])
+        decision = AuthorizationDecision(body["decision"])
+    except (TypeError, ValueError):
+        raise ValueError("invalid authorization receipt") from None
+    return CommitAuthorizationReceipt(
+        authority_id=body["authority_id"],
+        profile_id=body["profile_id"],
+        profile_generation=body["profile_generation"],
+        receipt_key_id=body["receipt_key_id"],
+        receipt_key_generation=body["receipt_key_generation"],
+        request_id=body["request_id"],
+        request_digest=body["request_digest"],
+        binding_digest=body["binding_digest"],
+        decision=decision,
+        reason=body["reason"],
+        trust_checkpoint=_checkpoint_from_body(body["trust_checkpoint"]),
+        sequence=body["sequence"],
+        signature=signature,
+    )
+
+
+def consumption_receipt_to_dict(receipt):
+    """Return a JSON-safe signed consumption receipt."""
+    if not isinstance(receipt, CommitConsumptionReceipt):
+        raise TypeError("expected CommitConsumptionReceipt")
+    return {
+        "body": _consumption_body(receipt),
+        "signature": receipt.signature.hex(),
+    }
+
+
+def consumption_receipt_from_dict(value):
+    """Reconstruct a signed consumption receipt for verification."""
+    if not isinstance(value, dict) or set(value) != {"body", "signature"}:
+        raise ValueError("invalid consumption receipt envelope")
+    body = value["body"]
+    required = {
+        "version", "domain", "authority_id", "profile_id",
+        "profile_generation", "receipt_key_id", "receipt_key_generation",
+        "request_id", "request_digest", "binding_digest",
+        "authorization_sequence", "dispatch_claim_id", "decision", "reason",
+        "trust_checkpoint", "sequence",
+    }
+    if not isinstance(body, dict) or set(body) != required:
+        raise ValueError("invalid consumption receipt body")
+    if body["version"] != 1 or body["domain"] != "TENIR-EP02-PROFILE-S-CONSUMPTION-RECEIPT":
+        raise ValueError("unsupported consumption receipt")
+    try:
+        signature = bytes.fromhex(value["signature"])
+        decision = ConsumptionDecision(body["decision"])
+    except (TypeError, ValueError):
+        raise ValueError("invalid consumption receipt") from None
+    return CommitConsumptionReceipt(
+        authority_id=body["authority_id"],
+        profile_id=body["profile_id"],
+        profile_generation=body["profile_generation"],
+        receipt_key_id=body["receipt_key_id"],
+        receipt_key_generation=body["receipt_key_generation"],
+        request_id=body["request_id"],
+        request_digest=body["request_digest"],
+        binding_digest=body["binding_digest"],
+        authorization_sequence=body["authorization_sequence"],
+        dispatch_claim_id=body["dispatch_claim_id"],
+        decision=decision,
+        reason=body["reason"],
+        trust_checkpoint=_checkpoint_from_body(body["trust_checkpoint"]),
+        sequence=body["sequence"],
+        signature=signature,
+    )
 
 
 def verify_authorization_receipt(receipt, request, *, trusted_keys):
@@ -1003,6 +1126,10 @@ class ProfileSCommitAuthority:
             )
         finally:
             connection.close()
+
+    def trusted_receipt_keys(self):
+        """Return the pinned public keys accepted for receipt verification."""
+        return dict(self._trusted_keys())
 
     def _fault(self, point):
         """No-op test seam for crash and lost-reply characterization."""
