@@ -37,7 +37,7 @@ Homepage      = "https://github.com/skiredj-prog/tenir_governance"
 Repository    = "https://github.com/skiredj-prog/tenir_governance"
 Documentation = "https://github.com/skiredj-prog/tenir_governance#readme"
 "Bug Tracker" = "https://github.com/skiredj-prog/tenir_governance/issues"
-DOI           = "https://doi.org/10.5281/zenodo.21277138"
+"DOI (all versions)" = "https://doi.org/10.5281/zenodo.21264802"
 
 [project.scripts]
 tenir-validate = "tenir_governance.validator:main"
