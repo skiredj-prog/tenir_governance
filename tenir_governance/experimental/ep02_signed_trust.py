@@ -166,6 +166,10 @@ def verified_bound_preflight(
     digest = sha256(canonical_claim_bytes(claim.claim) + claim.signature).hexdigest()
     receipt = bind(trust=trust.state, issuer=issuer, scope=scope,
                    prior_document=prior, claim_digest=digest)
+    from dataclasses import replace
+    if receipt is None:
+        return Verdict.REJECT, "TRUST_SCOPE_REJECTED", None
+    receipt = replace(receipt, signed_snapshot_digest=sha256(bound_snapshot_bytes(trust)).hexdigest())
     return Verdict.ADMISSIBLE, "BOUND_PREFLIGHT_NOT_COMMITTED", receipt
 
 
@@ -182,7 +186,7 @@ def revalidate_bound(
     if (not revalidate(receipt, current=current.state,
                        claim_digest=fresh.claim_digest,
                        prior_document=prior, scope=scope)
-        or receipt.trust_digest != fresh.trust_digest):
+        or receipt.signed_snapshot_digest != fresh.signed_snapshot_digest):
         return Verdict.HOLD, "TRUST_OR_CLAIM_CHANGED"
     return Verdict.ADMISSIBLE, "BOUND_PREFLIGHT_VALID_NOT_COMMITTED"
 
