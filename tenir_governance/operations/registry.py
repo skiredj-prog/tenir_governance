@@ -514,7 +514,7 @@ class DurableOperationRegistry:
                 if flock:
                     flock.close()
 
-    def set_budget_flags(self, idempotency_key: str, **flags: bool) -> bool:
+    def set_budget_flags(self, idempotency_key: str, *, expected_version: int | None = None, **flags: bool) -> bool:
         """Atomically update and persist budget ownership flags."""
         allowed = {"budget_reserved", "budget_committed"}
         unknown = set(flags) - allowed
@@ -537,6 +537,9 @@ class DurableOperationRegistry:
                 record = self._records.get(idempotency_key)
                 if record is None:
                     return False
+
+                if expected_version is not None and record.record_version != expected_version:
+                    raise VersionConflict(idempotency_key, expected_version, record.record_version)
 
                 previous = {name: getattr(record, name) for name in flags}
                 for name, value in flags.items():
@@ -576,6 +579,20 @@ class DurableOperationRegistry:
             finally:
                 if flock:
                     flock.close()
+
+    def set_budget_flags_cas(
+        self, idempotency_key: str, *, expected_version: int, **flags: bool,
+    ) -> bool:
+        """Strict CAS for durable budget ownership flags.
+
+        The version is checked under the same process/file lock as persistence.
+        On a post-write failure callers must reload; never blindly retry.
+        """
+        if not isinstance(expected_version, int) or isinstance(expected_version, bool) or expected_version < 0:
+            raise ValueError("expected_version must be a nonnegative integer")
+        return self.set_budget_flags(
+            idempotency_key, expected_version=expected_version, **flags
+        )
 
     def transition_cas(
         self, idempotency_key: str, new_state: OperationState,
