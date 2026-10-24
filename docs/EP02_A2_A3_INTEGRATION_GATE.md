@@ -1,6 +1,6 @@
 # EP-02 — A2/A3 integration gate
 
-Status: design gate; no production runtime wiring is authorized by this document.
+Status: **historical design and acceptance baseline**. This gate preceded the opt-in Profile S governor integration included in v5.7.0. See `docs/EP02_GOVERNOR_COMMIT_GATE.md` for the implemented path. This document does not authorize production configuration or broader guarantees.
 
 Baseline: `77594f64bdd7a628445f167419a8fd123addb459`.
 
@@ -31,9 +31,9 @@ The current components have separate responsibilities:
    does not prove that a provider effect or budget settlement occurred.
 4. `DualKernelGovernor` registers an operation, reserves budget, claims
    `RESERVED -> DISPATCHING`, calls a provider and records the observed
-   outcome. It currently has no EP-02 dependency.
+   outcome. At this historical baseline it had no EP-02 dependency. The published v5.7.0 governor subsequently gained an **opt-in**, disabled-by-default Profile S dependency.
 
-No receipt produced by items 1–3 is presently a dispatch authorization.
+A generic preflight finding or CAS receipt from items 1–3 is not dispatch authorization. In the later opt-in integration, the distinct `CommitAuthorizationReceipt` is used for authorization and single consumption.
 
 ## Required decision
 
