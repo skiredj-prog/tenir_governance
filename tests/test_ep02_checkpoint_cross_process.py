@@ -4,7 +4,7 @@ import shutil
 from concurrent.futures import ProcessPoolExecutor
 
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from tenir_governance.experimental.ep02_binding import TrustState
 from tenir_governance.experimental.ep02_signed_trust import SignedTrustState, bound_snapshot_bytes
@@ -21,7 +21,8 @@ def make_snapshot(root, revision):
                             "root", template.issuer_keys)
 
 
-def advance(path, candidate, pub):
+def advance(path, candidate, public_key_bytes):
+    pub = Ed25519PublicKey.from_public_bytes(public_key_bytes)
     return CheckpointStore(path).advance(candidate, roots={"root": pub})
 
 
@@ -33,9 +34,11 @@ def test_two_processes_same_revision_different_content_never_both_advance(tmp_pa
     assert CheckpointStore(path).advance(base, roots={"root": pub}, bootstrap=True)[0]
     a = make_snapshot(root, 2)
     b = make_snapshot(root, 2)
+    pub_bytes = pub.public_bytes(encoding=serialization.Encoding.Raw,
+                                 format=serialization.PublicFormat.Raw)
     with ProcessPoolExecutor(max_workers=2, mp_context=mp.get_context("spawn")) as pool:
-        x = pool.submit(advance, str(path), a, pub)
-        y = pool.submit(advance, str(path), b, pub)
+        x = pool.submit(advance, str(path), a, pub_bytes)
+        y = pool.submit(advance, str(path), b, pub_bytes)
         results = [x.result(timeout=30), y.result(timeout=30)]
     assert sum(ok for ok, _ in results) == 1
     assert CheckpointStore(path).get().revision == 2
