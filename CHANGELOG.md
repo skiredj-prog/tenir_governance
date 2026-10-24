@@ -1,8 +1,8 @@
 # Changelog
 
-## [5.7.0] — Release candidate — Safety, durable accounting and deployment evidence
+## [5.7.0] — Single-host safety, durable accounting and deployment evidence
 
-This release candidate is not published. It targets single-host deployments with explicitly bounded guarantees. Any Harv activity is an independent review, not a certification.
+This version targets single-host deployments with explicitly bounded guarantees. Any Harv activity is an independent review, not a certification.
 
 ### Added
 - Single-host SQLite WAL consensus backend with atomic budget/reservation transactions, rollback, and validated migration from legacy JSON state.
@@ -25,10 +25,10 @@ This release candidate is not published. It targets single-host deployments with
 - Use the SQLite WAL backend for the bounded single-host deployment profile.
 - This package does not claim Byzantine fault tolerance or exactly-once external provider effects.
 
-### Verification status
-- No test result is claimed for this candidate until it has been executed against its exact committed SHA. The release workflow installs `.[api,test,raft]`, requires PySyncObj, runs the Raft suite explicitly, then runs the full suite and rejects skipped Raft tests.
-- The Raft tests use local loopback clusters and do not constitute a physical multi-host network or production security test.
-- This entry must be converted from candidate notes to final release notes before tagging; the release workflow rejects an entry still marked as a release candidate.
+### Verification scope
+- Source integration into `main` was recorded at commit `fb9355cc55fae14e88190650694a2cc32513e3c4`. Governance CI on that commit completed successfully; final release verification is independently required against the exact tagged commit.
+- The release workflow installs `.[api,test,raft]`, requires PySyncObj, runs the Raft suite explicitly, then runs the full suite and rejects skipped Raft tests. Passing CI is not a formal guarantee.
+- Raft integration tests use local loopback clusters and do not constitute a physical multi-host network or production security test.
 
 ### Compatibility note
 - v5.7.0 extends the separately published 5.6.1 patch (2026-10-20); the latter remains its own release entry.
