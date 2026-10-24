@@ -10,11 +10,11 @@ testable at boundary conditions.
 # It is NOT canonical, NOT doctrinal. It carries implementation-level
 # governance enforcement authority only.
 #
-# KB3 posture mapping (implementation → canonical):
-#   PASS → NORMAL
-#   FLAG → CAUTION
-#   HOLD → HOLDING-FIRST
-#   HARD_VETO → HOLDING-FIRST (block at execution layer)
+# Execution verdict and posture are distinct fields. They are computed
+# and returned separately; this module does not map one onto the other.
+#   Verdict (what is): PASS / FLAG / HOLD / HARD_VETO
+#   Posture (what we do): NORMAL / CAUTION / HOLDING-FIRST
+# schema_adapter.py returns posture in its own field.
 from __future__ import annotations
 
 from dataclasses import dataclass

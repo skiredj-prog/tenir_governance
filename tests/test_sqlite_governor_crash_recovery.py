@@ -113,11 +113,20 @@ def _assert_i8(
 
 
 def _run_crash_child(store_dir: Path, scenario: str, key: str):
+    env = os.environ.copy()
+    repo_root = str(Path(__file__).resolve().parents[1])
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        repo_root if not existing_pythonpath
+        else repo_root + os.pathsep + existing_pythonpath
+    )
     result = subprocess.run(
         [sys.executable, __file__, "--crash-child", scenario, str(store_dir), key],
         capture_output=True,
         text=True,
         timeout=30,
+        cwd=repo_root,
+        env=env,
     )
     assert result.returncode == _CRASH_EXIT, (
         f"scenario {scenario!r} did not reach its crash point: "
