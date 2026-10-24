@@ -10,15 +10,7 @@ on:
       - "tenir_governance/objects/**"
       - "tenir_governance/assessment/**"
       - "tenir_kernel/**"
-      - "tests/test_raft_backend.py"
-      - "tests/test_composition.py"
-      - "tests/test_provider.py"
-      - "tests/test_linearizability_checker.py"
-      - "tests/test_liveness.py"
-      - "tests/test_hold_lifecycle.py"
-      - "tests/test_sqlite_governor_crash_recovery.py"
-      - "tests/test_subprocess_provenance.py"
-      - "tests/test_quarantine_cross_registry.py"
+      - "tests/**"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
   push:
@@ -30,15 +22,7 @@ on:
       - "tenir_governance/objects/**"
       - "tenir_governance/assessment/**"
       - "tenir_kernel/**"
-      - "tests/test_raft_backend.py"
-      - "tests/test_composition.py"
-      - "tests/test_provider.py"
-      - "tests/test_linearizability_checker.py"
-      - "tests/test_liveness.py"
-      - "tests/test_hold_lifecycle.py"
-      - "tests/test_sqlite_governor_crash_recovery.py"
-      - "tests/test_subprocess_provenance.py"
-      - "tests/test_quarantine_cross_registry.py"
+      - "tests/**"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
 
@@ -78,7 +62,11 @@ jobs:
         run: pytest -q tests/test_quarantine_cross_registry.py
 
   packaging-preflight:
-    name: Python 3.12 packaging preflight (no publishing)
+    name: ${{ matrix.checkout == 'candidate' && 'Python 3.12 exact candidate preflight (no publishing)' || 'Python 3.12 packaging preflight (no publishing)' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        checkout: [candidate, integration]
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -90,10 +78,39 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ matrix.checkout == 'candidate' && github.event.pull_request.head.sha || github.sha }}
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
+      - name: Record and verify checkout provenance
+        env:
+          EXPECTED_CHECKOUT_SHA: ${{ matrix.checkout == 'candidate' && github.event.pull_request.head.sha || github.sha }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CHECKOUT_KIND: ${{ matrix.checkout }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          evidence = {
+              "checkout_kind": os.environ["CHECKOUT_KIND"],
+              "actual_checkout_sha": actual,
+              "expected_checkout_sha": os.environ["EXPECTED_CHECKOUT_SHA"],
+              "candidate_sha": os.environ["CANDIDATE_SHA"],
+              "github_sha": os.environ["GITHUB_SHA"],
+              "event_name": os.environ["GITHUB_EVENT_NAME"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+          }
+          Path("validation").mkdir(exist_ok=True)
+          Path("validation/provenance.json").write_text(json.dumps(evidence, indent=2) + "\n")
+          print(json.dumps(evidence, indent=2))
+          if actual != evidence["expected_checkout_sha"]:
+              raise SystemExit("Checkout SHA mismatch; candidate validation refused")
+          PY
       - name: Verify candidate version without creating a tag
         run: |
           python - <<'PY'
@@ -115,12 +132,12 @@ jobs:
           TENIR_ENV: test
         run: |
           python -c "import pysyncobj"
-          python -m pytest tests/test_raft_backend.py -q
+          python -m pytest tests/test_raft_backend.py -q --junitxml=validation/raft-tests.xml
 
       - name: Run the full test suite
         env:
           TENIR_ENV: test
-        run: python -m pytest tests/ -q
+        run: python -m pytest tests/ -q -ra --junitxml=validation/full-tests.xml
 
       - name: Build wheel and source distribution
         run: python -m build
@@ -162,4 +179,13 @@ jobs:
 
           print("Wheel and source distribution contain provider, HOLD, and assessment modules.")
           PY
+
+      - name: Preserve checkout and test evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: v57-${{ matrix.checkout }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: validation/
+          if-no-files-found: warn
+          retention-days: 30
 
