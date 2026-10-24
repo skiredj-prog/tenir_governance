@@ -759,6 +759,11 @@ class ProfileSCommitAuthority:
         anchor = DurableAnchorCAS.open(path)
         connection = anchor._connect()
         try:
+            # Validate the profile, authorization rows, and consumption rows
+            # against one WAL snapshot.  Separate autocommit reads can mix
+            # pre-commit authorizations with post-commit consumptions while a
+            # supported local process is advancing the authority.
+            connection.execute("BEGIN")
             row = connection.execute(
                 "SELECT schema_version, receipt_key_id, receipt_key_generation, "
                 "receipt_public_key FROM commit_profile WHERE singleton = 1"
@@ -779,6 +784,7 @@ class ProfileSCommitAuthority:
             cls._validate_guards(connection)
             service = cls(anchor, receipt_signing_key, key_id, generation)
             service._validate_rows(connection)
+            connection.commit()
             return service
         except StoreIntegrityError:
             raise

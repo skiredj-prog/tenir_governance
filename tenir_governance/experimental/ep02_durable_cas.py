@@ -283,6 +283,11 @@ class DurableAnchorCAS:
         cls._validate_storage_path(path, must_exist=True)
         connection = cls._connect_path(path, create=False)
         try:
+            # Keep every integrity read on one WAL snapshot.  Without an
+            # explicit read transaction, a concurrent writer can commit
+            # between the checkpoint read and the request-history scan and
+            # make a healthy database appear internally inconsistent.
+            connection.execute("BEGIN")
             if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise StoreIntegrityError("SQLite integrity check failed")
             row = connection.execute(
@@ -337,6 +342,7 @@ class DurableAnchorCAS:
                 roots=roots,
                 current=current,
             )
+            connection.commit()
             return cls(path, authority_id, profile_id, generation, roots, profile_digest)
         except StoreIntegrityError:
             raise

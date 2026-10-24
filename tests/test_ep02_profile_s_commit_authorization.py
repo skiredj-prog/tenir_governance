@@ -230,6 +230,58 @@ def test_exact_authorization_is_signed_durable_and_single_consumption(tmp_path):
     )
 
 
+def test_open_validates_authorizations_and_consumptions_on_one_snapshot(
+    tmp_path, monkeypatch,
+):
+    path = tmp_path / "authority.sqlite3"
+    writer, _, _, receipt_key, snapshot, proof, finding, request = _setup(path)
+    original = ProfileSCommitAuthority._validate_rows
+    advanced = False
+    callback_errors = []
+
+    def validate_while_writer_advances(self, connection):
+        def advance_before_consumption_scan(statement):
+            nonlocal advanced
+            if advanced or "FROM commit_consumptions" not in statement:
+                return
+            advanced = True
+            connection.set_trace_callback(None)
+            try:
+                authorization = writer.authorize(
+                    request,
+                    finding=finding,
+                    claim=proof,
+                    current_snapshot=snapshot,
+                    now=NOW,
+                )
+                writer.consume(
+                    request,
+                    authorization,
+                    dispatch_claim_id="dispatch-during-open",
+                )
+            except Exception as error:  # surfaced below; SQLite swallows callback errors
+                callback_errors.append(error)
+
+        connection.set_trace_callback(advance_before_consumption_scan)
+        try:
+            return original(self, connection)
+        finally:
+            connection.set_trace_callback(None)
+
+    monkeypatch.setattr(
+        ProfileSCommitAuthority, "_validate_rows", validate_while_writer_advances,
+    )
+
+    reopened = ProfileSCommitAuthority.open(
+        path, receipt_signing_key=receipt_key,
+    )
+
+    assert advanced
+    assert callback_errors == []
+    assert reopened.lookup_authorization(request).status == CommitLookupStatus.RECORDED
+    assert reopened.lookup_consumption(request).status == CommitLookupStatus.RECORDED
+
+
 @pytest.mark.parametrize("field,value", [
     ("institutional_scope", "institution-b"),
     ("operation_id", "operation-2"),

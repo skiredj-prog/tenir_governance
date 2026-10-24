@@ -164,6 +164,37 @@ def test_old_request_result_survives_later_commit(tmp_path):
     assert replay.current_checkpoint.revision == 3
 
 
+def test_open_validates_checkpoint_and_history_on_one_snapshot(tmp_path, monkeypatch):
+    root = Ed25519PrivateKey.generate()
+    path = tmp_path / "anchor.sqlite3"
+    writer, _ = _bootstrapped(path, root)
+    expected = writer.get()
+    successor = _signed(root, 2)
+    original = DurableAnchorCAS._validate_request_rows.__func__
+    advanced = False
+
+    def validate_while_writer_advances(cls, connection, **context):
+        nonlocal advanced
+        if not advanced:
+            advanced = True
+            response = writer.compare_and_swap(
+                "request-concurrent-open", expected, successor,
+            )
+            assert response.result == DurableCASResult.APPLIED
+        return original(cls, connection, **context)
+
+    monkeypatch.setattr(
+        DurableAnchorCAS,
+        "_validate_request_rows",
+        classmethod(validate_while_writer_advances),
+    )
+
+    reopened = DurableAnchorCAS.open(path)
+
+    assert advanced
+    assert reopened.get().revision == 2
+
+
 def test_recorded_conflict_is_not_reinterpreted_after_state_changes(tmp_path):
     root = Ed25519PrivateKey.generate()
     path = tmp_path / "anchor.sqlite3"
