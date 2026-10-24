@@ -560,6 +560,7 @@ def test_non_json_and_non_finite_payloads_fail_closed(tmp_path):
         governor.dispatch_and_execute(
             "idem-1", metadata={"value": "x" * 1_048_577},
         ),
+        governor.dispatch_and_execute("idem-1", metadata={"value": 1 << 4097}),
     ]
 
     assert all(result["dispatched"] is False for result in invalid_results)

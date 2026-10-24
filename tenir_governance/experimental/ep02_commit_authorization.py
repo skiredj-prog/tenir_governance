@@ -194,7 +194,15 @@ def canonical_payload_bytes(payload: Mapping | None) -> bytes:
             raise ValueError("payload has too many values")
         if depth > _MAX_PAYLOAD_DEPTH:
             raise ValueError("payload is too deeply nested")
-        if value is None or isinstance(value, (bool, str, int)):
+        if value is None or isinstance(value, bool):
+            return
+        if isinstance(value, str):
+            if len(value) > _MAX_PAYLOAD_BYTES:
+                raise ValueError("payload string is too large")
+            return
+        if isinstance(value, int):
+            if value.bit_length() > 4096:
+                raise ValueError("payload integer is too large")
             return
         if isinstance(value, float):
             if not math.isfinite(value):
@@ -209,6 +217,8 @@ def canonical_payload_bytes(payload: Mapping | None) -> bytes:
                 for key, item in value.items():
                     if not isinstance(key, str):
                         raise ValueError("payload object keys must be strings")
+                    if len(key) > _MAX_PAYLOAD_BYTES:
+                        raise ValueError("payload object key is too large")
                     validate(item, depth + 1)
             finally:
                 active_containers.remove(marker)
