@@ -1,6 +1,6 @@
 # TENIR-Gov 5.7.0 — Release qualification record (pre-tag)
 
-**Historical record, frozen at the pre-tag gate.** The NO-GO status below was the decision *before* publication on 2026-10-24; it does not describe the current release. GitHub release `v5.7.0` now points to SHA `47ef67e3efc5f3008896a7d88bebf929fa0a98f0`. This is a prepublication evidence index, not a postpublication certificate. For release-state evidence consult GitHub release, published PyPI artifacts, and the post-release documentary assessment.
+**Historical pre-tag assessment, retained with a postpublication annotation.** The NO-GO status below was the decision *before* publication on 2026-10-24; it does not describe the current release. GitHub release `v5.7.0` now points to SHA `47ef67e3efc5f3008896a7d88bebf929fa0a98f0`. This is a prepublication evidence index, not a postpublication certificate. For release-state evidence consult GitHub release, published PyPI artifacts, and the post-release documentary assessment.
 
 Status at record creation: **NO-GO for tagging/publishing pending final verification**.
 
