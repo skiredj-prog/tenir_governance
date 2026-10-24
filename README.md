@@ -267,6 +267,8 @@ print(result.to_business_payload())
 
 # Repository Architecture
 
+> The following v5.3.0 tree is a historical architecture illustration, not an inventory of the current v5.7.0 repository or a deployment manifest. Consult the checked-in package and deployment documentation for current paths.
+
 ## v5.3.0 · IRON OMEGA
 
 ```text
