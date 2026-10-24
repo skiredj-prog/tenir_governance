@@ -20,7 +20,7 @@ Status: **NO-GO for tagging/publishing pending final verification**. This docume
 | PR #53 Raft/packaging | https://github.com/skiredj-prog/tenir_governance/actions/runs/40116420215 | Success on final PR head |
 | On-main source and metadata | `pyproject.toml`, `CHANGELOG.md`, `CITATION.cff`, `.zenodo.json`, `README.md` | Version/claims aligned by source inspection |
 | Release workflow gate | `.github/workflows/release.yml` | Tag `v*` triggers checks, artifact build, and downstream PyPI Trusted Publishing |
-| Main push CI at exact merge SHA | GitHub Actions push run(s) for `992a42c2...` | **NOT VERIFIED**: available connector only returned PR-triggered workflow runs |
+| Main push CI at exact merge SHA | GitHub Actions push run(s) for `992a42c2...` | **USER-OBSERVED SUCCESS**: operator reported all GitHub Actions checks green on main (2026-10-24); exact run URLs and independent API verification not yet captured |
 | Exact tagged commit CI and distributions | Pending, no tag created | **NOT VERIFIED** |
 
 ## Explicit scope and residual risks
@@ -34,10 +34,12 @@ Status: **NO-GO for tagging/publishing pending final verification**. This docume
 ## Release decision gate
 
 Before considering tag `v5.7.0`:
-1. Verify GitHub Actions `push` workflow results on exact `main` SHA (including governance and Raft/packaging); capture URLs and conclusions.
+1. Capture GitHub Actions `push` workflow run URLs and conclusions on exact `main` SHA (including governance and Raft/packaging). Operator reported success on 2026-10-24; independent connector verification remains outstanding.
 2. Ensure the release workflow's tag/version/changelog gate and dependencies/audit are suitable for the same source SHA; confirm required PyPI publishing environment and approval route.
 3. Check changelog, Security Policy, DOI and public claims remain bounded and distinguish source line from published release.
 4. Obtain an explicit publication decision recognizing that pushing a `v*` tag initiates a publication-capable workflow.
 5. After authorization only: create tag on approved immutable SHA, track release workflow, inspect produced artifacts and PyPI result; separately verify any GitHub/Zenodo release record rather than assuming one exists.
+
+**Operator attestation (2026-10-24):** all post-merge checks on GitHub were observed green, including Raft regressions and Python packaging preflight. This is a user-observed status, not an independently retrieved run result. The checks associated with a future tag have not executed.
 
 This record intentionally does not claim that steps 1–5 have completed.
