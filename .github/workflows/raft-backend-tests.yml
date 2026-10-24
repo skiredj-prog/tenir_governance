@@ -22,6 +22,12 @@ on:
       - "tests/test_ep02_governor_commit_gate.py"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
+      - "CITATION.cff"
+      - ".zenodo.json"
+      - "SECURITY.md"
+      - "CHANGELOG.md"
+      - "README.md"
+      - "docs/threat-model-v1.md"
   push:
     branches: [main]
     paths:
@@ -43,6 +49,12 @@ on:
       - "tests/test_ep02_governor_commit_gate.py"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
+      - "CITATION.cff"
+      - ".zenodo.json"
+      - "SECURITY.md"
+      - "CHANGELOG.md"
+      - "README.md"
+      - "docs/threat-model-v1.md"
 
 jobs:
   raft-regressions:
