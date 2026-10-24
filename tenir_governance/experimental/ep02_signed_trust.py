@@ -5,6 +5,7 @@ Signed snapshots bind revision, policy, mandates and revocations. This is NOT
 a consensus trust registry nor an atomic execution authorization.
 """
 from dataclasses import dataclass
+from cryptography.hazmat.primitives import serialization
 import json
 from typing import Mapping
 
@@ -32,6 +33,7 @@ class SignedTrustState:
     state: TrustState
     signature: bytes
     signer_id: str
+    issuer_keys: tuple[tuple[str, bytes], ...] = ()
 
 
 def verify_trust_snapshot(
@@ -105,3 +107,82 @@ def verified_revalidation(
                       prior_document=prior, scope=scope):
         return Verdict.HOLD, "TRUST_OR_CLAIM_CHANGED"
     return Verdict.ADMISSIBLE, "PREFLIGHT_STILL_VALID_NOT_COMMITTED"
+
+def bound_snapshot_bytes(signed: SignedTrustState) -> bytes:
+    """Domain-separated signature payload covering issuer keys and mandates."""
+    entries = list(signed.issuer_keys)
+    if len({name for name, _ in entries}) != len(entries):
+        raise ValueError("duplicate issuer key")
+    if any(not name or not isinstance(raw, bytes) or len(raw) != 32
+           for name, raw in entries):
+        raise ValueError("invalid issuer key entry")
+    body = {"trust": json.loads(canonical_trust_bytes(signed.state)),
+            "issuer_keys": [[name, raw.hex()] for name, raw in sorted(entries)]}
+    return b"TENIR-EP02-SNAPSHOT-V2\\x00" + json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def verify_bound_snapshot(
+    signed: SignedTrustState, *, root_keys: Mapping[str, Ed25519PublicKey],
+    minimum_revision: int = 1,
+) -> bool:
+    if signed.state.revision < minimum_revision:
+        return False
+    root = root_keys.get(signed.signer_id)
+    if not isinstance(root, Ed25519PublicKey):
+        return False
+    try:
+        root.verify(signed.signature, bound_snapshot_bytes(signed))
+    except (InvalidSignature, TypeError, ValueError):
+        return False
+    return True
+
+
+def verified_bound_preflight(
+    claim: SignedClaim, *, prior: str, scope: str, now,
+    trust: SignedTrustState, root_keys: Mapping[str, Ed25519PublicKey],
+    minimum_revision: int = 1,
+) -> tuple[Verdict, str, BoundFinding | None]:
+    """Only keys authenticated within the signed trust snapshot can verify claims."""
+    if not verify_bound_snapshot(trust, root_keys=root_keys,
+                                 minimum_revision=minimum_revision):
+        return Verdict.REJECT, "TRUST_SNAPSHOT_UNVERIFIED", None
+    keys = {issuer: Ed25519PublicKey.from_public_bytes(raw)
+            for issuer, raw in trust.issuer_keys}
+    issuer = claim.claim.issuer
+    if issuer in trust.state.revoked:
+        return Verdict.REJECT, "ISSUER_REVOKED", None
+    if issuer not in keys:
+        return Verdict.REJECT, "ISSUER_KEY_NOT_BOUND", None
+    verdict, reason = verify_and_evaluate(
+        (claim,), prior=prior, scope=scope, keys=keys,
+        mandates={name: frozenset(s for i, s in trust.state.mandates if i == name)
+                  for name, _ in trust.state.mandates}, now=now)
+    if verdict != Verdict.ADMISSIBLE:
+        return verdict, reason, None
+    from hashlib import sha256
+    from tenir_governance.experimental.ep01_evidence import canonical_claim_bytes
+    digest = sha256(canonical_claim_bytes(claim.claim) + claim.signature).hexdigest()
+    receipt = bind(trust=trust.state, issuer=issuer, scope=scope,
+                   prior_document=prior, claim_digest=digest)
+    return Verdict.ADMISSIBLE, "BOUND_PREFLIGHT_NOT_COMMITTED", receipt
+
+
+def revalidate_bound(
+    receipt: BoundFinding, claim: SignedClaim, *, prior: str, scope: str, now,
+    current: SignedTrustState, root_keys: Mapping[str, Ed25519PublicKey],
+    minimum_revision: int,
+) -> tuple[Verdict, str]:
+    verdict, reason, fresh = verified_bound_preflight(
+        claim, prior=prior, scope=scope, now=now, trust=current,
+        root_keys=root_keys, minimum_revision=minimum_revision)
+    if verdict != Verdict.ADMISSIBLE or fresh is None:
+        return verdict, reason
+    if (not revalidate(receipt, current=current.state,
+                       claim_digest=fresh.claim_digest,
+                       prior_document=prior, scope=scope)
+        or receipt.trust_digest != fresh.trust_digest):
+        return Verdict.HOLD, "TRUST_OR_CLAIM_CHANGED"
+    return Verdict.ADMISSIBLE, "BOUND_PREFLIGHT_VALID_NOT_COMMITTED"
+
