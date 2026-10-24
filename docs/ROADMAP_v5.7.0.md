@@ -1,6 +1,6 @@
 # TENIR-Gov v5.7.0 — Backlog et plan de sprints
 
-**Statut :** proposition de planification, non validée par Harv
+**Statut :** document de planification historique (baseline de travaux), non preuve de l'état courant ; vérifier le code, les CI et les décisions fusionnées sur le SHA ciblé. Revue Harv indépendante non présumée.
 **Périmètre :** les trois blocs bloquants définis pour v5.7.0
 **Règle de livraison :** aucune fusion ni publication avant les gates de release ci-dessous.
 
