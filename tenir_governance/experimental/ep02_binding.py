@@ -25,6 +25,7 @@ class BoundFinding:
     claim_digest: str
     prior_document: str
     scope: str
+    signed_snapshot_digest: str = ""
 
 
 def bind(*, trust: TrustState, issuer: str, scope: str,
