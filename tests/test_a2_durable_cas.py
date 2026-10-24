@@ -86,3 +86,55 @@ def test_postwrite_failure_requires_reload(tmp_path):
     assert fresh.get("one").record_version == v + 1
     with pytest.raises(VersionConflict):
         fresh.transition_cas("one", OperationState.CONFIRMED, expected_version=v)
+
+
+def test_budget_flags_cas_rejects_stale_version(tmp_path):
+    path = tmp_path / "ops.json"
+    first = initial(path)
+    second = DurableOperationRegistry(str(path))
+    v = first.get("one").record_version
+    assert first.set_budget_flags_cas(
+        "one", expected_version=v, budget_reserved=True)
+    with pytest.raises(VersionConflict) as conflict:
+        second.set_budget_flags_cas(
+            "one", expected_version=v, budget_committed=True)
+    assert conflict.value.current_version == v + 1
+    record = second.get("one")
+    assert record.budget_reserved and not record.budget_committed
+
+
+def test_budget_flags_cas_and_state_transition_share_version(tmp_path):
+    r = initial(tmp_path / "ops.json")
+    v = r.get("one").record_version
+    assert r.transition_cas("one", OperationState.FAILED, expected_version=v)[0]
+    with pytest.raises(VersionConflict):
+        r.set_budget_flags_cas(
+            "one", expected_version=v, budget_reserved=False)
+
+
+def test_budget_flags_cas_noop_preserves_version(tmp_path):
+    r = initial(tmp_path / "ops.json")
+    v = r.get("one").record_version
+    assert r.set_budget_flags_cas(
+        "one", expected_version=v, budget_reserved=False)
+    assert r.get("one").record_version == v
+
+
+def test_budget_flags_cas_postwrite_error_recovers_current_version(tmp_path):
+    path = tmp_path / "ops.json"
+    r = initial(path)
+    v = r.get("one").record_version
+    persist = r._persist
+    def persist_then_error():
+        persist()
+        raise OSError("fault after durable budget flag write")
+    with patch.object(r, "_persist", side_effect=persist_then_error):
+        # Existing set_budget_flags handles post-write errors by inspecting
+        # the durable flags, so this succeeds without double accounting.
+        assert r.set_budget_flags_cas(
+            "one", expected_version=v, budget_committed=True)
+    fresh = DurableOperationRegistry(str(path))
+    assert fresh.get("one").record_version == v + 1
+    with pytest.raises(VersionConflict):
+        fresh.set_budget_flags_cas(
+            "one", expected_version=v, budget_committed=False)
