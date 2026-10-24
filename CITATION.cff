@@ -16,6 +16,7 @@ abstract: >
 version: "5.7.0"
 license: Apache-2.0
 repository-code: "https://github.com/skiredj-prog/tenir_governance"
+doi: 10.5281/zenodo.21264802
 url: "https://github.com/skiredj-prog/tenir_governance"
 keywords:
   - governance middleware
@@ -34,3 +35,7 @@ authors:
     email: skiredj@gmail.com
     affiliation: "TENIR Labs"
     orcid: "https://orcid.org/0009-0003-2678-4069"
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.21264802
+    description: "Zenodo concept DOI for the TENIR-Gov version series; not a DOI for release 5.7.0"
