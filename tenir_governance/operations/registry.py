@@ -269,6 +269,27 @@ class OperationRecord:
     # SHA-256 of the canonical JSON action payload approved at adjudication.
     # The empty-object digest is the backwards-compatible default.
     payload_hash: str = EMPTY_PAYLOAD_HASH
+    # Immutable execution identity used by the optional Profile S commit gate.
+    # These fields are appended after the legacy record fields to preserve the
+    # positional constructor contract for existing integrations.
+    operation_id: str = ""
+    institutional_scope: str = ""
+    payload_digest: str = ""
+    # Profile S commit authorization is opt-in per operation.  The request and
+    # signed receipts are stored as canonical JSON-safe envelopes so recovery
+    # can resume after either authority call commits but its reply is lost.
+    commit_gate_required: bool = False
+    commit_authorization_request: dict | None = None
+    commit_authorization_receipt: dict | None = None
+    commit_dispatch_claim_id: str = ""
+    commit_consumption_receipt: dict | None = None
+    # Persisted authorization substate.  This remains separate from the
+    # provider lifecycle so TRUST_UNKNOWN/HOLD can block a RESERVED operation
+    # without pretending that an external effect may have occurred.
+    commit_authorization_status: str = ""
+    commit_consumption_status: str = ""
+    commit_gate_last_reason: str = ""
+    commit_gate_events: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -819,6 +840,7 @@ class DurableOperationRegistry:
         *,
         hold_record: HoldRecord | None = None,
         hold_record_changes: Mapping[str, Any] | None = None,
+        commit_gate_verified: bool = False,
     ) -> tuple[bool, OperationState | None]:
         """Enforce shared quarantine even for direct registry admission calls.
 
@@ -838,6 +860,7 @@ class DurableOperationRegistry:
                     claimed_by=claimed_by,
                     hold_record=hold_record,
                     hold_record_changes=hold_record_changes,
+                    commit_gate_verified=commit_gate_verified,
                 )
         return self._transition_to_unchecked_quarantine(
             idempotency_key,
@@ -845,6 +868,7 @@ class DurableOperationRegistry:
             claimed_by=claimed_by,
             hold_record=hold_record,
             hold_record_changes=hold_record_changes,
+            commit_gate_verified=commit_gate_verified,
         )
 
     def _transition_to_unchecked_quarantine(
@@ -855,6 +879,7 @@ class DurableOperationRegistry:
         *,
         hold_record: HoldRecord | None = None,
         hold_record_changes: Mapping[str, Any] | None = None,
+        commit_gate_verified: bool = False,
     ) -> tuple[bool, OperationState | None]:
         """Atomically transition an operation to a new state.
 
@@ -934,6 +959,16 @@ class DurableOperationRegistry:
                         return False, prev_state  # already dispatching
                     if record.state.is_dispatched:
                         return False, prev_state  # already dispatched
+                    if record.commit_gate_required:
+                        consumption = record.commit_consumption_receipt
+                        body = consumption.get("body", {}) if isinstance(consumption, dict) else {}
+                        if (
+                            body.get("decision") != "CONSUMED"
+                            or not record.commit_dispatch_claim_id
+                            or body.get("dispatch_claim_id") != record.commit_dispatch_claim_id
+                            or not commit_gate_verified
+                        ):
+                            return False, prev_state
 
                 if hold_record is not None and record.hold_record is not None:
                     return False, prev_state
@@ -1027,6 +1062,191 @@ class DurableOperationRegistry:
                         for name, value in previous.items():
                             setattr(current, name, value)
                     raise
+                return True
+            finally:
+                if flock:
+                    flock.close()
+
+    def _set_immutable_commit_value(
+        self,
+        idempotency_key: str,
+        field_name: str,
+        value,
+        *,
+        require_authorization: bool = False,
+        status_field: str | None = None,
+        status: str = "",
+    ) -> bool:
+        """Persist one immutable commit-gate value under the registry lock."""
+        with self._lock:
+            if self._corrupted:
+                raise RuntimeError(
+                    "Registry store is corrupted — refuse to update commit authorization."
+                )
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                record = self._records.get(idempotency_key)
+                if record is None or not record.commit_gate_required:
+                    return False
+                existing = getattr(record, field_name)
+                if existing not in (None, ""):
+                    if existing != value:
+                        return False
+                    if status_field and getattr(record, status_field) != status:
+                        setattr(record, status_field, status)
+                        self._persist()
+                    return True
+                if record.state != OperationState.RESERVED:
+                    return False
+                if require_authorization and record.commit_authorization_receipt is None:
+                    return False
+                setattr(record, field_name, value)
+                if status_field:
+                    setattr(record, status_field, status)
+                self._persist()
+                return True
+            finally:
+                if flock:
+                    flock.close()
+
+    def record_commit_authorization_request(
+        self, idempotency_key: str, request: dict,
+    ) -> bool:
+        """Persist the immutable request before contacting the authority."""
+        canonical = json.loads(json.dumps(request, sort_keys=True))
+        return self._set_immutable_commit_value(
+            idempotency_key, "commit_authorization_request", canonical,
+            status_field="commit_authorization_status",
+            status="TRUST_COMMITTING",
+        )
+
+    def record_commit_authorization_receipt(
+        self, idempotency_key: str, receipt: dict,
+    ) -> bool:
+        """Persist the authority's signed decision without allowing replacement."""
+        canonical = json.loads(json.dumps(receipt, sort_keys=True))
+        body = canonical.get("body", {}) if isinstance(canonical, dict) else {}
+        decision = body.get("decision")
+        return self._set_immutable_commit_value(
+            idempotency_key, "commit_authorization_receipt", canonical,
+            status_field="commit_authorization_status",
+            status="TRUST_COMMITTED" if decision == "AUTHORIZED" else "HOLD",
+        )
+
+    def ensure_commit_dispatch_claim(
+        self, idempotency_key: str, claim_id: str,
+    ) -> tuple[bool, str]:
+        """Claim one stable dispatch identity before consuming authorization."""
+        if not isinstance(claim_id, str) or not claim_id:
+            raise ValueError("dispatch claim identity must be non-empty")
+        with self._lock:
+            if self._corrupted:
+                raise RuntimeError(
+                    "Registry store is corrupted — refuse to claim commit authorization."
+                )
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                record = self._records.get(idempotency_key)
+                if (
+                    record is None
+                    or not record.commit_gate_required
+                    or record.state != OperationState.RESERVED
+                    or record.commit_authorization_receipt is None
+                ):
+                    return False, ""
+                if record.commit_dispatch_claim_id:
+                    return True, record.commit_dispatch_claim_id
+                record.commit_dispatch_claim_id = claim_id
+                self._persist()
+                return True, claim_id
+            finally:
+                if flock:
+                    flock.close()
+
+    def record_commit_consumption_receipt(
+        self, idempotency_key: str, receipt: dict,
+    ) -> bool:
+        """Persist the signed single-consumption result before dispatch claim."""
+        canonical = json.loads(json.dumps(receipt, sort_keys=True))
+        body = canonical.get("body", {}) if isinstance(canonical, dict) else {}
+        record = self.get(idempotency_key)
+        if (
+            record is None
+            or not record.commit_dispatch_claim_id
+            or body.get("dispatch_claim_id") != record.commit_dispatch_claim_id
+        ):
+            return False
+        return self._set_immutable_commit_value(
+            idempotency_key,
+            "commit_consumption_receipt",
+            canonical,
+            require_authorization=True,
+            status_field="commit_consumption_status",
+            status="TRUST_CONSUMED" if body.get("decision") == "CONSUMED" else "HOLD",
+        )
+
+    def record_commit_gate_status(
+        self,
+        idempotency_key: str,
+        *,
+        phase: str,
+        status: str,
+        reason: str,
+        security_event: bool = False,
+    ) -> bool:
+        """Persist a bounded trust-gate non-success state and audit event."""
+        if phase not in {"authorization", "consumption"}:
+            raise ValueError("invalid commit-gate phase")
+        if (
+            not isinstance(status, str)
+            or not status
+            or len(status) > 64
+            or not status.replace("_", "").isalnum()
+        ):
+            raise ValueError("invalid commit-gate status")
+        if not isinstance(reason, str):
+            reason = str(reason)
+        reason = reason[:512]
+        status_field = (
+            "commit_authorization_status"
+            if phase == "authorization"
+            else "commit_consumption_status"
+        )
+        with self._lock:
+            if self._corrupted:
+                raise RuntimeError(
+                    "Registry store is corrupted — refuse to update commit-gate status."
+                )
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                record = self._records.get(idempotency_key)
+                if record is None or not record.commit_gate_required:
+                    return False
+                setattr(record, status_field, status)
+                record.commit_gate_last_reason = reason
+                next_sequence = (
+                    record.commit_gate_events[-1].get("sequence", 0) + 1
+                    if record.commit_gate_events
+                    else 1
+                )
+                event = {
+                    "sequence": next_sequence,
+                    "phase": phase,
+                    "status": status,
+                    "reason": reason,
+                    "security_event": bool(security_event),
+                }
+                if not record.commit_gate_events or record.commit_gate_events[-1] != event:
+                    record.commit_gate_events.append(event)
+                    if len(record.commit_gate_events) > 128:
+                        record.commit_gate_events = record.commit_gate_events[-128:]
+                self._persist()
                 return True
             finally:
                 if flock:

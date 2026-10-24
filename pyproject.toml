@@ -70,9 +70,10 @@ raft = [
     "pysyncobj==0.3.17",
     "cryptography>=50,<51",
 ]
+ep02 = ["cryptography>=43,<51"]
 
 [tool.setuptools]
-packages = ["tenir_governance", "tenir_governance.objects", "tenir_governance.composition", "tenir_governance.membrane", "tenir_governance.operations", "tenir_governance.assessment", "tenir_kernel", "tenir_kernel.connectors", "tenir_kernel.schemas", "tenir_kernel.examples"]
+packages = ["tenir_governance", "tenir_governance.objects", "tenir_governance.composition", "tenir_governance.membrane", "tenir_governance.operations", "tenir_governance.assessment", "tenir_governance.experimental", "tenir_kernel", "tenir_kernel.connectors", "tenir_kernel.schemas", "tenir_kernel.examples"]
 include-package-data = true
 
 [tool.setuptools.package-data]
