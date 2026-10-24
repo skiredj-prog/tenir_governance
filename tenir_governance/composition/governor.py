@@ -2479,6 +2479,30 @@ class DualKernelGovernor:
                                     "operation_state": current.state.value if current else "not_found",
                                     "reason": "Reconciliation lost the terminal-state race; budget unchanged.",
                                 }
+                            # A resource-wide balance is not evidence that this operation
+                            # owns any part of it. An unowned UNKNOWN operation may
+                            # terminalize on authoritative provider no-effect evidence,
+                            # but it must not release another operation's reservation.
+                            if not current.budget_reserved and not current.budget_committed:
+                                success, _ = self.registry.transition_to(
+                                    idempotency_key, OperationState.FAILED,
+                                )
+                                if not success:
+                                    latest = self.registry.get(idempotency_key)
+                                    return {
+                                        "reconciled": False,
+                                        "idempotency_key": idempotency_key,
+                                        "operation_state": latest.state.value if latest else "not_found",
+                                        "reason": "Reconciliation transition lost; foreign budget unchanged.",
+                                    }
+                                return {
+                                    "reconciled": True,
+                                    "idempotency_key": idempotency_key,
+                                    "operation_state": OperationState.FAILED.value,
+                                    "provider_reference": recon.provider_reference,
+                                    "reason": "Provider confirmed no effect; operation held no budget reservation.",
+                                }
+                            committed = current.budget_committed
                             available_accounting = resource.consumed if committed else resource.reserved
                             if available_accounting < record.amount:
                                 return {
