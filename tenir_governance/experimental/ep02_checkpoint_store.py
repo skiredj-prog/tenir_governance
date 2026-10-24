@@ -81,19 +81,19 @@ class CheckpointStore:
 
     def _write_locked(self, current):
         """Caller must own the exclusive checkpoint file lock."""
-    payload = json.dumps(asdict(current), sort_keys=True).encode()
-    fd, tmp = tempfile.mkstemp(prefix=".checkpoint-", dir=self.path.parent)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, self.path)
-        dirfd = os.open(str(self.path.parent), os.O_RDONLY)
+        payload = json.dumps(asdict(current), sort_keys=True).encode()
+        fd, tmp = tempfile.mkstemp(prefix=".checkpoint-", dir=self.path.parent)
         try:
-            os.fsync(dirfd)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, self.path)
+            dirfd = os.open(str(self.path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dirfd)
+            finally:
+                os.close(dirfd)
         finally:
-            os.close(dirfd)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+            if os.path.exists(tmp):
+                os.unlink(tmp)
