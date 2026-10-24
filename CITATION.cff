@@ -10,7 +10,7 @@ abstract: >
   deterministic admissibility computation (S = K / (P × V + ε)), and
   cryptographically verifiable Merkle-based audit logging to provide
   model-independent governance for AI-enabled operational systems.
-  The unpublished 5.7.0 candidate builds on the 5.6.1 release, adding
+  The 5.7.0 source line builds on the published 5.6.1 release, adding
   single-host durability and fail-closed controls. Raft remains restricted
   to development/test loopback nodes while FM-20 is open.
 version: "5.7.0"
