@@ -15,7 +15,7 @@ It does not replace an LLM, an identity system, an observability stack, a policy
 [![Governance CI](https://github.com/skiredj-prog/tenir_governance/actions/workflows/tenir-ci.yml/badge.svg)](https://github.com/skiredj-prog/tenir_governance/actions/workflows/tenir-ci.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21264802.svg)](https://doi.org/10.5281/zenodo.21264802)
 
-> **v5.7.0 deployment boundary:** This is a single-host release candidate. Production use requires the documented verified deployment manifest and durable store configuration. Multi-host Raft operation is blocked; C3 cross-host fault tolerance is **not claimed**. The v5.7.0 source line is not evidence of PyPI or Zenodo release publication. See [threat model](docs/threat-model-v1.md) and [changelog](CHANGELOG.md).
+> **v5.7.0 published deployment boundary (2026-10-24):** GitHub release `v5.7.0` points to `47ef67e3efc5f3008896a7d88bebf929fa0a98f0`; version 5.7.0 is available on PyPI. Deployment is bounded to a single host and requires a verified production manifest and durable registry configuration. Production multi-host Raft is blocked while FM-20 remains open; no C3 cross-host fault tolerance or exactly-once external provider effect is claimed. Publication, CI success, and deployment qualification are distinct. The Zenodo series DOI is not a version-specific v5.7.0 archive. See [threat model](docs/threat-model-v1.md) and [changelog](CHANGELOG.md).
 
 ---
 
@@ -386,7 +386,7 @@ It does not, by itself, prove that a policy was correct, that an input was truth
 
 # Test Suite
 
-v5.3.0 contains separate validation scopes.
+The following measurements are **historical**, not results from the v5.7.0 release tag. Counts from separate test scopes must not be summed without checking overlap and collection configuration.
 
 | Suite            | Count | Scope                                           |
 | ---------------- | ----: | ----------------------------------------------- |
@@ -395,7 +395,7 @@ v5.3.0 contains separate validation scopes.
 | R4 operational  |    61 | `r4/tests/` wired UAT lane                              |
 | Repository total |   733 | Published v5.4.4 validation set (`tests/` + `r4/tests/`) |
 
-The reported coverage figure is:
+The historical reported coverage figure (not remeasured for v5.7.0) is:
 
 ```text
 96% statement coverage
@@ -585,19 +585,19 @@ Broader TENIR concepts and ontological structures may appear in research materia
 
 # Citation
 
-If you use TENIR-Gov in research or engineering work, cite the Zenodo release:
+For reproducibility, identify the software version and exact Git tag or commit. The DOI below is an **all-versions concept DOI**, not a v5.7.0-specific archive:
 
 ```text
 Skiredj, A. (2026).
 TENIR-Gov: Governance Middleware for AI-Enabled Operational Systems.
 Zenodo.
-https://doi.org/10.5281/zenodo.21277138
+https://doi.org/10.5281/zenodo.21264802
 ```
 
 DOI:
 
 ```text
-https://doi.org/10.5281/zenodo.21277138
+https://doi.org/10.5281/zenodo.21264802
 ```
 
 A machine-readable citation is also provided through `CITATION.cff`.
