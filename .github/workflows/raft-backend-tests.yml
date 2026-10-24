@@ -16,6 +16,7 @@ on:
       - "tests/test_linearizability_checker.py"
       - "tests/test_liveness.py"
       - "tests/test_hold_lifecycle.py"
+      - "tests/test_hold_ownership_adversarial.py"
       - "tests/test_sqlite_governor_crash_recovery.py"
       - "tests/test_subprocess_provenance.py"
       - "tests/test_quarantine_cross_registry.py"
@@ -37,6 +38,7 @@ on:
       - "tests/test_linearizability_checker.py"
       - "tests/test_liveness.py"
       - "tests/test_hold_lifecycle.py"
+      - "tests/test_hold_ownership_adversarial.py"
       - "tests/test_sqlite_governor_crash_recovery.py"
       - "tests/test_subprocess_provenance.py"
       - "tests/test_quarantine_cross_registry.py"
@@ -72,6 +74,8 @@ jobs:
         run: pytest -q tests/test_liveness.py
       - name: Run HOLD lifecycle regressions
         run: pytest -q tests/test_hold_lifecycle.py
+      - name: Run adversarial budget ownership regressions
+        run: pytest -q tests/test_hold_ownership_adversarial.py
       - name: Run SQLite cross-store crash recovery campaign
         run: pytest -q tests/test_sqlite_governor_crash_recovery.py
       - name: Validate subprocess source provenance and Decimal state
