@@ -29,5 +29,5 @@
   "access_right": "open",
   "related_identifiers": [],
   "communities": [],
-  "notes": "5.7.0 source-line metadata (publication status must be checked against the actual GitHub release and PyPI): Raft budget safety and deterministic state hardening. FM-20 remains open; PySyncObj transport is restricted to explicitly declared development/test environments with loopback-only peers. Production and physical multi-host Raft are unsupported. Existing DOI identifiers are preserved pending release-owner confirmation. The historic 10.5281/zenodo.21264803 article link was withheld from publication metadata pending an authoritative bibliographic check."
+  "notes": "5.7.0 source-line metadata (publication status must be checked against the actual GitHub release and PyPI): Raft budget safety and deterministic state hardening. FM-20 remains open; PySyncObj transport is restricted to explicitly declared development/test environments with loopback-only peers. Production and physical multi-host Raft are unsupported. The existing DOI 10.5281/zenodo.21277138 refers to the historical v5.6.0 archive, not to v5.7.0; the v5.6.1 archive is https://zenodo.org/records/23493054. No DOI is assigned to v5.7.0 in these source metadata. The historic 10.5281/zenodo.21264803 article link was withheld from publication metadata pending an authoritative bibliographic check."
 }
