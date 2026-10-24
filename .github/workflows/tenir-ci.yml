@@ -7,7 +7,7 @@ name: TENIR Governance CI Gate
 
 on:
   push:
-    branches: ["main", "governance/**", "r4/**", "r5/**", "sdk/**", "design/ep02-trust-versioned-commit", "test/ep02-crash-retry-characterization", "feat/ep02-durable-request-outcomes"]
+    branches: ["main", "governance/**", "r4/**", "r5/**", "sdk/**", "design/ep02-trust-versioned-commit", "test/ep02-crash-retry-characterization", "feat/ep02-durable-request-outcomes", "feat/ep02-external-monotone-cas"]
   pull_request:
     branches: ["main"]
 
@@ -224,7 +224,7 @@ jobs:
           python -m pip install -e .
           python -m pip install pytest cryptography setuptools wheel
       - name: EP-01 tests
-        run: python -m pytest tests/test_ep01_epistemic_boundary.py tests/test_ep01_canonical_schema_mapping.py tests/test_ep01_policy_experimental.py tests/test_ep01_evidence_preflight.py tests/test_ep02_trust_binding.py tests/test_ep02_signed_trust.py tests/test_ep02_bound_issuer_keys.py tests/test_ep02_rotation.py tests/test_ep02_checkpoint_store.py tests/test_ep02_checkpoint_cross_process.py tests/test_ep02_external_anchor.py tests/test_ep02_authenticated_anchor.py tests/test_ep02_local_cas.py tests/test_ep02_durable_request_cas.py -v --tb=short
+        run: python -m pytest tests/test_ep01_epistemic_boundary.py tests/test_ep01_canonical_schema_mapping.py tests/test_ep01_policy_experimental.py tests/test_ep01_evidence_preflight.py tests/test_ep02_trust_binding.py tests/test_ep02_signed_trust.py tests/test_ep02_bound_issuer_keys.py tests/test_ep02_rotation.py tests/test_ep02_checkpoint_store.py tests/test_ep02_checkpoint_cross_process.py tests/test_ep02_external_anchor.py tests/test_ep02_authenticated_anchor.py tests/test_ep02_local_cas.py tests/test_ep02_durable_request_cas.py tests/test_ep02_external_monotone_cas.py -v --tb=short
 
       - name: Verify experimental EP-02 package in wheel
         run: |
