@@ -59,7 +59,7 @@ Five critical module byte sequences were compared using Git's blob SHA-1 object 
 | `tenir_kernel/deployment_manifest.py` | `9ef9fd536eeaf427d16ac410cefd8253762b4172` |
 | `tenir_governance/operations/sqlite_backend.py` | `7becd7cd97ea9f6d847f404ee0a91c0ab20d6c68` |
 
-This is a **targeted Git-source comparison**, not a full content-equivalence assertion for all wheel files.
+**Extended post-audit check:** all 66 wheel Python/JSON files now have exact Git blob identity with tag `v5.7.0` and byte-equal matches in the source distribution. This does not claim byte-identity for packaging-generated metadata, the license, or non-JSON deployment manifest.
 
 Wheel `METADATA`: package `tenir-governance`, version `5.7.0`, Python `>=3.10`, SPDX `Apache-2.0`, extras `api`, `r5`, `test`, `raft`, `ep02`. The DOI URL is clearly labelled **all versions**.
 
