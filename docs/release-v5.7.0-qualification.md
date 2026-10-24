@@ -18,6 +18,7 @@ Status: **NO-GO for tagging/publishing pending final verification**. This docume
 | PR #52 Raft and packaging preflight (incl. pip-audit) | https://github.com/skiredj-prog/tenir_governance/actions/runs/40114242341 | Success on PR head after rerun |
 | PR #53 Governance CI | https://github.com/skiredj-prog/tenir_governance/actions/runs/40116420411 | Success on final PR head |
 | PR #53 Raft/packaging | https://github.com/skiredj-prog/tenir_governance/actions/runs/40116420215 | Success on final PR head |
+| PR #54 Governance CI (qualification record) | https://github.com/skiredj-prog/tenir_governance/actions/runs/40118075516 | Success on documentation PR head before this evidence-only edit |
 | On-main source and metadata | `pyproject.toml`, `CHANGELOG.md`, `CITATION.cff`, `.zenodo.json`, `README.md` | Version/claims aligned by source inspection |
 | Release workflow gate | `.github/workflows/release.yml` | Tag `v*` triggers checks, artifact build, and downstream PyPI Trusted Publishing |
 | Main push CI at exact merge SHA | GitHub Actions push run(s) for `992a42c2...` | **USER-OBSERVED SUCCESS**: operator reported all GitHub Actions checks green on main (2026-10-24); exact run URLs and independent API verification not yet captured |
