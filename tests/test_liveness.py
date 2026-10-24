@@ -674,3 +674,107 @@ class TestLinearizabilityWithLiveness:
         assert state.committed == len(committed) * 10, \
             f"committed={state.committed}, expected {len(committed) * 10}"
         assert state.reserved == 0, f"reserved should be 0 after all commits, got {state.reserved}"
+
+class SimulatedRefundCrash(BaseException):
+    """Model abrupt process termination without ordinary exception cleanup."""
+
+
+def _committed_refund_reservation(tmp_path):
+    backend = SingleHostLockBackend(str(tmp_path))
+    backend.register_resource("refund-budget", Decimal("100"))
+    reservation = backend.reserve("refund-key", Decimal("10"), "refund-budget")
+    assert reservation.status == "RESERVED"
+    assert backend.commit(reservation.reservation_id).status == "COMMITTED"
+    return backend, reservation.reservation_id
+
+
+def test_refund_is_durable_and_idempotent(tmp_path):
+    backend, reservation_id = _committed_refund_reservation(tmp_path)
+
+    first = backend.refund(reservation_id)
+    replay = backend.refund(reservation_id)
+
+    assert first.status == "REFUNDED"
+    assert replay.status == "ALREADY_REFUNDED"
+    state = backend.get_state("refund-budget")
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("0")
+    reservation = next(
+        item for item in state.reservations
+        if item["reservation_id"] == reservation_id
+    )
+    assert reservation["state"] == "REFUNDED"
+
+
+def test_crash_after_refund_budget_write_recovers_without_double_refund(
+    tmp_path, monkeypatch,
+):
+    backend, reservation_id = _committed_refund_reservation(tmp_path)
+
+    def crash_before_reservation_registry_write(_reservations):
+        raise SimulatedRefundCrash("crash after durable budget refund")
+
+    monkeypatch.setattr(
+        backend, "_persist_reservations", crash_before_reservation_registry_write,
+    )
+    with pytest.raises(SimulatedRefundCrash):
+        backend.refund(reservation_id)
+
+    reopened = SingleHostLockBackend(str(tmp_path))
+    state = reopened.get_state("refund-budget")
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("0")
+    reservation = next(
+        item for item in state.reservations
+        if item["reservation_id"] == reservation_id
+    )
+    assert reservation["state"] == "REFUNDED"
+    assert reopened.refund(reservation_id).status == "ALREADY_REFUNDED"
+    final_state = reopened.get_state("refund-budget")
+    assert final_state.reserved == Decimal("0")
+    assert final_state.committed == Decimal("0")
+
+
+def test_operation_record_persists_backend_reservation_identity(tmp_path):
+    """Recovery must bind registry ownership to one durable backend reservation."""
+    from tenir_governance.operations.registry import (
+        DurableOperationRegistry,
+        OperationRecord,
+        OperationState,
+    )
+
+    registry = DurableOperationRegistry(str(tmp_path / "operations.json"))
+    record = OperationRecord(
+        idempotency_key="op-ownership-1",
+        passage_id="passage-1",
+        agent_id="agent-1",
+        action_type="transfer",
+        amount=10.0,
+        resource_id="refund-budget",
+        state=OperationState.RESERVED,
+        budget_reserved=True,
+        reservation_id="backend-reservation-123",
+    )
+    assert registry.register(record)
+
+    reopened = DurableOperationRegistry(str(tmp_path / "operations.json"))
+    recovered = reopened.get("op-ownership-1")
+    assert recovered is not None
+    assert recovered.reservation_id == "backend-reservation-123"
+    assert recovered.budget_reserved is True
+
+
+def test_release_is_durable_and_idempotent(tmp_path):
+    backend = SingleHostLockBackend(str(tmp_path))
+    backend.register_resource("release-budget", Decimal("20"))
+    reservation = backend.reserve("release-key", Decimal("7"), "release-budget")
+    assert reservation.status == "RESERVED"
+
+    first = backend.release(reservation.reservation_id)
+    replay = backend.release(reservation.reservation_id)
+
+    assert first.status == "RELEASED"
+    assert replay.status == "ALREADY_RELEASED"
+    state = backend.get_state("release-budget")
+    assert state.reserved == Decimal("0")
+    assert state.committed == Decimal("0")

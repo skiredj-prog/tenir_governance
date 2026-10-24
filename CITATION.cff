@@ -10,10 +10,10 @@ abstract: >
   deterministic admissibility computation (S = K / (P × V + ε)), and
   cryptographically verifiable Merkle-based audit logging to provide
   model-independent governance for AI-enabled operational systems.
-  Release 5.6.1 consolidates deterministic Raft accounting and I8 budget
-  safety. The PySyncObj transport is experimental and is blocked for
-  production and remote peers while FM-20 remains open.
-version: "5.6.1"
+  The unpublished 5.7.0 candidate builds on the 5.6.1 release, adding
+  single-host durability and fail-closed controls. Raft remains restricted
+  to development/test loopback nodes while FM-20 is open.
+version: "5.7.0"
 license: Apache-2.0
 repository-code: "https://github.com/skiredj-prog/tenir_governance"
 doi: 10.5281/zenodo.21277138

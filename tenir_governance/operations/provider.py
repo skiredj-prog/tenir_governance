@@ -71,6 +71,7 @@ class DispatchResult:
     raw_response: dict[str, Any] = field(default_factory=dict)
     error: str = ""
     latency_ms: float = 0.0
+    safety_signals: list[str] = field(default_factory=list)
 
     @property
     def is_terminal(self) -> bool:
@@ -95,6 +96,7 @@ class ReconciliationResult:
     provider_reference: str = ""
     raw_response: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    safety_signals: list[str] = field(default_factory=list)
 
 
 @runtime_checkable

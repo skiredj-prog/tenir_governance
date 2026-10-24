@@ -14,10 +14,6 @@ import time
 
 import pytest
 
-# The coordinator preserves Decimal precision. These small integer-boundary
-# subprocess fixtures print JSON numbers for transport only; exact Decimal
-# precision is independently verified in dedicated arithmetic regressions.
-
 
 def _run_subprocess_worker(store_path, resource_id, key, amount, action, capacity):
     """Run a worker in a subprocess that performs a budget operation."""
@@ -40,7 +36,7 @@ if {repr(resource_id)} not in coord._resources:
 action = {repr(action)}
 if action == 'reserve':
     result = coord.reserve({repr(resource_id)}, {amount}.0)
-    print(f"RESERVE:{result}")
+    print(f"RESERVE:{{result}}")
 elif action == 'commit':
     result = coord.commit({repr(resource_id)}, {amount}.0)
     print(f"COMMIT:{{result}}")
@@ -49,7 +45,8 @@ elif action == 'release':
     print("RELEASE:done")
 elif action == 'state':
     state = coord.get_state({repr(resource_id)})
-    print(f"STATE:{{json.dumps(state, default=float)}}")
+    printable = {{k: float(v) if hasattr(v, "as_tuple") else v for k, v in state.items()}}
+    print(f"STATE:{{json.dumps(printable)}}")
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -81,7 +78,7 @@ class R:
 coord.register(R())
 print("REGISTERED")
 """
-        subprocess.run([sys.executable, "-c", worker_script], capture_output=True, timeout=10)
+        subprocess.run([sys.executable, "-c", worker_script], capture_output=True, timeout=10, check=True)
 
         # Two processes reserve 80 each (capacity is 100, only one should succeed)
         script = f"""
@@ -112,7 +109,7 @@ sys.path.insert(0, {repr(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 from tenir_governance.operations.budget import DurableBudgetCoordinator
 coord = DurableBudgetCoordinator({repr(store)})
 state = coord.get_state('res1')
-print(json.dumps(state, default=float))
+print(json.dumps({{k: float(v) if hasattr(v, "as_tuple") else v for k, v in state.items()}}))
 """
         result = subprocess.run([sys.executable, "-c", state_script], capture_output=True, text=True, timeout=10)
         state = json.loads(result.stdout.strip())
@@ -141,7 +138,7 @@ class R:
 coord.register(R())
 print("OK")
 """
-        subprocess.run([sys.executable, "-c", worker_script], capture_output=True, timeout=10)
+        subprocess.run([sys.executable, "-c", worker_script], capture_output=True, timeout=10, check=True)
 
         # 5 processes each reserve 20 (total 100, exactly fits)
         processes = []
@@ -159,8 +156,12 @@ print(f"{{result}}")
 
         results = []
         for p in processes:
-            out, _ = p.communicate(timeout=10)
-            results.append("True" in out.decode().strip())
+            out, err = p.communicate(timeout=10)
+            assert p.returncode == 0, (
+                f"Reservation worker exited {p.returncode}: "
+                f"stdout={out.decode()!r}; stderr={err.decode()!r}"
+            )
+            results.append(out.decode().strip() == "True")
 
         # All 5 should succeed (5 * 20 = 100 = capacity)
         assert all(results), f"Some reservations failed: {results}"
@@ -172,7 +173,7 @@ sys.path.insert(0, {repr(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 from tenir_governance.operations.budget import DurableBudgetCoordinator
 coord = DurableBudgetCoordinator({repr(store)})
 state = coord.get_state('res1')
-print(json.dumps(state, default=float))
+print(json.dumps({{k: float(v) if hasattr(v, "as_tuple") else v for k, v in state.items()}}))
 """
         result = subprocess.run([sys.executable, "-c", state_script], capture_output=True, text=True, timeout=10)
         state = json.loads(result.stdout.strip())
@@ -212,7 +213,7 @@ r = coord.commit('res1', 40.0)
 print(f"COMMIT:{{r}}")
 state = coord.get_state('res1')
 import json
-print(f"STATE:{{json.dumps(state, default=float)}}")
+print(f"STATE:{{json.dumps({{k: float(v) if hasattr(v, 'as_tuple') else v for k, v in state.items()}})}}")
 """
         result = subprocess.run([sys.executable, "-c", commit_script], capture_output=True, text=True, timeout=10)
         assert "True" in result.stdout
@@ -291,7 +292,7 @@ sys.path.insert(0, {repr(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 from tenir_governance.operations.budget import DurableBudgetCoordinator
 coord = DurableBudgetCoordinator({repr(store)})
 state = coord.get_state('res1')
-print(json.dumps(state, default=float))
+print(json.dumps({{k: float(v) if hasattr(v, "as_tuple") else v for k, v in state.items()}}))
 """
         result = subprocess.run([sys.executable, "-c", state_script], capture_output=True, text=True, timeout=10)
         state = json.loads(result.stdout.strip())

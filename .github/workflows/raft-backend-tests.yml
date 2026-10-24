@@ -16,6 +16,10 @@ on:
       - "tests/test_linearizability_checker.py"
       - "tests/test_liveness.py"
       - "tests/test_hold_lifecycle.py"
+      - "tests/test_sqlite_governor_crash_recovery.py"
+      - "tests/test_subprocess_provenance.py"
+      - "tests/test_quarantine_cross_registry.py"
+      - "tests/test_ep02_governor_commit_gate.py"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
   push:
@@ -33,6 +37,10 @@ on:
       - "tests/test_linearizability_checker.py"
       - "tests/test_liveness.py"
       - "tests/test_hold_lifecycle.py"
+      - "tests/test_sqlite_governor_crash_recovery.py"
+      - "tests/test_subprocess_provenance.py"
+      - "tests/test_quarantine_cross_registry.py"
+      - "tests/test_ep02_governor_commit_gate.py"
       - ".github/workflows/raft-backend-tests.yml"
       - "pyproject.toml"
 
@@ -50,7 +58,7 @@ jobs:
       - name: Install package and test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[test,raft]"
+          python -m pip install -e ".[test,raft,ep02]"
           python -m pip check
       - name: Run Raft regression suite
         run: pytest -q tests/test_raft_backend.py
@@ -64,6 +72,14 @@ jobs:
         run: pytest -q tests/test_liveness.py
       - name: Run HOLD lifecycle regressions
         run: pytest -q tests/test_hold_lifecycle.py
+      - name: Run SQLite cross-store crash recovery campaign
+        run: pytest -q tests/test_sqlite_governor_crash_recovery.py
+      - name: Validate subprocess source provenance and Decimal state
+        run: pytest -q tests/test_subprocess_provenance.py
+      - name: Test atomic interprocess quarantine and verified unlock
+        run: pytest -q tests/test_quarantine_cross_registry.py
+      - name: Test Profile S governor gate with shared quarantine and durable settlement
+        run: pytest -q tests/test_ep02_governor_commit_gate.py
 
   packaging-preflight:
     name: Python 3.12 packaging preflight (no publishing)
@@ -87,15 +103,15 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import tomllib
-          assert tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"] == "5.6.1"
-          print("Preflight candidate version 5.6.1 confirmed; no tag/publish")
+          assert tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"] == "5.7.0"
+          print("Preflight candidate version 5.7.0 confirmed; no tag/publish")
           PY
       - name: Install test and build tools
         run: python -m pip install --upgrade pip build twine
 
       - name: Install project with test dependencies
         run: |
-          python -m pip install -e ".[test,raft]"
+          python -m pip install -e ".[api,test,raft]"
           python -m pip check
 
       - name: Verify Raft tests run with explicitly declared non-production scope

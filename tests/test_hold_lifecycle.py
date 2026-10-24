@@ -17,6 +17,8 @@ Tests cover:
     5. τ_K temporal validity bound checking
     6. Exit receipts
 """
+import time
+
 import pytest
 from tenir_governance.operations import (
     DurableOperationRegistry, OperationRecord, OperationState,
@@ -43,6 +45,234 @@ def _setup_governor(budget_capacity=100.0, policy=None, registry=None):
     scoring = ScoringKernelAdapter(tenir_kernel)
     membrane = TransitionMembrane(state)
     return DualKernelGovernor(scoring, membrane, policy=policy, registry=registry), state
+
+
+def _identity_hold_fixture(payload=None):
+    """Create a pending HOLD with immutable, durably recorded action identity."""
+    from tenir_governance.operations.payload_binding import canonical_payload_hash
+
+    gov, _ = _setup_governor()
+    original = Passage(
+        passage_id="hold-identity-passage-1",
+        idempotency_key="hold-identity-operation-1",
+        agent_id="alice",
+        action_type="payment",
+    )
+    assert gov.registry.register(OperationRecord(
+        idempotency_key=original.idempotency_key,
+        passage_id=original.passage_id,
+        agent_id=original.agent_id,
+        action_type=original.action_type,
+        payload_hash=canonical_payload_hash(payload),
+    ))
+    assert gov.hold_manager.enter_hold(original.idempotency_key, tau_k_seconds=3600)["entered"]
+
+    class AlwaysPassScoring:
+        def adjudicate(self, **kwargs):
+            return {"decision": Decision.PASS.value, "rationale": "controlled fixture"}
+
+    gov.scoring = AlwaysPassScoring()
+    return gov, original
+
+
+def _resolve_identity_hold(gov, key, passage, **kwargs):
+    return gov.resolve_hold(
+        key, passage=passage,
+        authority=0.9, context_fit=0.9, evidence_quality=0.9,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("overrides,field", [
+    ({"idempotency_key": "forged-operation"}, "idempotency_key"),
+    ({"passage_id": "forged-passage"}, "passage_id"),
+    ({"agent_id": "bob"}, "agent_id"),
+    ({"action_type": "infrastructure_change"}, "action_type"),
+])
+def test_hold_rejects_substituted_durable_identity_without_mutation(overrides, field):
+    gov, original = _identity_hold_fixture()
+    identity = {
+        "idempotency_key": original.idempotency_key,
+        "passage_id": original.passage_id,
+        "agent_id": original.agent_id,
+        "action_type": original.action_type,
+    }
+    identity.update(overrides)
+    attempted = Passage(**identity)
+    result = _resolve_identity_hold(gov, original.idempotency_key, attempted)
+
+    assert result["hold_resolved"] is False
+    assert result["operation_state"] == OperationState.HOLD.value
+    assert field in result["reason"]
+    assert gov.registry.get(original.idempotency_key).state == OperationState.HOLD
+    assert attempted.idempotency_key == identity["idempotency_key"]
+    assert gov.ledger.verify_chain()
+
+
+@pytest.mark.parametrize("supplied_payload", [
+    None,
+    {"beneficiary": "mallory", "amount": 10},
+    {"beneficiary": "bob", "amount": 10, "extra": "unapproved"},
+])
+def test_hold_rejects_missing_or_changed_authorized_payload(supplied_payload):
+    authorized_payload = {"beneficiary": "bob", "amount": 10}
+    gov, original = _identity_hold_fixture(payload=authorized_payload)
+    result = _resolve_identity_hold(
+        gov, original.idempotency_key, original, payload=supplied_payload,
+    )
+
+    assert result["hold_resolved"] is False
+    assert result["operation_state"] == OperationState.HOLD.value
+    assert "payload mismatch" in result["reason"]
+    assert gov.registry.get(original.idempotency_key).state == OperationState.HOLD
+    assert gov.ledger.verify_chain()
+
+
+def test_hold_matching_payload_and_identity_re_adjudicates_normally():
+    authorized_payload = {"beneficiary": "bob", "amount": 10}
+    gov, original = _identity_hold_fixture(payload=authorized_payload)
+    result = _resolve_identity_hold(
+        gov, original.idempotency_key, original,
+        payload={"amount": 10, "beneficiary": "bob"},
+    )
+
+    assert result["hold_resolved"] is True
+    assert result["operation_state"] == OperationState.RESERVED.value
+    assert gov.registry.get(original.idempotency_key).state == OperationState.RESERVED
+
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_failed_escalation_does_not_leave_false_exit_metadata(monkeypatch, tmp_path, persistent):
+    """A losing HOLD -> ESCALATED race must not persist an escalation marker."""
+    store_path = tmp_path / "escalation.json" if persistent else None
+    reg = DurableOperationRegistry(str(store_path) if store_path else None)
+    key = "hold-escalation-lost-race"
+    assert reg.register(OperationRecord(
+        idempotency_key=key, passage_id="p-race",
+        agent_id="alice", action_type="payment",
+    ))
+    hm = HoldManager(reg)
+    assert hm.enter_hold(key, tau_k_seconds=3600)["entered"]
+    original = reg.transition_to
+
+    def lose_race(idempotency_key, target, *args, **kwargs):
+        if target == OperationState.ESCALATED:
+            # Another worker wins HOLD -> FAILED before this transition.
+            assert original(idempotency_key, OperationState.FAILED)[0]
+            return False, OperationState.FAILED
+        return original(idempotency_key, target, *args, **kwargs)
+
+    monkeypatch.setattr(reg, "transition_to", lose_race)
+    result = hm.escalate_hold(key, escalated_by="risk-officer")
+
+    assert result["escalated"] is False
+    assert result["operation_state"] == OperationState.FAILED.value
+    final = reg.get(key)
+    assert final.state == OperationState.FAILED
+    assert final.hold_record.exit_reason != "escalated"
+    assert not final.hold_record.escalated_at
+    if store_path:
+        persisted = DurableOperationRegistry(str(store_path)).get(key)
+        assert persisted.state == OperationState.FAILED
+        assert persisted.hold_record.exit_reason != "escalated"
+        assert not persisted.hold_record.escalated_at
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_failed_authorized_exit_does_not_leave_false_receipt(monkeypatch, tmp_path, persistent):
+    """A losing ESCALATED exit must not leave an authorization receipt."""
+    store_path = tmp_path / "authorized-exit.json" if persistent else None
+    reg = DurableOperationRegistry(str(store_path) if store_path else None)
+    key = "hold-authorization-lost-race"
+    assert reg.register(OperationRecord(
+        idempotency_key=key, passage_id="p-race",
+        agent_id="alice", action_type="payment",
+    ))
+    hm = HoldManager(reg)
+    assert hm.enter_hold(key, tau_k_seconds=3600)["entered"]
+    assert hm.escalate_hold(key, escalated_by="risk-officer")["escalated"]
+    original = reg.transition_to
+
+    def lose_race(idempotency_key, target, *args, **kwargs):
+        if target == OperationState.HOLD:
+            assert original(idempotency_key, OperationState.UNKNOWN)[0]
+            return False, OperationState.UNKNOWN
+        return original(idempotency_key, target, *args, **kwargs)
+
+    monkeypatch.setattr(reg, "transition_to", lose_race)
+    result = hm.authorize_exit(
+        key, authorized_by="officer-1", scope="payment",
+        authorization="ceremony-G-R5-001", approve=True,
+    )
+
+    assert result["exited"] is False
+    assert result["operation_state"] == OperationState.UNKNOWN.value
+    assert result["exit_receipt"] is None
+    final = reg.get(key)
+    assert final.state == OperationState.UNKNOWN
+    assert final.hold_record.exit_reason != "authorized_exit"
+    assert final.hold_record.exit_receipt is None
+    if store_path:
+        persisted = DurableOperationRegistry(str(store_path)).get(key)
+        assert persisted.state == OperationState.UNKNOWN
+        assert persisted.hold_record.exit_reason != "authorized_exit"
+        assert persisted.hold_record.exit_receipt is None
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_failed_transition_write_keeps_state_and_hold_metadata_paired(monkeypatch, tmp_path, persistent):
+    """A failed registry write must not leave an in-memory half transition."""
+    store_path = tmp_path / "failed-write.json" if persistent else None
+    reg = DurableOperationRegistry(str(store_path) if store_path else None)
+    key = "hold-escalation-write-failure"
+    assert reg.register(OperationRecord(
+        idempotency_key=key, passage_id="p-write-failure",
+        agent_id="alice", action_type="payment",
+    ))
+    hm = HoldManager(reg)
+    assert hm.enter_hold(key, tau_k_seconds=3600)["entered"]
+
+    def fail_persist():
+        raise OSError("simulated failure before durable replacement")
+
+    monkeypatch.setattr(reg, "_persist", fail_persist)
+    with pytest.raises(OSError, match="simulated failure"):
+        hm.escalate_hold(key, escalated_by="risk-officer")
+
+    final = reg.get(key)
+    assert final.state == OperationState.HOLD
+    assert final.hold_record.exit_reason == ""
+    assert final.hold_record.escalated_at == ""
+    if store_path:
+        persisted = DurableOperationRegistry(str(store_path)).get(key)
+        assert persisted.state == OperationState.HOLD
+        assert persisted.hold_record.exit_reason == ""
+        assert persisted.hold_record.escalated_at == ""
+
+
+def test_durable_registry_reload_uses_newer_hold_metadata_from_disk(tmp_path):
+    """A warm registry instance must not mask another instance's commit."""
+    store_path = tmp_path / "shared-registry.json"
+    first = DurableOperationRegistry(str(store_path))
+    second = DurableOperationRegistry(str(store_path))
+    key = "hold-metadata-second-reader"
+    assert first.register(OperationRecord(
+        idempotency_key=key, passage_id="p-shared",
+        agent_id="alice", action_type="payment",
+    ))
+    first_hold = HoldManager(first)
+    second.get(key)  # Cache the pre-HOLD record in the second instance.
+
+    assert first_hold.enter_hold(key, tau_k_seconds=3600)["entered"]
+    assert second.get(key).state == OperationState.HOLD
+    assert first_hold.escalate_hold(key, escalated_by="risk-officer")["escalated"]
+
+    reloaded = second.get(key)
+    assert reloaded.state == OperationState.ESCALATED
+    assert reloaded.hold_record.exit_reason == "escalated"
+    assert reloaded.hold_record.escalated_by == "risk-officer"
+
 
 
 # ── HOLD Lifecycle Tests ─────────────────────────────────────────────
@@ -210,7 +440,7 @@ class TestHoldLifecycle:
         assert record.hold_record.escalated_at != ""
         assert record.hold_record.exit_reason == "escalated"
 
-    def test_hold_manager_expire_hold(self):
+    def test_hold_manager_expire_hold(self, monkeypatch):
         """HoldManager.expire_hold() transitions HOLD → FAILED (fail-closed)."""
         reg = DurableOperationRegistry()
         rec = OperationRecord(
@@ -220,6 +450,10 @@ class TestHoldLifecycle:
         reg.register(rec)
         hm = HoldManager(reg)
         hm.enter_hold("op-hold-6", tau_k_seconds=300)
+        # Expiry is now enforced against τ_K; make the operation older than
+        # its bound instead of assuming that calling expire_hold forces it.
+        from tenir_governance.operations import hold as hold_module
+        monkeypatch.setattr(hold_module, "_utc_now_seconds", lambda: time.time() + 301)
         result = hm.expire_hold("op-hold-6")
         assert result["expired"] is True
         assert result["operation_state"] == OperationState.FAILED.value
@@ -254,7 +488,7 @@ class TestAuthorizedExit:
     """Test authorized exit from ESCALATED state with ExitReceipt."""
 
     def test_authorize_exit_approved(self):
-        """authorize_exit(approve=True) transitions ESCALATED → RESERVED."""
+        """authorize_exit records approval at HOLD pending fresh admission checks."""
         reg = DurableOperationRegistry()
         rec = OperationRecord(
             idempotency_key="op-exit-1", passage_id="p1",
@@ -273,7 +507,7 @@ class TestAuthorizedExit:
             approve=True,
         )
         assert result["exited"] is True
-        assert result["operation_state"] == OperationState.RESERVED.value
+        assert result["operation_state"] == OperationState.HOLD.value
         assert result["exit_receipt"] is not None
         assert result["exit_receipt"]["authorized_by"] == "operator@org"
         assert result["exit_receipt"]["authorization"] == "ceremony-G-R5-001"
@@ -448,7 +682,8 @@ class TestGovernorHoldLifecycle:
         gov.hold_manager.enter_hold("op-hold-test-1", tau_k_seconds=300)
 
         # Now resolve with better evidence (capacity must be in [0, 1])
-        p3 = Passage(agent_id="alice", action_type="payment", amount=10.0,
+        p3 = Passage(passage_id=rec.passage_id,
+                      agent_id="alice", action_type="payment", amount=10.0,
                       idempotency_key="op-hold-test-1")
         r2 = gov.resolve_hold(
             "op-hold-test-1",
@@ -473,6 +708,7 @@ class TestGovernorHoldLifecycle:
         gov.registry.register(rec)
         gov.hold_manager.enter_hold(key, tau_k_seconds=300)
         passage = Passage(
+            passage_id=rec.passage_id,
             agent_id="alice", action_type="payment", amount=10.0,
             idempotency_key=key,
         )
@@ -548,7 +784,7 @@ class TestGovernorHoldLifecycle:
         assert result["operation_state"] == OperationState.ESCALATED.value
 
     def test_governor_authorize_exit(self):
-        """Governor.authorize_exit() transitions ESCALATED → RESERVED."""
+        """Governor.authorize_exit() returns to HOLD pending fresh adjudication."""
         gov, state = _setup_governor()
         from tenir_governance.operations import OperationRecord
         rec = OperationRecord(
@@ -566,9 +802,9 @@ class TestGovernorHoldLifecycle:
             approve=True,
         )
         assert result["exited"] is True
-        assert result["operation_state"] == OperationState.RESERVED.value
+        assert result["operation_state"] == OperationState.HOLD.value
 
-    def test_governor_expire_hold(self):
+    def test_governor_expire_hold(self, monkeypatch):
         """Governor.expire_hold() transitions HOLD → FAILED (fail-closed)."""
         gov, state = _setup_governor()
         from tenir_governance.operations import OperationRecord
@@ -578,9 +814,32 @@ class TestGovernorHoldLifecycle:
         )
         gov.registry.register(rec)
         gov.hold_manager.enter_hold("op-hold-test-4", tau_k_seconds=300)
+        from tenir_governance.operations import hold as hold_module
+        monkeypatch.setattr(hold_module, "_utc_now_seconds", lambda: time.time() + 301)
         result = gov.expire_hold("op-hold-test-4")
         assert result["expired"] is True
         assert result["operation_state"] == OperationState.FAILED.value
+
+    def test_governor_expire_hold_refuses_before_tau_k(self):
+        """A caller cannot force a HOLD exit before its explicit τ_K bound."""
+        gov, _state = _setup_governor()
+        rec = OperationRecord(
+            idempotency_key="op-hold-too-early",
+            passage_id="p-hold-too-early",
+            agent_id="alice",
+            action_type="payment",
+        )
+        assert gov.registry.register(rec)
+        assert gov.hold_manager.enter_hold(
+            "op-hold-too-early", tau_k_seconds=3600,
+        )["entered"]
+
+        result = gov.expire_hold("op-hold-too-early")
+
+        assert result["expired"] is False
+        latest = gov.registry.get("op-hold-too-early")
+        assert latest.state == OperationState.HOLD
+        assert latest.hold_record.exit_reason == ""
 
     def test_governor_resume_existing_hold(self):
         """resume_existing() returns resolve_or_escalate for HOLD operations."""
@@ -647,6 +906,22 @@ class TestGovernorHoldLifecycle:
         assert hold_entries[0]["recommendation"] == "resolve_or_escalate"
 
 
+# Test-only trusted verifier. A ceremony label is *not* authentication
+# in the production default, which refuses unconfigured release.
+def _test_quarantine_release_verifier(
+    *, authorized_by, scope, authorization, reason, lock_id,
+):
+    if authorization != "ceremony-G-R5-001":
+        return None
+    return {
+        "authorized": True,
+        "principal": authorized_by,
+        "scope": scope,
+        "lock_id": lock_id,
+        "authorization_id": "controlled-fixture-" + lock_id,
+    }
+
+
 # ── QUARANTINE_LOCK Tests ────────────────────────────────────────────
 
 class TestQuarantineLock:
@@ -675,7 +950,7 @@ class TestQuarantineLock:
 
     def test_release_quarantine_authenticated(self):
         """release_quarantine() requires authenticated authorization."""
-        state = MembraneState()
+        state = MembraneState(quarantine_release_verifier=_test_quarantine_release_verifier)
         membrane = TransitionMembrane(state)
         membrane.lock_quarantine(locked_by="admin@org")
         result = membrane.release_quarantine(
@@ -705,7 +980,7 @@ class TestQuarantineLock:
 
     def test_quarantine_release_receipt_preserved(self):
         """Quarantine release receipt is preserved after release."""
-        state = MembraneState()
+        state = MembraneState(quarantine_release_verifier=_test_quarantine_release_verifier)
         membrane = TransitionMembrane(state)
         membrane.lock_quarantine(locked_by="admin@org")
         membrane.release_quarantine(
@@ -719,7 +994,7 @@ class TestQuarantineLock:
 
     def test_quarantine_does_not_block_after_release(self):
         """After release, admission is allowed again."""
-        state = MembraneState()
+        state = MembraneState(quarantine_release_verifier=_test_quarantine_release_verifier)
         state.register_agent(Agent(agent_id="alice", authority_score=0.9,
                                     trusted_delegates=frozenset()))
         state.register_resource(Resource(resource_id="budget", capacity=100.0))
@@ -928,14 +1203,14 @@ class TestHoldStateTransitions:
         reg.transition_to("op-1", OperationState.HOLD)
         assert reg.transition_to("op-1", OperationState.ESCALATED)[0]
 
-    def test_escalated_to_reserved(self):
+    def test_escalated_to_hold_before_fresh_admission(self):
         reg = DurableOperationRegistry()
         rec = OperationRecord(idempotency_key="op-1", passage_id="p1",
                               agent_id="alice", action_type="payment")
         reg.register(rec)
         reg.transition_to("op-1", OperationState.HOLD)
         reg.transition_to("op-1", OperationState.ESCALATED)
-        assert reg.transition_to("op-1", OperationState.RESERVED)[0]
+        assert reg.transition_to("op-1", OperationState.HOLD)[0]
 
     def test_escalated_to_failed(self):
         reg = DurableOperationRegistry()
@@ -990,7 +1265,7 @@ class TestHoldStateTransitions:
         assert OperationState.RESERVED.is_holding is False
 
     def test_escalated_is_not_terminal(self):
-        """ESCALATED is NOT terminal — it can transition to RESERVED/FAILED/UNKNOWN."""
+        """ESCALATED can leave for HOLD, FAILED, or UNKNOWN; admission is separate."""
         assert OperationState.ESCALATED.is_terminal is False
 
     def test_hold_may_not_have_been_dispatched(self):
@@ -1038,7 +1313,7 @@ class TestHoldPersistence:
         hm.enter_hold("op-persist-2", tau_k_seconds=300)
         hm.escalate_hold("op-persist-2", escalated_by="risk-officer")
 
-        # Authorized exit (transitions ESCALATED → RESERVED, persists receipt)
+        # Authorized exit (transitions ESCALATED → HOLD, persists receipt)
         hm.authorize_exit(
             "op-persist-2",
             authorized_by="operator@org",

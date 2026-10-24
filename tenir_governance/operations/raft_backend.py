@@ -1,13 +1,9 @@
-"""RaftConsensusBackend — experimental loopback-only Raft (pysyncobj).
+"""Optional Raft adapter, blocked for production in the v5.7 release line.
 
-FM-20: PySyncObj uses unsafe pickle transport. In 5.6.1 the backend only
-starts with an explicit development/test environment and loopback addresses.
-This is not approved for production or physical multi-host deployment.
-
-This module provides a multi-host ConsensusBackend adapter that uses the Raft
-consensus algorithm (via pysyncobj) for replicated state. It implements the
-same ConsensusBackend interface as SingleHostLockBackend but provides true
-cross-host fault tolerance (C3).
+This module provides a Raft ConsensusBackend adapter using pysyncobj. It is
+available for explicitly declared development and integration tests only while
+FM-20 remains open. v5.7 blocks production, staging, unspecified environments,
+remote node addresses and the multi-host deployment scope.
 
 Architecture:
     - Budget state (capacity, reserved, committed) is replicated across all
@@ -19,11 +15,11 @@ Architecture:
     - get_state() reads local replicated state (eventually consistent on
       followers, linearizable on leader).
 
-Conformance:
-    C1 (safety): ✓ — Raft provides linearizability for committed commands
-    I8 (budget): ✓ — enforced on leader before replication
-    C2 (liveness): ✓ — operations terminate under healthy quorum
-    C3 (fault tolerance): ✓ — tolerates f crash-stops with n ≥ 2f+1
+Intended properties (not production approval):
+    C1 (safety): tested on local loopback clusters
+    I8 (budget): enforced in the replicated state machine
+    C2 (liveness): conditional on a healthy quorum
+    C3 (fault tolerance): crash-stop behavior tested on local loopback clusters
 
 Requirements:
     pip install pysyncobj
@@ -33,13 +29,14 @@ Limitations:
     - Network partitions: safety maintained, liveness requires quorum
     - reconcile() depends on provider availability
     - pysyncobj uses pickle for serialization (not cryptographically signed)
+    - v5.7 requires explicit development/test and loopback-only endpoints.
+      FM-20 remains open: local tests do not establish secure network transport
 """
 # Profile: agentic-governance-profile-v1.0.0
 # Compliance class: profile-bound
 from __future__ import annotations
 
 import ipaddress
-
 import json
 import os
 import threading
@@ -67,16 +64,23 @@ from tenir_governance.operations.consensus_backend import (
     ReservationResult,
     CommitResult,
     ReleaseResult,
+    RefundResult,
     ReconciliationResult,
     ConsensusState,
+)
+from tenir_governance.deployment_safety import (
+    RAFT_PRODUCTION_DISABLED_MESSAGE,
+    enforce_host_scope,
+    runtime_environment,
 )
 
 
 MAX_AMOUNT = Decimal("1000000000000000000")
+MIN_PEER_AUTH_KEY_LENGTH = 32
 
 
 def _raft_loopback_address(address):
-    """Accept explicit host:port loopback endpoints; never resolve remote DNS."""
+    """Accept only explicit loopback host:port endpoints, not remote DNS peers."""
     if not isinstance(address, str):
         return False
     host, sep, port = address.rpartition(":")
@@ -97,7 +101,7 @@ def _raft_loopback_address(address):
 
 
 def _enforce_raft_dev_loopback(self_addr, other_addrs):
-    """FM-20 fail-closed boundary before constructing a PySyncObj network."""
+    """FM-20 boundary: reject unsafe nodes before opening a PySyncObj socket."""
     declared = {
         key: value.strip().lower()
         for key in ("TENIR_ENV", "ENVIRONMENT")
@@ -107,8 +111,8 @@ def _enforce_raft_dev_loopback(self_addr, other_addrs):
         value not in ("development", "test") for value in declared.values()
     ):
         raise RuntimeError(
-            "FM-20: Raft requires an explicitly declared development/test "
-            "environment; production and unspecified environments are blocked."
+            "FM-20: Raft requires explicitly declared development/test; "
+            "missing, staging and production environments are prohibited."
         )
     scopes = {
         value.strip().lower().replace("_", "-")
@@ -116,14 +120,20 @@ def _enforce_raft_dev_loopback(self_addr, other_addrs):
         if (value := os.environ.get(key)) is not None
     }
     if any(value != "single-host" for value in scopes):
-        raise RuntimeError("FM-20: Raft multi-host scope is prohibited in v5.6.1.")
-    if not isinstance(other_addrs, (tuple, list)) or not _raft_loopback_address(self_addr) or any(
+        raise RuntimeError("FM-20: Raft multi-host scope is prohibited in v5.7.0.")
+    if not isinstance(other_addrs, (list, tuple)) or not _raft_loopback_address(self_addr) or any(
         not _raft_loopback_address(peer) for peer in other_addrs
     ):
         raise RuntimeError(
-            "FM-20: Raft endpoints must be explicit local loopback host:port "
-            "addresses; remote, wildcard and DNS peer addresses are prohibited."
+            "FM-20: Raft endpoints must use explicit loopback host:port "
+            "addresses; remote and wildcard addresses are prohibited."
         )
+
+
+def _validate_peer_auth_key(peer_auth_key):
+    if not isinstance(peer_auth_key, str) or len(peer_auth_key) < MIN_PEER_AUTH_KEY_LENGTH:
+        raise ValueError("peer_auth_key must be a shared secret of at least 32 characters")
+    return peer_auth_key
 
 
 
@@ -168,6 +178,7 @@ class _RaftStateMachine(SyncObj):
         self._key_index = {}
         self._logical_clock = 0
         self._incidents = []
+        self._compensations = {}
 
     def _tick_logical(self):
         """Advance the replicated logical clock deterministically."""
@@ -287,6 +298,31 @@ class _RaftStateMachine(SyncObj):
         return "COMMITTED"
 
     @replicated
+    def refund(self, reservation_id):
+        """Refund committed budget only after caller-side non-execution proof."""
+        if reservation_id not in self._reservations:
+            return "NOT_FOUND"
+        rec = self._reservations[reservation_id]
+        amount = self._normalize_reservation_amount(rec)
+        if amount is None:
+            return "CORRUPT_RESERVATION_STATE"
+        if rec["state"] == "REFUNDED":
+            return "ALREADY_REFUNDED"
+        if rec["state"] != "COMMITTED":
+            return "NOT_COMMITTED"
+        res = self._resources.get(rec["resource_id"])
+        if res is None:
+            return "ERROR"
+        if not self._normalize_resource_values(res):
+            return "CORRUPT_RESOURCE_STATE"
+        if res["committed"] < amount:
+            return "INCONSISTENT_COMMITTED_AMOUNT"
+        res["committed"] = _decimal_subtract(res["committed"], amount)
+        rec["state"] = "REFUNDED"
+        rec["refunded_at_logical"] = self._tick_logical()
+        return "REFUNDED"
+
+    @replicated
     def release(self, reservation_id):
         if reservation_id not in self._reservations:
             return "NOT_FOUND"
@@ -296,7 +332,8 @@ class _RaftStateMachine(SyncObj):
             return "CORRUPT_RESERVATION_STATE"
         if rec["state"] == "COMMITTED":
             return "ALREADY_COMMITTED"
-        if rec["state"] not in ("RESERVED", "UNKNOWN"):
+        if rec["state"] != "RESERVED":
+            # UNKNOWN is ambiguous; release requires verified RESERVED state.
             return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
         if res is None:
@@ -324,7 +361,19 @@ class _RaftStateMachine(SyncObj):
         if rec["state"] != "RESERVED":
             if rec["state"] == "RELEASED":
                 self._record_incident("LATE_EFFECT_AFTER_RELEASE", reservation_id, "RELEASED")
-                return "RECONCILE_CONFLICT"
+                compensation_id = f"compensation:{reservation_id}"
+                if compensation_id not in self._compensations:
+                    self._compensations[compensation_id] = {
+                        "compensation_id": compensation_id,
+                        "original_reservation_id": reservation_id,
+                        "key": rec["key"],
+                        "resource_id": rec["resource_id"],
+                        "amount": amount,
+                        "status": "REQUIRED",
+                        "reason": "External effect confirmed after the reservation was released.",
+                        "created_at_logical": self._tick_logical(),
+                    }
+                return "COMPENSATION_REQUIRED"
             return "INVALID_STATE"
         res = self._resources.get(rec["resource_id"])
         if res is None:
@@ -373,7 +422,10 @@ class _RaftStateMachine(SyncObj):
         """Return local state for a resource (no replication needed)."""
         res = self._resources.get(resource_id)
         if res is None:
-            return {"available": 0, "reserved": 0, "committed": 0, "capacity": 0, "reservations": []}
+            return {
+                "available": 0, "reserved": 0, "committed": 0, "capacity": 0,
+                "reservations": [], "compensations": [],
+            }
 
         reservations = [
             {
@@ -384,6 +436,11 @@ class _RaftStateMachine(SyncObj):
             }
             for rid, rec in self._reservations.items()
             if rec.get("resource_id") == resource_id
+        ]
+        compensations = [
+            dict(record)
+            for record in self._compensations.values()
+            if record.get("resource_id") == resource_id
         ]
 
         # Expose exact decimal values; float conversion loses precision for
@@ -408,6 +465,7 @@ class _RaftStateMachine(SyncObj):
             "committed": committed,
             "capacity": capacity,
             "reservations": normalized_reservations,
+            "compensations": compensations,
         }
 
     def find_by_key(self, key):
@@ -419,11 +477,10 @@ class _RaftStateMachine(SyncObj):
 
 
 class RaftConsensusBackend:
-    """Multi-host ConsensusBackend using Raft (pysyncobj).
+    """Raft ConsensusBackend; not approved for production in v5.7.
 
-    Implements the ConsensusBackend interface for loopback-only development
-    and testing. Raft replication is not approved for production while
-    FM-20 (pickle command transport) remains open.
+    Loopback integration tests exercise replication and crash-stop behavior,
+    but do not establish safe physical multi-host deployment. FM-20 remains open.
 
     Args:
         self_addr: address of this node (e.g., "localhost:5000")
@@ -432,8 +489,12 @@ class RaftConsensusBackend:
         provider_reconcile: callable(key) -> (effect_observed: bool|None)
     """
 
-    def __init__(self, self_addr, other_addrs, store_dir=None, provider_reconcile=None):
+    def __init__(self, self_addr, other_addrs, store_dir=None, provider_reconcile=None, *, peer_auth_key=None):
+        enforce_host_scope()
+        if runtime_environment() == "production":
+            raise RuntimeError(RAFT_PRODUCTION_DISABLED_MESSAGE)
         _enforce_raft_dev_loopback(self_addr, other_addrs)
+        peer_auth_key = _validate_peer_auth_key(peer_auth_key)
         if SyncObj is None:
             raise ImportError(
                 "pysyncobj is required for RaftConsensusBackend. "
@@ -449,6 +510,7 @@ class RaftConsensusBackend:
             autoTick=True,
             autoTickPeriod=0.05,
             commandsQueueSize=100000,
+            password=peer_auth_key,
         )
 
         # Set up journal file if store_dir provided
@@ -553,6 +615,26 @@ class RaftConsensusBackend:
                 else:
                     return CommitResult(status="ERROR")
 
+    def refund(self, reservation_id) -> RefundResult:
+        """Refund committed budget exactly once through the replicated log.
+
+        The caller must have authoritative evidence of non-execution before
+        invoking this operation. Raft supplies idempotent accounting, not that
+        external evidence.
+        """
+        for attempt in range(5):
+            try:
+                status = self._raft.refund(reservation_id, sync=True, timeout=10.0)
+                if status == "NOT_FOUND" and attempt < 4:
+                    self._is_my_state_current(reservation_id, timeout=3.0)
+                    continue
+                return RefundResult(status=status)
+            except Exception:
+                if attempt < 4:
+                    time.sleep(0.2)
+                else:
+                    return RefundResult(status="ERROR")
+
     def release(self, reservation_id) -> ReleaseResult:
         """Release a non-committed reservation (replicated via Raft).
 
@@ -603,8 +685,13 @@ class RaftConsensusBackend:
                     status = self._raft.reconcile_commit(rid, sync=True, timeout=10.0)
                     if status in ("COMMITTED", "ALREADY_COMMITTED"):
                         return ReconciliationResult(status="CONFIRMED", effect_observed=True)
-                    if status == "RECONCILE_CONFLICT":
-                        return ReconciliationResult(status="RECONCILE_CONFLICT", effect_observed=True)
+                    if status in ("RECONCILE_CONFLICT", "COMPENSATION_REQUIRED"):
+                        compensation_id = f"compensation:{rid}" if status == "COMPENSATION_REQUIRED" else None
+                        return ReconciliationResult(
+                            status="RECONCILE_CONFLICT",
+                            effect_observed=True,
+                            compensation_id=compensation_id,
+                        )
                     return ReconciliationResult(status="ERROR", effect_observed=True)
                 except Exception:
                     return ReconciliationResult(status="ERROR", effect_observed=True)
@@ -637,6 +724,7 @@ class RaftConsensusBackend:
             committed=state["committed"],
             capacity=state["capacity"],
             reservations=state["reservations"],
+            compensations=state.get("compensations", []),
         )
 
     def destroy(self):

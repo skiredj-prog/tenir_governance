@@ -161,6 +161,61 @@ def _setup_governor(provider=None, budget_capacity=100.0):
     return gov, state
 
 
+def test_i5_provider_failure_with_hypothesis_violation_returns_hold_without_refund():
+    class ContradictoryProvider:
+        def execute(self, **_kwargs):
+            return DispatchResult(
+                outcome=ProviderOutcome.FAILED,
+                error="provider says no effect",
+                safety_signals=["HYPOTHESIS_VIOLATED"],
+            )
+
+    gov, state = _setup_governor(provider=ContradictoryProvider())
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    authorization = _adjudicate(
+        gov, passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    assert authorization["operation_state"] == OperationState.RESERVED.value
+
+    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+
+    assert result["decision"] == "HOLD"
+    assert result["operation_state"] == OperationState.UNKNOWN.value
+    assert gov.registry.get(passage.idempotency_key).state == OperationState.UNKNOWN
+    assert state.resources["budget"].reserved == 0.0
+    assert state.resources["budget"].consumed == 10.0
+    assert any(entry.kernel == "I5" and entry.decision == "HOLD" for entry in gov.ledger.entries)
+
+
+def test_i5_contradictory_reconciliation_does_not_refund_or_fail():
+    gov, state = _setup_governor(provider=MockProvider(behavior="timeout"))
+    passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    _adjudicate(
+        gov, passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        resource_id="budget", amount=10.0,
+    )
+    first = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    assert first["operation_state"] == OperationState.UNKNOWN.value
+
+    class ContradictoryReconciliationProvider:
+        def reconcile(self, **_kwargs):
+            return ReconciliationResult(
+                resolved=True,
+                outcome=ProviderOutcome.FAILED,
+                safety_signals=["HYPOTHESIS_VIOLATED"],
+            )
+
+    gov.provider = ContradictoryReconciliationProvider()
+    result = gov.reconcile_unknown(passage.idempotency_key)
+
+    assert result["decision"] == "HOLD"
+    assert result["operation_state"] == OperationState.UNKNOWN.value
+    assert gov.registry.get(passage.idempotency_key).state == OperationState.UNKNOWN
+    assert state.resources["budget"].reserved == 0.0
+    assert state.resources["budget"].consumed == 10.0
+
+
 # ── MockProvider Tests ──────────────────────────────────────────────
 
 class TestMockProvider:
@@ -347,7 +402,8 @@ class TestDispatchAndExecute:
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
-                       resource_id="budget", amount=10.0)
+                       resource_id="budget", amount=10.0,
+                       payload={"order_id": "ORD-123"})
         gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0,
                                 metadata={"order_id": "ORD-123"})
         assert provider.calls[0]["metadata"] == {"order_id": "ORD-123"}

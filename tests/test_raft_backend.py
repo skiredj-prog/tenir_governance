@@ -23,67 +23,67 @@ import pytest
 # Skip all tests if pysyncobj is not installed
 pysyncobj = pytest.importorskip("pysyncobj")
 
-from tenir_governance.operations.raft_backend import (
-    RaftConsensusBackend, _RaftStateMachine, _enforce_raft_dev_loopback,
-)
+from tenir_governance.operations.raft_backend import RaftConsensusBackend, _RaftStateMachine, _enforce_raft_dev_loopback
+from tenir_governance.operations.consensus_backend import ConsensusState
+
+TEST_PEER_AUTH_KEY = "test-only-shared-raft-secret-32chars-min"
 
 
 @pytest.fixture(autouse=True)
-def _explicit_raft_test_environment(monkeypatch):
-    """All Raft integration tests explicitly run in a test-only scope."""
+def _explicit_raft_test_scope(monkeypatch):
+    """Integration tests opt into the declared non-production Raft scope."""
     monkeypatch.setenv("TENIR_ENV", "test")
     monkeypatch.delenv("ENVIRONMENT", raising=False)
     monkeypatch.delenv("HOST_SCOPE", raising=False)
     monkeypatch.delenv("TENIR_HOST_SCOPE", raising=False)
 
 
-@pytest.mark.parametrize("environment", [None, "", "production", "staging", "bogus"])
-def test_fm20_denies_raft_without_explicit_nonproduction_environment(monkeypatch, environment):
+@pytest.mark.parametrize("environment", [None, "", "staging", "production", "invalid"])
+def test_fm20_rejects_missing_or_unsafe_environment(monkeypatch, environment):
     if environment is None:
         monkeypatch.delenv("TENIR_ENV", raising=False)
     else:
         monkeypatch.setenv("TENIR_ENV", environment)
-    with pytest.raises(RuntimeError, match="FM-20"):
-        RaftConsensusBackend("127.0.0.1:6100", [])
+    with pytest.raises(RuntimeError, match="FM-20|Raft is not allowed|TENIR_ENV must"):
+        RaftConsensusBackend("127.0.0.1:6500", [], peer_auth_key=TEST_PEER_AUTH_KEY)
 
 
-def test_fm20_denies_conflicting_environment_alias(monkeypatch):
+def test_fm20_rejects_conflicting_environment_alias(monkeypatch):
     monkeypatch.setenv("TENIR_ENV", "test")
     monkeypatch.setenv("ENVIRONMENT", "production")
-    with pytest.raises(RuntimeError, match="FM-20"):
-        RaftConsensusBackend("127.0.0.1:6100", [])
+    with pytest.raises(RuntimeError, match="conflict"):
+        RaftConsensusBackend("127.0.0.1:6500", [], peer_auth_key=TEST_PEER_AUTH_KEY)
 
 
-@pytest.mark.parametrize("self_addr, peers", [
-    ("0.0.0.0:6100", []),
-    ("192.0.2.11:6100", []),
-    ("localhost:6100", ["192.0.2.12:6101"]),
-    ("localhost:6100", ["example.org:6101"]),
-    ("localhost:6100", ["localhost.example:6101"]),
-    ("localhost:6100", ["0.0.0.0:6101"]),
-    ("localhost:6100", ["localhost:0"]),
-    ("localhost:6100", ["localhost:70000"]),
+@pytest.mark.parametrize("address,peers", [
+    ("0.0.0.0:6500", []),
+    ("192.0.2.10:6500", []),
+    ("localhost:6500", ["192.0.2.11:6501"]),
+    ("localhost:6500", ["example.org:6501"]),
+    ("localhost:6500", ["localhost.example:6501"]),
+    ("localhost:6500", ["0.0.0.0:6501"]),
+    ("localhost:6500", ["localhost:0"]),
+    ("localhost:6500", ["localhost:70000"]),
 ])
-def test_fm20_denies_nonloopback_or_invalid_endpoints(self_addr, peers):
+def test_fm20_rejects_nonloopback_nodes(address, peers):
     with pytest.raises(RuntimeError, match="FM-20"):
-        RaftConsensusBackend(self_addr, peers)
+        RaftConsensusBackend(address, peers, peer_auth_key=TEST_PEER_AUTH_KEY)
 
 
 @pytest.mark.parametrize("key,value", [
     ("HOST_SCOPE", "multi-host"),
     ("TENIR_HOST_SCOPE", "multi-host"),
 ])
-def test_fm20_denies_multi_host_scope(monkeypatch, key, value):
+def test_fm20_rejects_multi_host_scope(monkeypatch, key, value):
     monkeypatch.setenv(key, value)
-    with pytest.raises(RuntimeError, match="FM-20"):
-        RaftConsensusBackend("127.0.0.1:6100", [])
+    with pytest.raises(RuntimeError, match="FM-20|Multi-host"):
+        RaftConsensusBackend("127.0.0.1:6500", [], peer_auth_key=TEST_PEER_AUTH_KEY)
 
 
-def test_fm20_allows_only_declared_loopback_test_scope_without_starting_network():
-    _enforce_raft_dev_loopback("localhost:6100", ["127.0.0.1:6101", "[::1]:6102"])
+def test_fm20_explicit_loopback_scope_does_not_require_network_start():
+    _enforce_raft_dev_loopback("127.0.0.1:6500", ["localhost:6501", "[::1]:6502"])
 
 
-from tenir_governance.operations.consensus_backend import ConsensusState
 
 
 # ---------------------------------------------------------------------------
@@ -91,18 +91,61 @@ from tenir_governance.operations.consensus_backend import ConsensusState
 # ---------------------------------------------------------------------------
 
 def _make_cluster(n=3, base_port=6000):
-    """Create a cluster of n Raft nodes."""
+    """Create a ready cluster or fail with status and clean up partial setup."""
     nodes = []
     addrs = [f"localhost:{base_port + i}" for i in range(n)]
-    for i in range(n):
-        store = tempfile.mkdtemp(prefix=f"raft_node{i}_")
-        others = [addrs[j] for j in range(n) if j != i]
-        node = RaftConsensusBackend(addrs[i], others, store_dir=store)
-        nodes.append(node)
-    # Wait for all nodes to be ready
-    for node in nodes:
-        node.wait_ready(timeout=10.0)
+    try:
+        for i in range(n):
+            store = tempfile.mkdtemp(prefix=f"raft_node{i}_")
+            others = [addrs[j] for j in range(n) if j != i]
+            node = RaftConsensusBackend(
+                addrs[i], others, store_dir=store, peer_auth_key=TEST_PEER_AUTH_KEY,
+            )
+            nodes.append(node)
+        for index, node in enumerate(nodes):
+            if not node.wait_ready(timeout=10.0):
+                pytest.fail(
+                    f"Raft node {addrs[index]} did not become ready within 10s; "
+                    f"cluster_status={[peer.get_status() for peer in nodes]!r}. "
+                    "Verify that authenticated loopback TCP is permitted in this environment."
+                )
+    except BaseException:
+        _teardown(nodes)
+        raise
     return nodes
+
+
+@pytest.mark.parametrize("failure", ["timeout", "startup"])
+def test_cluster_setup_reports_failure_and_destroys_created_nodes(monkeypatch, failure):
+    """A failed setup cannot leave threads or listeners behind for later tests."""
+    created = []
+
+    class UnreadyNode:
+        def __init__(self, address, peers, **kwargs):
+            if failure == "startup" and created:
+                raise OSError("simulated listener failure")
+            self.address = address
+            self.destroyed = False
+            created.append(self)
+
+        def wait_ready(self, timeout):
+            return False
+
+        def get_status(self):
+            return {"address": self.address, "leader": None}
+
+        def destroy(self):
+            self.destroyed = True
+
+    monkeypatch.setattr(sys.modules[__name__], "RaftConsensusBackend", UnreadyNode)
+    if failure == "timeout":
+        with pytest.raises(pytest.fail.Exception, match="cluster_status=.*leader"):
+            _make_cluster()
+    else:
+        with pytest.raises(OSError, match="simulated listener failure"):
+            _make_cluster()
+    assert len(created) == (3 if failure == "timeout" else 1)
+    assert all(node.destroyed for node in created)
 
 
 def _get_leader(nodes):
@@ -242,6 +285,42 @@ class TestMultiNodeReserveCommitRelease:
             state = node.get_state("budget-B")
             assert state.reserved == 0, f"Node {i} reserved={state.reserved}"
             assert state.committed == 40, f"Node {i} committed={state.committed}"
+
+
+    def test_release_refuses_unknown_reservation_state(self, cluster):
+        """Ambiguous reservation state must not be guessed to be releasable."""
+        leader = _get_leader(cluster)
+        assert leader is not None
+        leader.register_resource("budget-unknown-release", 100)
+        assert _wait_until(
+            lambda: all(
+                node.get_state("budget-unknown-release").capacity == 100
+                for node in cluster
+            ),
+            timeout=5.0,
+        )
+        reservation = leader.reserve("unknown-release-key", 25, "budget-unknown-release")
+        assert reservation.status == "RESERVED"
+        assert _wait_until(
+            lambda: all(
+                any(item.get("reservation_id") == reservation.reservation_id
+                    for item in node.get_state("budget-unknown-release").reservations)
+                for node in cluster
+            ),
+            timeout=5.0,
+        )
+
+        # Inject an ambiguous reservation record on each replica to exercise
+        # the state-machine guard without changing the reserved accounting.
+        for node in cluster:
+            node._raft._reservations[reservation.reservation_id]["state"] = "UNKNOWN"
+
+        result = leader.release(reservation.reservation_id)
+        assert result.status == "INVALID_STATE"
+        for node in cluster:
+            state = node.get_state("budget-unknown-release")
+            assert state.reserved == 25
+            assert state.committed == 0
 
     def test_release_from_leader(self, cluster):
         """Release from the leader and verify state on all nodes."""
@@ -1108,6 +1187,32 @@ class TestLinearizability:
 # ---------------------------------------------------------------------------
 
 class TestListOneRegressions:
+    def test_refund_committed_reservation_is_replicated_and_idempotent(self, cluster):
+        leader = _get_leader(cluster)
+        assert leader is not None
+        assert leader.register_resource("budget-refund-L1", 100) == "REGISTERED"
+
+        reservation = leader.reserve("refund-key", 30, "budget-refund-L1")
+        assert reservation.status == "RESERVED"
+        assert leader.commit(reservation.reservation_id).status == "COMMITTED"
+        assert leader.get_state("budget-refund-L1").committed == 30
+
+        refunded = leader.refund(reservation.reservation_id)
+        assert refunded.status == "REFUNDED"
+        assert leader.refund(reservation.reservation_id).status == "ALREADY_REFUNDED"
+        assert _wait_until(lambda: all(
+            node.get_state("budget-refund-L1").committed == 0
+            for node in cluster
+        )), "refund did not converge to every replica"
+
+        for node in cluster:
+            state = node.get_state("budget-refund-L1")
+            assert state.reserved == 0
+            assert state.committed == 0
+            assert state.available == state.capacity == 100
+            by_id = {item["reservation_id"]: item for item in state.reservations}
+            assert by_id[reservation.reservation_id]["state"] == "REFUNDED"
+
     def test_reconcile_commit_after_release_cannot_overconsume_budget(self, cluster):
         leader = _get_leader(cluster)
         assert leader is not None
@@ -1123,11 +1228,17 @@ class TestListOneRegressions:
         result = leader.reconcile("late-effect-A")
         assert result.status == "RECONCILE_CONFLICT"
         assert result.effect_observed is True
+        assert result.compensation_id == f"compensation:{a.reservation_id}"
         assert _wait_until(lambda: all(
             node.get_state("budget-I8-L1").reserved == 100
             and node.get_state("budget-I8-L1").committed == 0
             for node in cluster
         )), "followers did not converge to the expected budget state"
+        assert _wait_until(lambda: all(
+            any(item["compensation_id"] == result.compensation_id
+                for item in node.get_state("budget-I8-L1").compensations)
+            for node in cluster
+        )), "compensation record did not converge to every replica"
         for node in cluster:
             state = node.get_state("budget-I8-L1")
             assert state.reserved == 100
@@ -1136,6 +1247,27 @@ class TestListOneRegressions:
             by_id = {r["reservation_id"]: r for r in state.reservations}
             assert by_id[a.reservation_id]["state"] == "RELEASED"
             assert by_id[b.reservation_id]["state"] == "RESERVED"
+            compensation = next(
+                item for item in state.compensations
+                if item["compensation_id"] == result.compensation_id
+            )
+            assert compensation["original_reservation_id"] == a.reservation_id
+            assert compensation["amount"] == Decimal("100")
+            assert compensation["status"] == "REQUIRED"
+
+        # Reconciliation replay must reuse the same compensation transaction.
+        replay = leader.reconcile("late-effect-A")
+        assert replay.compensation_id == result.compensation_id
+        assert _wait_until(lambda: all(
+            any(item["compensation_id"] == result.compensation_id
+                for item in node.get_state("budget-I8-L1").compensations)
+            for node in cluster
+        )), "replayed compensation record did not converge to every replica"
+        assert all(
+            len([item for item in node.get_state("budget-I8-L1").compensations
+                 if item["compensation_id"] == result.compensation_id]) == 1
+            for node in cluster
+        )
 
     def test_idempotent_reserve_returns_actual_terminal_state(self, cluster):
         leader = _get_leader(cluster)
@@ -1253,8 +1385,18 @@ class TestListOneRegressions:
         assert state.reserved == Decimal("0.4")
         assert state.committed == Decimal("0.2")
 
-    @pytest.mark.parametrize("operation", ["release", "reconcile_release"])
-    def test_unknown_reservation_release_updates_budget_accounting(self, cluster, operation):
+    @pytest.mark.parametrize(
+        ("operation", "expected_status", "expected_reserved"),
+        [
+            # Ordinary release must not resolve an ambiguous UNKNOWN reservation.
+            ("release", "INVALID_STATE", Decimal("10")),
+            # Explicit reconciliation is the only path allowed to release UNKNOWN.
+            ("reconcile_release", "RELEASED", Decimal("0")),
+        ],
+    )
+    def test_unknown_reservation_release_requires_reconciliation(
+        self, cluster, operation, expected_status, expected_reserved
+    ):
         leader = _get_leader(cluster)
         assert leader.register_resource("budget-UNKNOWN-RELEASE", 100) == "REGISTERED"
         result = leader.reserve("unknown-release-key", 10, "budget-UNKNOWN-RELEASE")
@@ -1271,10 +1413,12 @@ class TestListOneRegressions:
         raw_result = getattr(leader._raft, operation)(
             reservation_id, sync=True, timeout=10.0,
         )
-        assert raw_result == "RELEASED"
+        assert raw_result == expected_status
         state = leader.get_state("budget-UNKNOWN-RELEASE")
-        assert state.reserved == Decimal("0")
+        assert state.reserved == expected_reserved
         assert state.committed == Decimal("0")
+        expected_state = "UNKNOWN" if operation == "release" else "RELEASED"
+        assert state.reservations[0]["state"] == expected_state
 
     @pytest.mark.parametrize(
         ("operation", "expected_status", "expected_reserved", "expected_committed"),

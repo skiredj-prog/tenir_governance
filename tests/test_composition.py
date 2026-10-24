@@ -481,10 +481,11 @@ class TestDualKernelGovernor:
             action_type="read_only",
             amount=0.0,
             resource_id="",
-            state=OperationState.HOLD,
         )
         assert gov.registry.register(record)
+        assert gov.hold_manager.enter_hold(key)["entered"]
         passage = Passage(
+            passage_id=record.passage_id,
             agent_id="alice",
             action_type="read_only",
             idempotency_key=key,
@@ -833,6 +834,62 @@ class TestDualKernelGovernor:
         assert gov.registry.get(p.idempotency_key).state == OperationState.RESERVED
         assert state.resources["budget"].reserved == 10.0
         assert state.resources["budget"].consumed == 0.0
+
+    def test_dispatch_rejects_payload_tampering_before_transition(self):
+        gov, state = self._setup()
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        result = self._adjudicate(
+            gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
+            resource_id="budget", amount=10.0,
+            payload={"recipient": "merchant-1", "currency": "USD"},
+        )
+        assert result["operation_state"] == OperationState.RESERVED.value
+
+        dispatched = gov.dispatch(
+            p.idempotency_key, resource_id="budget", amount=10.0,
+            payload={"recipient": "attacker", "currency": "USD"},
+        )
+
+        assert dispatched["dispatched"] is False
+        assert "payload does not match" in dispatched["reason"]
+        assert gov.registry.get(p.idempotency_key).state == OperationState.RESERVED
+        assert state.resources["budget"].reserved == 10.0
+        assert state.resources["budget"].consumed == 0.0
+
+    def test_dispatch_accepts_canonically_equivalent_payload(self):
+        gov, state = self._setup()
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        result = self._adjudicate(
+            gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
+            resource_id="budget", amount=10.0,
+            payload={"currency": "USD", "recipient": "merchant-1"},
+        )
+        assert result["operation_state"] == OperationState.RESERVED.value
+
+        dispatched = gov.dispatch(
+            p.idempotency_key, resource_id="budget", amount=10.0,
+            payload={"recipient": "merchant-1", "currency": "USD"},
+        )
+
+        assert dispatched["dispatched"] is True
+        assert gov.registry.get(p.idempotency_key).state == OperationState.DISPATCHING
+        assert state.resources["budget"].reserved == 0.0
+        assert state.resources["budget"].consumed == 10.0
+
+    @pytest.mark.parametrize("payload", [{"amount": float("nan")}, {1: "non-string-key"}, {"value": object()}])
+    def test_adjudication_rejects_payload_outside_canonical_json(self, payload):
+        gov, state = self._setup()
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+
+        result = self._adjudicate(
+            gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
+            resource_id="budget", amount=10.0, payload=payload,
+        )
+
+        assert result["composed_decision"] == Decision.HARD_VETO.value
+        assert result["operation_state"] == "not_registered"
+        assert gov.registry.get(p.idempotency_key) is None
+        assert state.resources["budget"].reserved == 0.0
 
     def test_quarantine_blocks_previously_reserved_dispatch(self):
         gov, state = self._setup()

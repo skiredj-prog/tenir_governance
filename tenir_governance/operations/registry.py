@@ -32,16 +32,56 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
-from dataclasses import dataclass, field, asdict
+import hashlib
+from datetime import datetime, timezone
+from contextlib import contextmanager
+from dataclasses import dataclass, field, asdict, replace
 from enum import Enum
-from typing import Optional
+from typing import Any, Mapping, Optional
 from uuid import uuid4
 
-try:
-    import fcntl
-except ImportError:
-    fcntl = None  # Windows fallback (not used in tests)
+from .payload_binding import EMPTY_PAYLOAD_HASH
+from .file_lock import acquire_file_lock
+
+
+
+def _verify_quarantine_release(
+    verifier, *, authorized_by: str, scope: str, authorization: str,
+    reason: str, lock_id: str,
+) -> dict | None:
+    """Accept only a trusted verifier's scoped, lock-bound attestation.
+
+    The input strings and the ceremony label are NOT authentication.
+    A caller cannot supply the attestation directly. Integrations must
+    configure a verifier that authenticates the claimant and validates
+    the token/signature, scope, nonce and replay rules.
+    """
+    if not callable(verifier) or not lock_id:
+        return None
+    try:
+        proof = verifier(
+            authorized_by=authorized_by, scope=scope, authorization=authorization,
+            reason=reason, lock_id=lock_id,
+        )
+    except Exception:
+        return None
+    if not isinstance(proof, dict):
+        return None
+    if (proof.get("authorized") is not True
+            or proof.get("principal") != authorized_by
+            or proof.get("scope") != scope
+            or proof.get("lock_id") != lock_id
+            or not isinstance(proof.get("authorization_id"), str)
+            or not proof["authorization_id"].strip()):
+        return None
+    return {
+        "principal": authorized_by,
+        "scope": scope,
+        "lock_id": lock_id,
+        "authorization_id": proof["authorization_id"],
+    }
 
 
 class OperationState(str, Enum):
@@ -115,7 +155,7 @@ _LEGAL_TRANSITIONS = {
     OperationState.HOLD: {OperationState.RESERVED, OperationState.FAILED, OperationState.ESCALATED},
     OperationState.RESERVED: {OperationState.DISPATCHING, OperationState.FAILED},
     OperationState.DISPATCHING: {OperationState.CONFIRMED, OperationState.FAILED, OperationState.UNKNOWN},
-    OperationState.ESCALATED: {OperationState.RESERVED, OperationState.FAILED, OperationState.UNKNOWN},
+    OperationState.ESCALATED: {OperationState.HOLD, OperationState.FAILED, OperationState.UNKNOWN},
     OperationState.UNKNOWN: {OperationState.CONFIRMED, OperationState.FAILED},  # reconcilable
     OperationState.CONFIRMED: set(),  # terminal
     OperationState.FAILED: set(),  # terminal
@@ -222,6 +262,34 @@ class OperationRecord:
     budget_committed: bool = False
     # HOLD lifecycle metadata (None unless operation has been in HOLD)
     hold_record: HoldRecord | None = None
+    # Appended to preserve positional-constructor compatibility for legacy fields.
+    # Durable SingleHostLockBackend reservation owning this operation budget.
+    # Empty only for legacy records or operations without a budget reservation.
+    reservation_id: str = ""
+    # SHA-256 of the canonical JSON action payload approved at adjudication.
+    # The empty-object digest is the backwards-compatible default.
+    payload_hash: str = EMPTY_PAYLOAD_HASH
+    # Immutable execution identity used by the optional Profile S commit gate.
+    # These fields are appended after the legacy record fields to preserve the
+    # positional constructor contract for existing integrations.
+    operation_id: str = ""
+    institutional_scope: str = ""
+    payload_digest: str = ""
+    # Profile S commit authorization is opt-in per operation.  The request and
+    # signed receipts are stored as canonical JSON-safe envelopes so recovery
+    # can resume after either authority call commits but its reply is lost.
+    commit_gate_required: bool = False
+    commit_authorization_request: dict | None = None
+    commit_authorization_receipt: dict | None = None
+    commit_dispatch_claim_id: str = ""
+    commit_consumption_receipt: dict | None = None
+    # Persisted authorization substate.  This remains separate from the
+    # provider lifecycle so TRUST_UNKNOWN/HOLD can block a RESERVED operation
+    # without pretending that an external effect may have occurred.
+    commit_authorization_status: str = ""
+    commit_consumption_status: str = ""
+    commit_gate_last_reason: str = ""
+    commit_gate_events: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -246,7 +314,7 @@ class DurableOperationRegistry:
 
     For the prototype, durability is provided via a file-backed JSON store
     with atomic rename + fsync. Cross-process atomicity is provided via
-    fcntl.flock file-level locking. In production, this would be:
+    operating-system file-level locking. In production, this would be:
         - A transactional database with SELECT ... FOR UPDATE
         - A write-ahead log with crash recovery
         - A distributed consensus system (Raft, Paxos)
@@ -254,7 +322,7 @@ class DurableOperationRegistry:
     DURABILITY MODEL:
         - Process crash (kill -9): The last successfully persisted state
           survives. Atomic rename ensures the store file is never partially
-          written. The fcntl.flock is released automatically when the process
+          written. The OS file lock is released automatically when the process
           dies, so a crashed process does not deadlock the registry.
         - Power loss: Survives IF the directory fsync in _persist() completes.
           The temp file is fsync'd before rename, and the parent directory is
@@ -279,11 +347,19 @@ class DurableOperationRegistry:
     exactly one succeeds. The other gets (False, current_state).
     """
 
-    def __init__(self, store_path: str | None = None):
+    def __init__(self, store_path: str | None = None, *, quarantine_release_verifier=None):
         self._lock = threading.Lock()
         self._records: dict[str, OperationRecord] = {}
         self._store_path = store_path
+        # In-memory registries need only process-local serialization. Durable
+        # backend settlement explicitly requires the file-backed lock below.
+        self._local_settlement_locks: dict[str, threading.Lock] = {}
+        self._local_settlement_locks_guard = threading.Lock()
         self._corrupted = False
+        self._quarantine_memory = {"active": False}
+        self._quarantine_release_verifier = quarantine_release_verifier
+        self._quarantine_gate_local = threading.RLock()
+        self._quarantine_gate_depth = threading.local()
         if store_path and os.path.exists(store_path):
             self._load()
 
@@ -295,30 +371,18 @@ class DurableOperationRegistry:
         sets the _corrupted flag so register() and transition_to() can refuse
         new operations, preventing silent duplicate adjudication.
 
-        Preserves hold_record from existing in-memory records when reloading,
-        so that HoldManager modifications are not lost during state transitions
-        that trigger a disk reload.
+        The durable store is authoritative. In particular, do not carry over a
+        HoldRecord from memory: another registry instance may have committed a
+        newer state and matching metadata since this instance last loaded it.
         """
         if not self._store_path or not os.path.exists(self._store_path):
             return
         try:
             with open(self._store_path, "r") as f:
                 data = json.load(f)
-            # Preserve hold_records from existing in-memory records.
-            # In-memory hold_records are always more up-to-date than disk
-            # because HoldManager modifies them in memory before calling
-            # transition_to(), which triggers this reload. Without this
-            # preservation, exit_reason and exit_receipt set by
-            # resolve_hold() / authorize_exit() would be lost.
-            existing_hold_records = {
-                k: v.hold_record for k, v in self._records.items() if v.hold_record
-            }
             self._records = {}
             for key, rec in data.items():
                 record = OperationRecord.from_dict(rec)
-                if key in existing_hold_records:
-                    # Always prefer in-memory hold_record (most up-to-date)
-                    record.hold_record = existing_hold_records[key]
                 self._records[key] = record
             self._corrupted = False
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
@@ -338,51 +402,361 @@ class DurableOperationRegistry:
           survives. A crash during _persist leaves either the old file
           (rename not yet done) or the new file (rename done). The temp
           file may be orphaned but is harmless.
-        - Power loss: survives IF fsync of the parent directory completes.
-          Without the directory fsync, the rename may not be flushed to
-          disk and power loss could revert to the old file. With it, the
-          rename is durable.
+        - Power loss: on POSIX systems, survives IF fsync of the parent
+          directory completes. Python's standard library does not provide
+          portable directory fsync on Windows, so this implementation does
+          not claim power-loss durability there.
 
         In production, replace this with a database transaction (which
         handles all of this internally).
         """
         if self._store_path:
             data = {k: v.to_dict() for k, v in self._records.items()}
-            tmp = self._store_path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(data, f)
-                f.flush()
-                os.fsync(f.fileno())
-            os.rename(tmp, self._store_path)
-            # fsync the parent directory so the rename survives power loss
-            dir_fd = os.open(os.path.dirname(self._store_path) or ".", os.O_RDONLY)
+            directory = os.path.dirname(os.path.abspath(self._store_path))
+            prefix = os.path.basename(self._store_path) + "."
+            fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=directory)
             try:
-                os.fsync(dir_fd)
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    json.dump(data, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(tmp, self._store_path)
+                # Windows does not support opening directories for fsync.
+                if os.name != "nt":
+                    dir_fd = os.open(directory, os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
             finally:
-                os.close(dir_fd)
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
 
     def _lock_file(self):
         """Acquire a cross-process exclusive lock on the store file.
 
-        Uses fcntl.flock for cross-process atomicity. The caller must
-        close the returned file handle to release the lock.
-        Returns None if no store path or fcntl is unavailable.
+        The caller must close the returned file handle to release the lock.
+        Returns None for an in-memory registry.
         """
-        if not self._store_path or fcntl is None:
+        if not self._store_path:
             return None
-        # Ensure the lock target exists
         lock_path = self._store_path + ".lock"
-        if not os.path.exists(lock_path):
-            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
-            os.close(fd)
-        f = open(lock_path, "r+")
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        return f
+        return acquire_file_lock(lock_path)
 
     @property
     def is_corrupted(self) -> bool:
         """True if the persistent store was corrupted on load."""
         return self._corrupted
+
+    @property
+    def is_persistent(self) -> bool:
+        """True when registry records are backed by a durable file store."""
+        return bool(self._store_path)
+
+    @contextmanager
+    def quarantine_guard(self):
+        """Shared single-host admission/dispatch/quarantine linearization gate.
+
+        A separate lock file is used: registry transition APIs also acquire
+        their own lock and must not re-enter the same OS flock descriptor.
+        Nested use from the same registry/thread is supported explicitly.
+        """
+        with self._quarantine_gate_local:
+            depth = getattr(self._quarantine_gate_depth, "depth", 0)
+            lease = None
+            if depth == 0 and self._store_path:
+                lease = acquire_file_lock(self._store_path + ".quarantine.gate.lock")
+            self._quarantine_gate_depth.depth = depth + 1
+            try:
+                yield
+            finally:
+                self._quarantine_gate_depth.depth -= 1
+                if lease is not None:
+                    lease.close()
+
+    def _quarantine_path(self) -> str | None:
+        return self._store_path + ".quarantine.json" if self._store_path else None
+
+    def _quarantine_initialized_path(self) -> str | None:
+        return self._store_path + ".quarantine.initialized" if self._store_path else None
+
+    def _quarantine_release_pending_path(self) -> str | None:
+        return self._store_path + ".quarantine.release-pending" if self._store_path else None
+
+    def _quarantine_sync_parent_locked(self, path: str) -> None:
+        if os.name != "nt":
+            directory = os.path.dirname(os.path.abspath(path))
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+
+    def _quarantine_begin_release_locked(self, lock_id: str) -> None:
+        """Durable fail-closed guard before writing any inactive mark."""
+        path = self._quarantine_release_pending_path()
+        if path is None:
+            return
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(lock_id + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            # os.fdopen has closed the descriptor when its context exits.
+            pass
+        self._quarantine_sync_parent_locked(path)
+
+    def _quarantine_finish_release_locked(self) -> None:
+        """Remove the recovery guard only after the inactive mark is fsynced.
+
+        Removing this guard is the release visibility/commit point.
+        A crash after it but before the caller receives the receipt remains
+        an unavoidable lost-acknowledgement window on a local filesystem.
+        """
+        path = self._quarantine_release_pending_path()
+        if path is None:
+            return
+        os.unlink(path)
+        self._quarantine_sync_parent_locked(path)
+
+    def _quarantine_ensure_initialized_locked(self) -> None:
+        """Durably remember that a quarantine mark has existed.
+
+        Write the sentinel BEFORE the first active mark. If a crash occurs
+        between those writes, the next worker sees a missing mark as corrupt
+        rather than silently treating it as no quarantine.
+        """
+        path = self._quarantine_initialized_path()
+        if path is None or os.path.exists(path):
+            return
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if os.name != "nt":
+            directory = os.path.dirname(os.path.abspath(path))
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+
+    def _quarantine_read_locked(self) -> dict:
+        """Call only while the shared quarantine_guard is held."""
+        path = self._quarantine_path()
+        if path is None:
+            return dict(self._quarantine_memory)
+        # If a release crashed after replacing the active mark, the pending
+        # sidecar prevents the inactive JSON from reopening admission. This
+        # sidecar must be resolved explicitly, never auto-deleted on restart.
+        pending = self._quarantine_release_pending_path()
+        if pending and os.path.exists(pending):
+            return {"active": True, "corrupted": True}
+        if not os.path.exists(path):
+            # An untouched store may have no quarantine mark. Once any mark
+            # was written, its disappearance is corruption, not an unlock.
+            initialized_path = self._quarantine_initialized_path()
+            if initialized_path and os.path.exists(initialized_path):
+                return {"active": True, "corrupted": True}
+            return {"active": False}
+        # Migrate existing marks written before the sentinel was introduced.
+        # A failed migration must not turn a known mark into a permissive read.
+        try:
+            self._quarantine_ensure_initialized_locked()
+        except OSError:
+            return {"active": True, "corrupted": True}
+        try:
+            with open(path, "r", encoding="utf-8") as stream:
+                item = json.load(stream)
+        except (OSError, ValueError, TypeError):
+            return {"active": True, "corrupted": True}
+        if not isinstance(item, dict) or type(item.get("active")) is not bool:
+            return {"active": True, "corrupted": True}
+        if not isinstance(item.get("lock_id"), str) or not item["lock_id"].strip():
+            return {"active": True, "corrupted": True}
+        if not item["active"]:
+            # A durable inactive mark can exist ONLY after an authorized
+            # release. A partial JSON object like {"active": false} must not
+            # silently grant admission after data corruption.
+            receipt = item.get("release_receipt")
+            if (
+                not isinstance(receipt, dict)
+                or receipt.get("lock_id") != item["lock_id"]
+                or not isinstance(receipt.get("authorization_id"), str)
+                or not receipt["authorization_id"].strip()
+                or not isinstance(receipt.get("authorized_by"), str)
+                or not receipt["authorized_by"].strip()
+                or not isinstance(receipt.get("scope"), str)
+                or not receipt["scope"].strip()
+            ):
+                return {"active": True, "corrupted": True}
+        return item
+
+    def _quarantine_write_locked(self, mark: dict) -> None:
+        """Atomic durable replace under quarantine_guard; never writes unlocked."""
+        path = self._quarantine_path()
+        if path is None:
+            self._quarantine_memory = dict(mark)
+            return
+        # Persist this marker first so a crash/delete never looks like a
+        # fresh, never-locked store to independent workers.
+        self._quarantine_ensure_initialized_locked()
+        directory = os.path.dirname(os.path.abspath(path))
+        fd, tmp = tempfile.mkstemp(prefix="quarantine.", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(mark, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, path)
+            if os.name != "nt":
+                directory_fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        self._quarantine_memory = dict(mark)
+
+    def set_quarantine(
+        self, active: bool, *, locked_by: str = "",
+        incident_id: str | None = None,
+    ) -> None:
+        """Activate or reassert a lock; never allow unauthenticated release.
+
+        A nonempty incident_id distinguishes a genuinely new incident from
+        an idempotent retry of the existing one. A *different* incident ID
+        renews the lock identity even when quarantine is already active,
+        invalidating release proofs obtained for an earlier incident.
+        Without an incident ID, legacy repeated activation stays idempotent.
+        """
+        if active is not True:
+            raise PermissionError(
+                "QUARANTINE_LOCK cannot be cleared through set_quarantine; "
+                "a trusted, lock-bound authorization verifier is mandatory."
+            )
+        if incident_id is not None and (
+            not isinstance(incident_id, str) or not incident_id.strip()
+        ):
+            raise ValueError("incident_id must be a nonempty string when provided.")
+        with self.quarantine_guard():
+            with self._lock:
+                old = self._quarantine_read_locked()
+                if old.get("corrupted"):
+                    raise RuntimeError("QUARANTINE_LOCK mark is corrupt; recovery required.")
+                if old["active"] and (
+                    incident_id is None or old.get("incident_id") == incident_id
+                ):
+                    return  # Exact retry or legacy idempotent reassertion.
+                mark = {
+                    "active": True,
+                    "lock_id": uuid4().hex,
+                    "locked_by": locked_by,
+                }
+                if incident_id is not None:
+                    mark["incident_id"] = incident_id
+                self._quarantine_write_locked(mark)
+
+    def quarantine_is_active(self) -> bool:
+        """Fail closed on malformed durable state; reflects all local workers."""
+        with self.quarantine_guard():
+            with self._lock:
+                return bool(self._quarantine_read_locked()["active"])
+
+    def authorized_release_quarantine(
+        self, *, authorized_by: str, scope: str,
+        authorization: str, reason: str = "",
+    ) -> dict[str, Any]:
+        """Verify outside the shared gate, then atomically check-and-release.
+
+        Trusted verification may involve slow external I/O. Never hold the
+        quarantine gate or registry mutex while calling it: other workers
+        must retain access to emergency locking and guarded dispatch checks.
+        A lock-id comparison at commit rejects stale or replayed proofs.
+        """
+        with self.quarantine_guard():
+            with self._lock:
+                initial = self._quarantine_read_locked()
+                if initial.get("corrupted"):
+                    return {
+                        "released": False,
+                        "reason": "QUARANTINE_LOCK mark corrupt; manual recovery required.",
+                        "receipt": None,
+                    }
+                if not initial["active"]:
+                    return {
+                        "released": False,
+                        "reason": "No quarantine lock active.",
+                        "receipt": None,
+                    }
+                expected_lock_id = initial["lock_id"]
+
+        # Never call user-supplied integration code under either critical lock.
+        proof = _verify_quarantine_release(
+            self._quarantine_release_verifier,
+            authorized_by=authorized_by, scope=scope,
+            authorization=authorization, reason=reason,
+            lock_id=expected_lock_id,
+        )
+        if proof is None:
+            return {
+                "released": False,
+                "reason": "QUARANTINE_LOCK release denied: authorization not verified.",
+                "receipt": None,
+            }
+
+        with self.quarantine_guard():
+            with self._lock:
+                mark = self._quarantine_read_locked()
+                if mark.get("corrupted"):
+                    return {
+                        "released": False,
+                        "reason": "QUARANTINE_LOCK mark corrupt; manual recovery required.",
+                        "receipt": None,
+                    }
+                if not mark["active"] or mark.get("lock_id") != expected_lock_id:
+                    return {
+                        "released": False,
+                        "reason": "QUARANTINE_LOCK changed during authorization; fresh verification required.",
+                        "receipt": None,
+                    }
+                receipt = {
+                    "authorized_by": proof["principal"],
+                    "scope": proof["scope"],
+                    # Never put the original credential/bearer token in a
+                    # durable receipt. The verifier supplies a safe reference.
+                    "authorization": "[redacted]",
+                    "authorization_id": proof["authorization_id"],
+                    "lock_id": proof["lock_id"],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "reason": reason,
+                    "locked_by": mark.get("locked_by", ""),
+                    "incident_id": mark.get("incident_id"),
+                }
+                # First persist an independent fail-closed release guard.
+                # If mark replace/fsync subsequently fails, another worker
+                # still sees quarantine as active even if JSON is inactive.
+                self._quarantine_begin_release_locked(mark["lock_id"])
+                self._quarantine_write_locked({
+                    "active": False,
+                    "lock_id": mark["lock_id"],
+                    "release_receipt": receipt,
+                })
+                # This is the visibility/commit point of a successful unlock.
+                self._quarantine_finish_release_locked()
+                return {
+                    "released": True,
+                    "reason": "QUARANTINE_LOCK release verified and persisted.",
+                    "receipt": receipt,
+                }
 
     def register(self, record: OperationRecord) -> bool:
         """Register a new operation. Returns False if key already exists.
@@ -420,6 +794,37 @@ class DurableOperationRegistry:
                 if flock:
                     flock.close()
 
+    @contextmanager
+    def settlement_lock(
+        self, idempotency_key: str, *, require_persistent: bool = True,
+    ):
+        """Serialize settlement; require cross-process durability when requested.
+
+        File-backed registries use a per-operation OS lock spanning the full
+        read/mutate/persist/transition sequence. An in-memory registry may use
+        a per-key process-local lock only for legacy in-memory budget mode;
+        callers settling a durable backend must set require_persistent=True.
+        """
+        if not self._store_path:
+            if require_persistent:
+                raise RuntimeError(
+                    "Durable budget settlement requires a persistent operation registry."
+                )
+            with self._local_settlement_locks_guard:
+                lock = self._local_settlement_locks.setdefault(
+                    idempotency_key, threading.Lock(),
+                )
+            with lock:
+                yield
+            return
+        digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+        lock_path = f"{self._store_path}.{digest}.settlement.lock"
+        lock_file = acquire_file_lock(lock_path)
+        try:
+            yield
+        finally:
+            lock_file.close()
+
     def get(self, idempotency_key: str) -> OperationRecord | None:
         with self._lock:
             # Reload from disk to see the latest state from other processes
@@ -432,6 +837,49 @@ class DurableOperationRegistry:
         idempotency_key: str,
         new_state: OperationState,
         claimed_by: str = "",
+        *,
+        hold_record: HoldRecord | None = None,
+        hold_record_changes: Mapping[str, Any] | None = None,
+        commit_gate_verified: bool = False,
+    ) -> tuple[bool, OperationState | None]:
+        """Enforce shared quarantine even for direct registry admission calls.
+
+        Every path to RESERVED or DISPATCHING, including a HoldManager exit
+        or a direct registry caller, must linearize against quarantine
+        activation. Other transitions remain available for fail-closed
+        settlement and recovery. A previously DISPATCHING claim may finish.
+        """
+        if new_state in (OperationState.RESERVED, OperationState.DISPATCHING):
+            with self.quarantine_guard():
+                if self.quarantine_is_active():
+                    current = self.get(idempotency_key)
+                    return False, current.state if current is not None else None
+                return self._transition_to_unchecked_quarantine(
+                    idempotency_key,
+                    new_state,
+                    claimed_by=claimed_by,
+                    hold_record=hold_record,
+                    hold_record_changes=hold_record_changes,
+                    commit_gate_verified=commit_gate_verified,
+                )
+        return self._transition_to_unchecked_quarantine(
+            idempotency_key,
+            new_state,
+            claimed_by=claimed_by,
+            hold_record=hold_record,
+            hold_record_changes=hold_record_changes,
+            commit_gate_verified=commit_gate_verified,
+        )
+
+    def _transition_to_unchecked_quarantine(
+        self,
+        idempotency_key: str,
+        new_state: OperationState,
+        claimed_by: str = "",
+        *,
+        hold_record: HoldRecord | None = None,
+        hold_record_changes: Mapping[str, Any] | None = None,
+        commit_gate_verified: bool = False,
     ) -> tuple[bool, OperationState | None]:
         """Atomically transition an operation to a new state.
 
@@ -455,7 +903,29 @@ class DurableOperationRegistry:
         Cross-process safe: acquires a file lock, reloads from disk to see
         the latest state from other processes, then atomically checks and
         persists.
+
+        HOLD lifecycle metadata associated with the transition can be passed
+        as a new ``hold_record`` or as ``hold_record_changes``. The metadata
+        is applied only after the transition is legal and persisted in the
+        same registry write as the state change.
         """
+        if hold_record is not None and hold_record_changes:
+            raise ValueError("provide hold_record or hold_record_changes, not both")
+        if hold_record is not None and not isinstance(hold_record, HoldRecord):
+            raise TypeError("hold_record must be a HoldRecord")
+        changes = dict(hold_record_changes or {})
+        allowed_hold_fields = {
+            "escalated_at", "escalated_by", "exit_reason", "exit_receipt",
+        }
+        unknown_hold_fields = set(changes) - allowed_hold_fields
+        if unknown_hold_fields:
+            raise ValueError(f"unsupported hold record field(s): {sorted(unknown_hold_fields)}")
+        for name in ("escalated_at", "escalated_by", "exit_reason"):
+            if name in changes and not isinstance(changes[name], str):
+                raise TypeError(f"{name} must be a string")
+        if "exit_receipt" in changes and changes["exit_receipt"] is not None and not isinstance(changes["exit_receipt"], ExitReceipt):
+            raise TypeError("exit_receipt must be an ExitReceipt or None")
+
         with self._lock:
             if self._corrupted:
                 raise RuntimeError(
@@ -489,22 +959,61 @@ class DurableOperationRegistry:
                         return False, prev_state  # already dispatching
                     if record.state.is_dispatched:
                         return False, prev_state  # already dispatched
+                    if record.commit_gate_required:
+                        consumption = record.commit_consumption_receipt
+                        body = consumption.get("body", {}) if isinstance(consumption, dict) else {}
+                        if (
+                            body.get("decision") != "CONSUMED"
+                            or not record.commit_dispatch_claim_id
+                            or body.get("dispatch_claim_id") != record.commit_dispatch_claim_id
+                            or not commit_gate_verified
+                        ):
+                            return False, prev_state
 
+                if hold_record is not None and record.hold_record is not None:
+                    return False, prev_state
+                if changes and record.hold_record is None:
+                    return False, prev_state
+
+                previous_hold_record = record.hold_record
+                previous_claimed_by = record.dispatch_claimed_by
                 record.state = new_state
+                if hold_record is not None:
+                    record.hold_record = hold_record
+                elif changes:
+                    record.hold_record = replace(record.hold_record, **changes)
                 if claimed_by:
                     record.dispatch_claimed_by = claimed_by
-                self._persist()
+                try:
+                    self._persist()
+                except BaseException:
+                    # The rename may or may not have completed before a
+                    # persistence error (for example, a directory fsync
+                    # failure). Reload the durable record so state and metadata
+                    # stay paired with whichever side of the atomic replace won.
+                    if self._store_path and os.path.exists(self._store_path):
+                        self._load()
+                    else:
+                        record.state = prev_state
+                        record.hold_record = previous_hold_record
+                        record.dispatch_claimed_by = previous_claimed_by
+                    raise
                 return True, prev_state
             finally:
                 if flock:
                     flock.close()
 
-    def set_budget_flags(self, idempotency_key: str, **flags: bool) -> bool:
-        """Atomically update and persist budget ownership flags."""
-        allowed = {"budget_reserved", "budget_committed"}
+    def set_budget_flags(self, idempotency_key: str, **flags) -> bool:
+        """Atomically persist budget flags and the durable backend reservation identity."""
+        allowed = {"budget_reserved", "budget_committed", "reservation_id"}
         unknown = set(flags) - allowed
         if unknown:
             raise ValueError(f"unknown budget flag(s): {sorted(unknown)}")
+        if "reservation_id" in flags and not isinstance(flags["reservation_id"], str):
+            raise ValueError("reservation_id must be a string")
+        for name in ("budget_reserved", "budget_committed"):
+            if name in flags and not isinstance(flags[name], bool):
+                raise ValueError(f"{name} must be a bool")
 
         with self._lock:
             if self._corrupted:
@@ -525,7 +1034,7 @@ class DurableOperationRegistry:
 
                 previous = {name: getattr(record, name) for name in flags}
                 for name, value in flags.items():
-                    setattr(record, name, bool(value))
+                    setattr(record, name, bool(value) if name in ("budget_reserved", "budget_committed") else value)
                 desired = {name: getattr(record, name) for name in flags}
                 try:
                     self._persist()
@@ -553,6 +1062,191 @@ class DurableOperationRegistry:
                         for name, value in previous.items():
                             setattr(current, name, value)
                     raise
+                return True
+            finally:
+                if flock:
+                    flock.close()
+
+    def _set_immutable_commit_value(
+        self,
+        idempotency_key: str,
+        field_name: str,
+        value,
+        *,
+        require_authorization: bool = False,
+        status_field: str | None = None,
+        status: str = "",
+    ) -> bool:
+        """Persist one immutable commit-gate value under the registry lock."""
+        with self._lock:
+            if self._corrupted:
+                raise RuntimeError(
+                    "Registry store is corrupted — refuse to update commit authorization."
+                )
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                record = self._records.get(idempotency_key)
+                if record is None or not record.commit_gate_required:
+                    return False
+                existing = getattr(record, field_name)
+                if existing not in (None, ""):
+                    if existing != value:
+                        return False
+                    if status_field and getattr(record, status_field) != status:
+                        setattr(record, status_field, status)
+                        self._persist()
+                    return True
+                if record.state != OperationState.RESERVED:
+                    return False
+                if require_authorization and record.commit_authorization_receipt is None:
+                    return False
+                setattr(record, field_name, value)
+                if status_field:
+                    setattr(record, status_field, status)
+                self._persist()
+                return True
+            finally:
+                if flock:
+                    flock.close()
+
+    def record_commit_authorization_request(
+        self, idempotency_key: str, request: dict,
+    ) -> bool:
+        """Persist the immutable request before contacting the authority."""
+        canonical = json.loads(json.dumps(request, sort_keys=True))
+        return self._set_immutable_commit_value(
+            idempotency_key, "commit_authorization_request", canonical,
+            status_field="commit_authorization_status",
+            status="TRUST_COMMITTING",
+        )
+
+    def record_commit_authorization_receipt(
+        self, idempotency_key: str, receipt: dict,
+    ) -> bool:
+        """Persist the authority's signed decision without allowing replacement."""
+        canonical = json.loads(json.dumps(receipt, sort_keys=True))
+        body = canonical.get("body", {}) if isinstance(canonical, dict) else {}
+        decision = body.get("decision")
+        return self._set_immutable_commit_value(
+            idempotency_key, "commit_authorization_receipt", canonical,
+            status_field="commit_authorization_status",
+            status="TRUST_COMMITTED" if decision == "AUTHORIZED" else "HOLD",
+        )
+
+    def ensure_commit_dispatch_claim(
+        self, idempotency_key: str, claim_id: str,
+    ) -> tuple[bool, str]:
+        """Claim one stable dispatch identity before consuming authorization."""
+        if not isinstance(claim_id, str) or not claim_id:
+            raise ValueError("dispatch claim identity must be non-empty")
+        with self._lock:
+            if self._corrupted:
+                raise RuntimeError(
+                    "Registry store is corrupted — refuse to claim commit authorization."
+                )
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                record = self._records.get(idempotency_key)
+                if (
+                    record is None
+                    or not record.commit_gate_required
+                    or record.state != OperationState.RESERVED
+                    or record.commit_authorization_receipt is None
+                ):
+                    return False, ""
+                if record.commit_dispatch_claim_id:
+                    return True, record.commit_dispatch_claim_id
+                record.commit_dispatch_claim_id = claim_id
+                self._persist()
+                return True, claim_id
+            finally:
+                if flock:
+                    flock.close()
+
+    def record_commit_consumption_receipt(
+        self, idempotency_key: str, receipt: dict,
+    ) -> bool:
+        """Persist the signed single-consumption result before dispatch claim."""
+        canonical = json.loads(json.dumps(receipt, sort_keys=True))
+        body = canonical.get("body", {}) if isinstance(canonical, dict) else {}
+        record = self.get(idempotency_key)
+        if (
+            record is None
+            or not record.commit_dispatch_claim_id
+            or body.get("dispatch_claim_id") != record.commit_dispatch_claim_id
+        ):
+            return False
+        return self._set_immutable_commit_value(
+            idempotency_key,
+            "commit_consumption_receipt",
+            canonical,
+            require_authorization=True,
+            status_field="commit_consumption_status",
+            status="TRUST_CONSUMED" if body.get("decision") == "CONSUMED" else "HOLD",
+        )
+
+    def record_commit_gate_status(
+        self,
+        idempotency_key: str,
+        *,
+        phase: str,
+        status: str,
+        reason: str,
+        security_event: bool = False,
+    ) -> bool:
+        """Persist a bounded trust-gate non-success state and audit event."""
+        if phase not in {"authorization", "consumption"}:
+            raise ValueError("invalid commit-gate phase")
+        if (
+            not isinstance(status, str)
+            or not status
+            or len(status) > 64
+            or not status.replace("_", "").isalnum()
+        ):
+            raise ValueError("invalid commit-gate status")
+        if not isinstance(reason, str):
+            reason = str(reason)
+        reason = reason[:512]
+        status_field = (
+            "commit_authorization_status"
+            if phase == "authorization"
+            else "commit_consumption_status"
+        )
+        with self._lock:
+            if self._corrupted:
+                raise RuntimeError(
+                    "Registry store is corrupted — refuse to update commit-gate status."
+                )
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                record = self._records.get(idempotency_key)
+                if record is None or not record.commit_gate_required:
+                    return False
+                setattr(record, status_field, status)
+                record.commit_gate_last_reason = reason
+                next_sequence = (
+                    record.commit_gate_events[-1].get("sequence", 0) + 1
+                    if record.commit_gate_events
+                    else 1
+                )
+                event = {
+                    "sequence": next_sequence,
+                    "phase": phase,
+                    "status": status,
+                    "reason": reason,
+                    "security_event": bool(security_event),
+                }
+                if not record.commit_gate_events or record.commit_gate_events[-1] != event:
+                    record.commit_gate_events.append(event)
+                    if len(record.commit_gate_events) > 128:
+                        record.commit_gate_events = record.commit_gate_events[-128:]
+                self._persist()
                 return True
             finally:
                 if flock:

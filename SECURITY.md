@@ -4,7 +4,8 @@
 
 | Version / Line                         | Supported | Notes |
 |----------------------------------------|-----------|-------|
-| 5.6.1 (release candidate)              | ⏳ Not released | Raft development/test loopback only; production/multi-host Raft blocked while FM-20 is open. |
+| 5.7.0 (release candidate)              | ⏳ Not released | Single-host candidate, FM-20 open; Raft remains development/test only. |
+| 5.6.1 (published)                      | ✅        | Released 2026-10-20; Raft limited to declared development/test environments and loopback. |
 | 5.6.0 (published GitHub release)       | ⚠️ Limited | Experimental PySyncObj transport; FM-20 open; not approved for production or physical multi-host. |
 | 5.5.x (Agentic Governance Profile)     | ✅        | Prior published line; single-host operational guarantees only. |
 | 5.4.x (Agentic Governance Profile)     | ✅        | Prior supported release line, including HOLD lifecycle and post-execution assessment. |
@@ -18,16 +19,16 @@ Only the latest patch release within a supported minor line receives security up
 Install from PyPI with an explicit version pin in production:
 
 ```bash
-pip install "tenir-governance==5.5.0"
+pip install "tenir-governance==5.6.1"
 # or with extras
-pip install "tenir-governance[api]==5.5.0"
-pip install "tenir-governance[r5]==5.5.0"
+pip install "tenir-governance[api]==5.6.1"
+pip install "tenir-governance[r5]==5.6.1"
 ```
 
-### FM-20: Raft execution boundary for v5.6.1
+### FM-20: Raft execution boundary (v5.6.1 and v5.7.0)
 
 PySyncObj uses pickle command serialization and has not been approved for
-production or physical multi-host use. The 5.6.1 release candidate requires an
+production or physical multi-host use. The 5.6.1 released backend and the 5.7.0 candidate require an
 explicit `TENIR_ENV=test` or `TENIR_ENV=development` and all node endpoints
 on loopback (`localhost`, `127.0.0.0/8`, or `::1`). Missing/production/staging
 environment declarations, multi-host scope, wildcard bindings and remote peer
@@ -164,7 +165,7 @@ No claim is made of resistance to a privileged attacker who can modify process m
 
 ## Deployment Recommendations
 
-1. **Pin versions** — Always install a specific release from PyPI (`tenir-governance==5.5.0`).
+1. **Pin versions** — Always install a specific release from PyPI (`tenir-governance==5.6.1`).
 2. **Network isolation** — Bind to localhost or a private interface; terminate TLS at a reverse proxy.
 3. **Secrets management** — Inject tokens and secrets via a secrets manager; never hard-code.
 4. **Least privilege** — Run under a dedicated low-privilege user; restrict filesystem permissions on ledger and registry store.
