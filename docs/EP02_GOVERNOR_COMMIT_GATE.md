@@ -51,6 +51,21 @@ decision = governor.authorize_commit(
 Only a signed `AUTHORIZED` receipt permits the later dispatch path to attempt
 single consumption.
 
+## Provider payload binding
+
+For Profile S, the provider `metadata` mapping is the payload. Callers compute
+`sha256(canonical_payload_bytes(metadata))` before adjudication and bind that
+digest into the operation. Immediately before consumption and again under the
+quarantine lock, the Governor canonicalizes the actual metadata and compares
+its digest with the durable operation. `dispatch_and_execute()` freezes a deep
+JSON copy and gives that same verified copy to the provider, preventing a
+concurrent caller mutation between verification and use.
+
+Canonical payloads are JSON objects with string keys, finite numbers and a
+bounded structure (1 MiB, 32 levels, 10,000 values). Cycles, non-JSON objects,
+non-finite numbers, ambiguous non-string keys and oversized inputs fail before
+the authorization is consumed or a dispatch claim is created.
+
 ## Dispatch protocol
 
 1. The Governor persists the canonical request before contacting the authority.
@@ -81,6 +96,14 @@ quarantine release; it does not imply that a provider call occurred.
 - Process crash after consumption: replay the same deterministic claim and
   continue only after the signed receipt is durably attached to the operation.
 
+The registry persists a separate authorization substate alongside the provider
+lifecycle: `TRUST_COMMITTING`, `TRUST_UNKNOWN`, `TRUST_COMMITTED`,
+`TRUST_CONSUMED`, or `HOLD`. It also retains bounded trust-gate events. Invalid
+signatures, unavailable or invalid receipt keys, and conflicting durable
+receipts create security events. This keeps an ambiguous or unverifiable
+authorization auditable while the operation remains provider-safe in
+`RESERVED`.
+
 The provider outcome state machine remains unchanged after `DISPATCHING`:
 timeouts and ambiguous results still produce `UNKNOWN`, and reconciliation
 must not blindly resend an external effect.
@@ -89,6 +112,7 @@ must not blindly resend an external effect.
 
 `tests/test_ep02_governor_commit_gate.py` covers opt-in compatibility, complete
 identity persistence, missing authorization, substitution, registry bypass,
-lost replies, stale trust, quarantine races, receipt tampering, recovery and
-two-worker claim behavior. The existing Profile S authority suite remains the
+lost replies, stale trust, quarantine races, receipt tampering, durable unknown
+and hold substates, exact provider-payload verification, recovery and real
+two-process claim behavior. The existing Profile S authority suite remains the
 source of SQLite crash and multiprocess authorization evidence.

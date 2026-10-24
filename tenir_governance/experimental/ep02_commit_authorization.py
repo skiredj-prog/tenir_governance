@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from hashlib import sha256
 import json
+import math
 import re
 import sqlite3
 from typing import Mapping
@@ -48,6 +49,9 @@ _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_TEXT = 256
 _MAX_ENVELOPE_BYTES = 32_768
+_MAX_PAYLOAD_BYTES = 1_048_576
+_MAX_PAYLOAD_DEPTH = 32
+_MAX_PAYLOAD_NODES = 10_000
 _BINDING_FIELDS = {
     "authority_id", "profile_id", "profile_generation",
     "institutional_scope", "operation_id", "idempotency_key",
@@ -165,6 +169,77 @@ def _canonical(value) -> bytes:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     ).encode("utf-8")
+
+
+def canonical_payload_bytes(payload: Mapping | None) -> bytes:
+    """Return the exact bounded JSON bytes bound by ``payload_digest``.
+
+    Profile S treats the provider ``metadata`` mapping as the external payload.
+    Callers use this helper before adjudication and the governor repeats the
+    same canonicalization immediately before dispatch.  Non-JSON values,
+    non-finite numbers and oversized payloads fail closed.
+    """
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, Mapping):
+        raise TypeError("payload must be a mapping")
+
+    nodes = 0
+    active_containers: set[int] = set()
+
+    def validate(value, depth=0):
+        nonlocal nodes
+        nodes += 1
+        if nodes > _MAX_PAYLOAD_NODES:
+            raise ValueError("payload has too many values")
+        if depth > _MAX_PAYLOAD_DEPTH:
+            raise ValueError("payload is too deeply nested")
+        if value is None or isinstance(value, (bool, str, int)):
+            return
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError("payload contains a non-finite number")
+            return
+        if isinstance(value, Mapping):
+            marker = id(value)
+            if marker in active_containers:
+                raise ValueError("payload contains a cycle")
+            active_containers.add(marker)
+            try:
+                for key, item in value.items():
+                    if not isinstance(key, str):
+                        raise ValueError("payload object keys must be strings")
+                    validate(item, depth + 1)
+            finally:
+                active_containers.remove(marker)
+            return
+        if isinstance(value, list):
+            marker = id(value)
+            if marker in active_containers:
+                raise ValueError("payload contains a cycle")
+            active_containers.add(marker)
+            try:
+                for item in value:
+                    validate(item, depth + 1)
+            finally:
+                active_containers.remove(marker)
+            return
+        raise ValueError("payload contains a non-JSON value")
+
+    validate(payload)
+    try:
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("payload is not canonical JSON") from exc
+    if len(encoded) > _MAX_PAYLOAD_BYTES:
+        raise ValueError("payload is too large")
+    return encoded
 
 
 def _name(value, label, *, empty=False):

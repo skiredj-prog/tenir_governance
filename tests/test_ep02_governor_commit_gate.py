@@ -2,6 +2,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
+import multiprocessing as mp
 import threading
 
 from cryptography.hazmat.primitives import serialization
@@ -21,6 +22,7 @@ from tenir_governance.experimental.ep02_commit_authorization import (
     authorization_request_to_dict,
     consumption_receipt_from_dict,
     consumption_receipt_to_dict,
+    canonical_payload_bytes,
     operation_binding,
 )
 from tenir_governance.experimental.ep02_durable_cas import DurableCASResult
@@ -36,10 +38,12 @@ from tenir_governance.operations.registry import (
     OperationRecord,
     OperationState,
 )
+from tenir_governance.operations.provider import MockProvider
 
 
 NOW = datetime(2026, 10, 24, tzinfo=timezone.utc)
-PAYLOAD_DIGEST = sha256(b'{"amount":"10"}').hexdigest()
+PAYLOAD = {"amount": "10"}
+PAYLOAD_DIGEST = sha256(canonical_payload_bytes(PAYLOAD)).hexdigest()
 
 
 def _raw_public(key):
@@ -47,6 +51,38 @@ def _raw_public(key):
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
     )
+
+
+def _raw_private(key):
+    return key.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+
+def _integrated_dispatch_worker(
+    registry_path, authority_path, receipt_private_key, barrier, queue,
+):
+    """Independent process competing for the integrated Profile S claim."""
+    try:
+        signing_key = Ed25519PrivateKey.from_private_bytes(receipt_private_key)
+        authority = ProfileSCommitAuthority.open(
+            authority_path, receipt_signing_key=signing_key,
+        )
+        registry = DurableOperationRegistry(registry_path)
+        governor = DualKernelGovernor(
+            object(),
+            TransitionMembrane(MembraneState()),
+            registry=registry,
+            commit_authority=authority,
+            require_commit_authorization=True,
+        )
+        barrier.wait(timeout=20)
+        result = governor.dispatch("idem-1", metadata=PAYLOAD)
+        queue.put((result.get("dispatched", False), result.get("reason", "")))
+    except Exception as exc:
+        queue.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
 def _snapshot(root, issuer, revision=1):
@@ -240,9 +276,9 @@ def test_request_and_receipt_serialization_round_trip(tmp_path):
 def test_dispatch_requires_explicit_exact_authorization(tmp_path):
     governor, registry, _, _, snapshot, proof, finding, request = _setup(tmp_path)
 
-    blocked = governor.dispatch("idem-1")
+    blocked = governor.dispatch("idem-1", metadata=PAYLOAD)
     authorized = _authorize(governor, snapshot, proof, finding, request)
-    dispatched = governor.dispatch("idem-1")
+    dispatched = governor.dispatch("idem-1", metadata=PAYLOAD)
 
     assert blocked["dispatched"] is False
     assert "No durable" in blocked["reason"]
@@ -323,7 +359,7 @@ def test_lost_consumption_reply_is_recovered_without_second_claim(tmp_path):
     )
     assert _authorize(governor, snapshot, proof, finding, request)["authorized"]
 
-    result = governor.dispatch("idem-1")
+    result = governor.dispatch("idem-1", metadata=PAYLOAD)
 
     assert result["dispatched"] is True
     durable = registry.get("idem-1")
@@ -340,11 +376,14 @@ def test_trust_advance_makes_consumption_stale_and_blocks_dispatch(tmp_path):
         "trust-advance-2", first, advanced,
     ).result == DurableCASResult.APPLIED
 
-    result = governor.dispatch("idem-1")
+    result = governor.dispatch("idem-1", metadata=PAYLOAD)
 
     assert result["dispatched"] is False
     assert result["commit_consumption_status"] == "STALE"
-    assert registry.get("idem-1").state == OperationState.RESERVED
+    durable = registry.get("idem-1")
+    assert durable.state == OperationState.RESERVED
+    assert durable.commit_consumption_status == "HOLD"
+    assert durable.commit_gate_events[-1]["status"] == "HOLD"
 
 
 def test_quarantine_between_consumption_and_claim_blocks_dispatch(tmp_path):
@@ -353,7 +392,7 @@ def test_quarantine_between_consumption_and_claim_blocks_dispatch(tmp_path):
     assert governor._consume_commit_authorization("idem-1")["consumed"]
     governor.membrane.lock_quarantine("incident-operator")
 
-    blocked = governor.dispatch("idem-1")
+    blocked = governor.dispatch("idem-1", metadata=PAYLOAD)
 
     assert blocked["dispatched"] is False
     assert "QUARANTINE_LOCK" in blocked["reason"]
@@ -363,7 +402,7 @@ def test_quarantine_between_consumption_and_claim_blocks_dispatch(tmp_path):
         "operator", "institution-a", "ceremony-G-R5-001", "reviewed",
     )
     assert released["released"]
-    assert governor.dispatch("idem-1")["dispatched"] is True
+    assert governor.dispatch("idem-1", metadata=PAYLOAD)["dispatched"] is True
 
 
 def test_blocked_authority_call_does_not_block_quarantine_activation(tmp_path):
@@ -380,7 +419,9 @@ def test_blocked_authority_call_does_not_block_quarantine_activation(tmp_path):
 
     service.consume = blocked_consume
     results = []
-    worker = threading.Thread(target=lambda: results.append(governor.dispatch("idem-1")))
+    worker = threading.Thread(
+        target=lambda: results.append(governor.dispatch("idem-1", metadata=PAYLOAD))
+    )
     worker.start()
     assert entered.wait(timeout=5)
 
@@ -401,7 +442,7 @@ def test_tampered_durable_receipt_blocks_dispatch(tmp_path):
     record.commit_authorization_receipt["signature"] = "00" * 64
     registry._persist()
 
-    result = governor.dispatch("idem-1")
+    result = governor.dispatch("idem-1", metadata=PAYLOAD)
 
     assert result["dispatched"] is False
     assert registry.get("idem-1").state == OperationState.RESERVED
@@ -415,12 +456,41 @@ def test_two_workers_share_one_consumption_and_one_dispatch_claim(tmp_path):
     )
     assert _authorize(governor, snapshot, proof, finding, request)["authorized"]
 
-    first = governor.dispatch("idem-1")
-    second = other.dispatch("idem-1")
+    first = governor.dispatch("idem-1", metadata=PAYLOAD)
+    second = other.dispatch("idem-1", metadata=PAYLOAD)
 
     assert first["dispatched"] is True
     assert second["dispatched"] is False
     assert registry.get("idem-1").state == OperationState.DISPATCHING
+    lookup = service.lookup_consumption(request)
+    assert lookup.receipt.decision == ConsumptionDecision.CONSUMED
+
+
+def test_two_processes_integrated_gate_obtain_one_dispatch_claim(tmp_path):
+    governor, registry, service, receipt_key, snapshot, proof, finding, request = _setup(tmp_path)
+    assert _authorize(governor, snapshot, proof, finding, request)["authorized"]
+    ctx = mp.get_context("spawn")
+    barrier = ctx.Barrier(2)
+    queue = ctx.Queue()
+    args = (
+        registry._store_path,
+        str(tmp_path / "authority.sqlite3"),
+        _raw_private(receipt_key),
+        barrier,
+        queue,
+    )
+    processes = [ctx.Process(target=_integrated_dispatch_worker, args=args) for _ in range(2)]
+
+    for process in processes:
+        process.start()
+    results = [queue.get(timeout=30) for _ in processes]
+    for process in processes:
+        process.join(timeout=30)
+        assert process.exitcode == 0
+
+    assert all(result[0] != "error" for result in results), results
+    assert sorted(result[0] for result in results) == [False, True]
+    assert DurableOperationRegistry(registry._store_path).get("idem-1").state == OperationState.DISPATCHING
     lookup = service.lookup_consumption(request)
     assert lookup.receipt.decision == ConsumptionDecision.CONSUMED
 
@@ -431,3 +501,127 @@ def test_resume_reports_authorization_step_before_dispatch(tmp_path):
     result = governor.resume_existing("idem-1")
 
     assert result["action"] == "authorize_commit"
+
+
+def test_payload_mismatch_blocks_before_consumption_or_provider_call(tmp_path):
+    governor, registry, service, _, snapshot, proof, finding, request = _setup(tmp_path)
+    provider = MockProvider(behavior="confirmed")
+    governor.provider = provider
+    assert _authorize(governor, snapshot, proof, finding, request)["authorized"]
+
+    result = governor.dispatch_and_execute(
+        "idem-1", metadata={"amount": "11"},
+    )
+
+    assert result["dispatched"] is False
+    assert "payload" in result["reason"].lower()
+    assert provider.calls == []
+    assert service.lookup_consumption(request).status.value == "NOT_RECORDED"
+    durable = registry.get("idem-1")
+    assert durable.state == OperationState.RESERVED
+    assert durable.commit_dispatch_claim_id == ""
+
+
+def test_exact_payload_is_frozen_verified_and_sent_to_provider(tmp_path):
+    governor, registry, _, _, snapshot, proof, finding, request = _setup(tmp_path)
+    provider = MockProvider(behavior="confirmed")
+    governor.provider = provider
+    assert _authorize(governor, snapshot, proof, finding, request)["authorized"]
+    payload = {"amount": "10"}
+
+    result = governor.dispatch_and_execute("idem-1", metadata=payload)
+    payload["amount"] = "mutated-after-call"
+
+    assert result["executed"] is True
+    assert provider.calls[0]["metadata"] is not payload
+    assert provider.calls[0]["metadata"] == PAYLOAD
+    assert registry.get("idem-1").state == OperationState.CONFIRMED
+
+
+def test_non_json_and_non_finite_payloads_fail_closed(tmp_path):
+    governor, registry, service, _, snapshot, proof, finding, request = _setup(tmp_path)
+    provider = MockProvider(behavior="confirmed")
+    governor.provider = provider
+    assert _authorize(governor, snapshot, proof, finding, request)["authorized"]
+
+    cyclic = {}
+    cyclic["self"] = cyclic
+    too_deep = {}
+    cursor = too_deep
+    for _ in range(34):
+        cursor["nested"] = {}
+        cursor = cursor["nested"]
+    invalid_results = [
+        governor.dispatch_and_execute("idem-1", metadata={"value": float("nan")}),
+        governor.dispatch_and_execute("idem-1", metadata={"value": object()}),
+        governor.dispatch_and_execute("idem-1", metadata={1: "ambiguous-key"}),
+        governor.dispatch_and_execute("idem-1", metadata=cyclic),
+        governor.dispatch_and_execute("idem-1", metadata=too_deep),
+        governor.dispatch_and_execute(
+            "idem-1", metadata={"value": "x" * 1_048_577},
+        ),
+    ]
+
+    assert all(result["dispatched"] is False for result in invalid_results)
+    assert provider.calls == []
+    assert service.lookup_consumption(request).status.value == "NOT_RECORDED"
+    assert registry.get("idem-1").state == OperationState.RESERVED
+
+
+def test_unknown_authority_outcome_is_durable_and_recoverable(tmp_path):
+    class UnavailableAuthority(ProfileSCommitAuthority):
+        def authorize(self, *args, **kwargs):
+            raise TimeoutError("authority unavailable")
+
+        def lookup_authorization(self, *args, **kwargs):
+            raise ConnectionError("lookup unavailable")
+
+    governor, registry, _, _, snapshot, proof, finding, request = _setup(
+        tmp_path, authority_class=UnavailableAuthority,
+    )
+
+    result = _authorize(governor, snapshot, proof, finding, request)
+
+    assert result["authorization_status"] == "UNKNOWN"
+    durable = registry.get("idem-1")
+    assert durable.commit_authorization_status == "TRUST_UNKNOWN"
+    assert durable.commit_authorization_request["request_id"] == request.request_id
+    assert durable.commit_gate_events[-1]["status"] == "TRUST_UNKNOWN"
+    assert governor.resume_existing("idem-1")["action"] == "reconcile_commit_authorization"
+
+
+def test_invalid_authority_signature_enters_durable_hold_and_security_event(tmp_path):
+    class InvalidSignatureAuthority(ProfileSCommitAuthority):
+        def authorize(self, *args, **kwargs):
+            receipt = super().authorize(*args, **kwargs)
+            return replace(receipt, signature=b"\x00" * 64)
+
+    governor, registry, _, _, snapshot, proof, finding, request = _setup(
+        tmp_path, authority_class=InvalidSignatureAuthority,
+    )
+
+    result = _authorize(governor, snapshot, proof, finding, request)
+
+    assert result["authorization_status"] == "INVALID"
+    durable = registry.get("idem-1")
+    assert durable.commit_authorization_status == "HOLD"
+    assert durable.commit_authorization_receipt is None
+    assert durable.commit_gate_events[-1]["security_event"] is True
+    assert governor.resume_existing("idem-1")["action"] == "return_authorization_result"
+
+
+def test_unavailable_trusted_keys_fail_closed_and_are_audited(tmp_path):
+    governor, registry, service, _, snapshot, proof, finding, request = _setup(tmp_path)
+    assert _authorize(governor, snapshot, proof, finding, request)["authorized"]
+
+    def unavailable_keys():
+        raise RuntimeError("key store unavailable")
+
+    service.trusted_receipt_keys = unavailable_keys
+    result = governor.dispatch("idem-1", metadata=PAYLOAD)
+
+    assert result["dispatched"] is False
+    durable = registry.get("idem-1")
+    assert durable.commit_consumption_status == "HOLD"
+    assert durable.commit_gate_events[-1]["security_event"] is True
+    assert durable.state == OperationState.RESERVED

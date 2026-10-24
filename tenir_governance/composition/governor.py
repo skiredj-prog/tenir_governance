@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
+import json
 import math
 import re
 import threading
@@ -722,6 +723,39 @@ class DualKernelGovernor:
         except (AttributeError, TypeError, ValueError):
             return False
 
+    def _record_commit_gate_status(
+        self,
+        idempotency_key: str,
+        *,
+        phase: str,
+        status: str,
+        reason: str,
+        security_event: bool = False,
+    ) -> bool:
+        """Persist and ledger a bounded authorization substate."""
+        persisted = False
+        try:
+            persisted = self.registry.record_commit_gate_status(
+                idempotency_key,
+                phase=phase,
+                status=status,
+                reason=reason,
+                security_event=security_event,
+            )
+        except Exception:
+            persisted = False
+        record = self.registry.get(idempotency_key)
+        self.ledger.append(
+            kernel="commit_authorization",
+            decision=(
+                Decision.HARD_VETO.value if security_event else Decision.HOLD.value
+            ),
+            rationale=f"{phase}:{status}: {reason}",
+            passage_id=record.passage_id if record is not None else "",
+            idempotency_key=idempotency_key,
+        )
+        return persisted
+
     def authorize_commit(
         self,
         idempotency_key: str,
@@ -798,30 +832,75 @@ class DualKernelGovernor:
             except Exception:
                 receipt = None
         if receipt is None:
+            reason = "Commit authorization outcome is unknown; dispatch remains blocked."
+            self._record_commit_gate_status(
+                idempotency_key,
+                phase="authorization",
+                status="TRUST_UNKNOWN",
+                reason=reason,
+            )
             return {
                 "authorized": False,
                 "authorization_status": "UNKNOWN",
                 "reason": (
-                    "Commit authorization outcome is unknown; dispatch remains blocked."
+                    reason
                     + (f" Authority error: {authority_error}" if authority_error else "")
                 ),
                 "operation_state": record.state.value,
             }
-        trusted = self.commit_authority.trusted_receipt_keys()
-        if not verify_authorization_receipt(receipt, request, trusted_keys=trusted):
+        try:
+            trusted = self.commit_authority.trusted_receipt_keys()
+        except Exception:
+            reason = "Commit authorization trust keys are unavailable or invalid."
+            self._record_commit_gate_status(
+                idempotency_key,
+                phase="authorization",
+                status="HOLD",
+                reason=reason,
+                security_event=True,
+            )
             return {
                 "authorized": False,
                 "authorization_status": "INVALID",
-                "reason": "Commit authorization receipt verification failed.",
+                "reason": reason,
+            }
+        if not verify_authorization_receipt(receipt, request, trusted_keys=trusted):
+            reason = "Commit authorization receipt verification failed."
+            self._record_commit_gate_status(
+                idempotency_key,
+                phase="authorization",
+                status="HOLD",
+                reason=reason,
+                security_event=True,
+            )
+            return {
+                "authorized": False,
+                "authorization_status": "INVALID",
+                "reason": reason,
             }
         if not self.registry.record_commit_authorization_receipt(
             idempotency_key, authorization_receipt_to_dict(receipt),
         ):
+            reason = "Signed authorization could not be bound durably to the operation."
+            self._record_commit_gate_status(
+                idempotency_key,
+                phase="authorization",
+                status="HOLD",
+                reason=reason,
+                security_event=True,
+            )
             return {
                 "authorized": False,
                 "authorization_status": "PERSISTENCE_FAILED",
-                "reason": "Signed authorization could not be bound durably to the operation.",
+                "reason": reason,
             }
+        if receipt.decision != AuthorizationDecision.AUTHORIZED:
+            self._record_commit_gate_status(
+                idempotency_key,
+                phase="authorization",
+                status="HOLD",
+                reason=receipt.reason,
+            )
         return {
             "authorized": receipt.decision == AuthorizationDecision.AUTHORIZED,
             "authorization_status": receipt.decision.value,
@@ -860,8 +939,31 @@ class DualKernelGovernor:
             request = authorization_request_from_dict(record.commit_authorization_request)
             authorization = authorization_receipt_from_dict(record.commit_authorization_receipt)
         except (TypeError, ValueError, AttributeError) as exc:
-            return {"consumed": False, "reason": f"Stored commit authorization is invalid: {exc}"}
-        trusted = self.commit_authority.trusted_receipt_keys()
+            reason = f"Stored commit authorization is invalid: {exc}"
+            self._record_commit_gate_status(
+                idempotency_key,
+                phase="consumption",
+                status="HOLD",
+                reason=reason,
+                security_event=True,
+            )
+            return {"consumed": False, "reason": reason}
+        try:
+            trusted = self.commit_authority.trusted_receipt_keys()
+        except Exception:
+            reason = "Commit authorization trust keys are unavailable or invalid."
+            self._record_commit_gate_status(
+                idempotency_key,
+                phase="consumption",
+                status="HOLD",
+                reason=reason,
+                security_event=True,
+            )
+            return {
+                "consumed": False,
+                "consumption_status": "INVALID",
+                "reason": reason,
+            }
         if (
             not self._commit_request_matches_record(request, record)
             or not verify_authorization_receipt(
@@ -869,9 +971,17 @@ class DualKernelGovernor:
             )
             or authorization.decision != AuthorizationDecision.AUTHORIZED
         ):
+            reason = "Stored commit authorization is rejected, invalid, or operation-mismatched."
+            self._record_commit_gate_status(
+                idempotency_key,
+                phase="consumption",
+                status="HOLD",
+                reason=reason,
+                security_event=True,
+            )
             return {
                 "consumed": False,
-                "reason": "Stored commit authorization is rejected, invalid, or operation-mismatched.",
+                "reason": reason,
             }
         proposed_claim = "dispatch:" + sha256(
             f"{idempotency_key}\0{request.request_id}".encode("utf-8")
@@ -901,11 +1011,18 @@ class DualKernelGovernor:
             except Exception:
                 consumption = None
         if consumption is None:
+            reason = "Commit consumption outcome is unknown; dispatch remains blocked."
+            self._record_commit_gate_status(
+                idempotency_key,
+                phase="consumption",
+                status="TRUST_UNKNOWN",
+                reason=reason,
+            )
             return {
                 "consumed": False,
                 "consumption_status": "UNKNOWN",
                 "reason": (
-                    "Commit consumption outcome is unknown; dispatch remains blocked."
+                    reason
                     + (f" Authority error: {consume_error}" if consume_error else "")
                 ),
             }
@@ -915,19 +1032,42 @@ class DualKernelGovernor:
                 consumption, request, authorization, trusted_keys=trusted,
             )
         ):
+            reason = "Commit consumption receipt verification failed."
+            self._record_commit_gate_status(
+                idempotency_key,
+                phase="consumption",
+                status="HOLD",
+                reason=reason,
+                security_event=True,
+            )
             return {
                 "consumed": False,
                 "consumption_status": "INVALID",
-                "reason": "Commit consumption receipt verification failed.",
+                "reason": reason,
             }
         if not self.registry.record_commit_consumption_receipt(
             idempotency_key, consumption_receipt_to_dict(consumption),
         ):
+            reason = "Signed consumption could not be bound durably to the operation."
+            self._record_commit_gate_status(
+                idempotency_key,
+                phase="consumption",
+                status="HOLD",
+                reason=reason,
+                security_event=True,
+            )
             return {
                 "consumed": False,
                 "consumption_status": "PERSISTENCE_FAILED",
-                "reason": "Signed consumption could not be bound durably to the operation.",
+                "reason": reason,
             }
+        if consumption.decision != ConsumptionDecision.CONSUMED:
+            self._record_commit_gate_status(
+                idempotency_key,
+                phase="consumption",
+                status="HOLD",
+                reason=consumption.reason,
+            )
         return {
             "consumed": consumption.decision == ConsumptionDecision.CONSUMED,
             "consumption_status": consumption.decision.value,
@@ -966,7 +1106,7 @@ class DualKernelGovernor:
                     consumption, request, authorization, trusted_keys=trusted,
                 )
             )
-        except (TypeError, ValueError, AttributeError):
+        except Exception:
             return False
 
     def resume_existing(
@@ -1025,6 +1165,30 @@ class DualKernelGovernor:
                 "tau_k_expired": tau_status.get("expired", False),
             }
         elif state == OperationState.RESERVED:
+            if (
+                record.commit_gate_required
+                and record.commit_authorization_status == "TRUST_UNKNOWN"
+            ):
+                return {
+                    "idempotency_key": idempotency_key,
+                    "action": "reconcile_commit_authorization",
+                    "reason": "The Profile S authority outcome is unknown; retry lookup with the original request ID.",
+                    "operation_state": state.value,
+                    "authorization_status": record.commit_authorization_status,
+                    "passage_id": record.passage_id,
+                }
+            if (
+                record.commit_gate_required
+                and record.commit_authorization_status == "HOLD"
+            ):
+                return {
+                    "idempotency_key": idempotency_key,
+                    "action": "return_authorization_result",
+                    "reason": record.commit_gate_last_reason or "The Profile S authorization is on HOLD.",
+                    "operation_state": state.value,
+                    "authorization_status": record.commit_authorization_status,
+                    "passage_id": record.passage_id,
+                }
             if record.commit_gate_required and record.commit_authorization_receipt is None:
                 return {
                     "idempotency_key": idempotency_key,
@@ -1036,6 +1200,24 @@ class DualKernelGovernor:
                     "amount": record.amount,
                 }
             if record.commit_gate_required:
+                if record.commit_consumption_status == "TRUST_UNKNOWN":
+                    return {
+                        "idempotency_key": idempotency_key,
+                        "action": "reconcile_commit_consumption",
+                        "reason": "The Profile S consumption outcome is unknown; retry lookup with the original request and dispatch claim IDs.",
+                        "operation_state": state.value,
+                        "consumption_status": record.commit_consumption_status,
+                        "passage_id": record.passage_id,
+                    }
+                if record.commit_consumption_status == "HOLD":
+                    return {
+                        "idempotency_key": idempotency_key,
+                        "action": "return_authorization_result",
+                        "reason": record.commit_gate_last_reason or "The Profile S consumption is on HOLD.",
+                        "operation_state": state.value,
+                        "consumption_status": record.commit_consumption_status,
+                        "passage_id": record.passage_id,
+                    }
                 body = record.commit_authorization_receipt.get("body", {})
                 if body.get("decision") != "AUTHORIZED":
                     return {
@@ -1113,6 +1295,7 @@ class DualKernelGovernor:
         idempotency_key: str,
         resource_id: str | None = None,
         amount: float = 0.0,
+        metadata: dict[str, Any] | None = None,
         *,
         _active_provider_call: bool = False,
     ) -> dict[str, Any]:
@@ -1121,6 +1304,24 @@ class DualKernelGovernor:
         # authorization while an already-active quarantine blocks dispatch.
         record = self.registry.get(idempotency_key)
         if record is not None and record.commit_gate_required and record.state == OperationState.RESERVED:
+            from ..experimental.ep02_commit_authorization import canonical_payload_bytes
+
+            try:
+                actual_payload_digest = sha256(
+                    canonical_payload_bytes(metadata)
+                ).hexdigest()
+            except (TypeError, ValueError) as exc:
+                return {
+                    "dispatched": False,
+                    "reason": f"Provider payload is invalid: {exc}.",
+                    "operation_state": record.state.value,
+                }
+            if actual_payload_digest != record.payload_digest:
+                return {
+                    "dispatched": False,
+                    "reason": "Provider payload does not match the authorized payload digest.",
+                    "operation_state": record.state.value,
+                }
             with self.membrane.state._quarantine_lock:
                 if self.membrane.state.quarantine_active:
                     return {
@@ -1138,7 +1339,9 @@ class DualKernelGovernor:
                 }
         # Linearize the quarantine check and dispatch claim against lock/unlock.
         with self.membrane.state._quarantine_lock:
-            result = self._dispatch_under_quarantine_lock(idempotency_key, resource_id, amount)
+            result = self._dispatch_under_quarantine_lock(
+                idempotency_key, resource_id, amount, metadata,
+            )
             if result.get("dispatched") and _active_provider_call:
                 with self._active_dispatches_lock:
                     self._active_dispatches.add(idempotency_key)
@@ -1149,6 +1352,7 @@ class DualKernelGovernor:
         idempotency_key: str,
         resource_id: str | None = None,
         amount: float = 0.0,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically claim the dispatch slot and transition to DISPATCHING.
 
@@ -1159,6 +1363,26 @@ class DualKernelGovernor:
         record = self.registry.get(idempotency_key)
         if record is None:
             return {"dispatched": False, "reason": "Operation not registered."}
+
+        if record.commit_gate_required:
+            from ..experimental.ep02_commit_authorization import canonical_payload_bytes
+
+            try:
+                actual_payload_digest = sha256(
+                    canonical_payload_bytes(metadata)
+                ).hexdigest()
+            except (TypeError, ValueError) as exc:
+                return {
+                    "dispatched": False,
+                    "reason": f"Provider payload is invalid: {exc}.",
+                    "operation_state": record.state.value,
+                }
+            if actual_payload_digest != record.payload_digest:
+                return {
+                    "dispatched": False,
+                    "reason": "Provider payload does not match the authorized payload digest.",
+                    "operation_state": record.state.value,
+                }
 
         commit_gate_verified = self._valid_commit_consumption(record)
         if not commit_gate_verified:
@@ -1311,9 +1535,28 @@ class DualKernelGovernor:
         If no provider is configured, falls back to the manual dispatch()
         method (state transition only, no external call).
         """
+        # Freeze the exact JSON payload before either verification or provider
+        # use so another thread cannot mutate the caller's mapping between the
+        # digest check and the external call.
+        provider_metadata = metadata
+        record = self.registry.get(idempotency_key)
+        if record is not None and record.commit_gate_required:
+            from ..experimental.ep02_commit_authorization import canonical_payload_bytes
+
+            try:
+                provider_metadata = json.loads(
+                    canonical_payload_bytes(metadata).decode("utf-8")
+                )
+            except (TypeError, ValueError) as exc:
+                return {
+                    "dispatched": False,
+                    "reason": f"Provider payload is invalid: {exc}.",
+                    "operation_state": record.state.value,
+                }
+
         # 1. Atomic claim
         dispatch_result = self.dispatch(
-            idempotency_key, resource_id, amount,
+            idempotency_key, resource_id, amount, provider_metadata,
             _active_provider_call=self.provider is not None,
         )
         if not dispatch_result.get("dispatched"):
@@ -1344,7 +1587,7 @@ class DualKernelGovernor:
                 action_type=record.action_type or "payment",
                 amount=amount,
                 agent_id=record.agent_id,
-                metadata=metadata,
+                metadata=provider_metadata,
             )
         except Exception as e:
             # Provider call threw an exception — fail closed to UNKNOWN
