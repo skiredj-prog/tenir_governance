@@ -58,12 +58,12 @@ def _admit(gate,op="candidate:op-1",attempt="a1",lei="candidate:lei-1",
     return gate.admit(**params)
 
 
-def _signed(private):
+def _signed(private,outcome="NON_EXECUTION_CONFIRMED"):
     payload=dict(
         schema_version="tenir.attempt.attestation.v1",
         evidence_id="signed-1",attempt_id="a1",lei="candidate:lei-1",
         nonce=NONCE,operation_digest=DIGEST,
-        outcome="NON_EXECUTION_CONFIRMED",authority_id="candidate-attestor",
+        outcome=outcome,authority_id="candidate-attestor",
         issued_at_ms=1000,expires_at_ms=2000,
     )
     return {**payload,"signature_hex":private.sign(
@@ -315,3 +315,91 @@ def test_opt_in_is_mandatory_even_with_candidate_resource_prefix(tmp_path):
     with pytest.raises(CandidateBudgetHold,match="explicit experimental_only"):
         CandidateAtomicBudgetAdmission(backend,verifier)
     assert _state(backend).reserved==Decimal("0")
+
+
+@pytest.mark.parametrize("outcome,expected,claimed_reserved,claimed_committed", [
+    ("EFFECT_CONFIRMED","COMMITTED",Decimal("0"),Decimal("20")),
+    ("NON_EXECUTION_CONFIRMED","RELEASED",Decimal("0"),Decimal("0")),
+])
+def test_signed_settlement_is_atomic_and_replayed_without_budget_drift(
+        candidate,outcome,expected,claimed_reserved,claimed_committed):
+    backend,gate,private,path=candidate
+    _admit(gate)
+    proof=_signed(private,outcome)
+    first=gate.settle_attested_candidate(
+        attempt_id="a1",signed_evidence=proof,observed_ms=1500)
+    assert first.status=="CANDIDATE_EVIDENCE_SETTLED_HOLD"
+    assert first.budget_state==expected
+    assert first.decision=="HOLD" and not first.execution_authorized
+    assert first.is_production_settlement is False
+    assert _state(backend).reserved==claimed_reserved
+    assert _state(backend).committed==claimed_committed
+    assert gate.settle_attested_candidate(
+        attempt_id="a1",signed_evidence=proof,observed_ms=1600)==first
+    assert len([e for e in gate.attempts.events("a1")
+                if e[0] in ("RESOLVED","FAILED")])==1
+
+
+def test_invalid_signed_claim_never_settles_budget(candidate):
+    backend,gate,private,path=candidate
+    _admit(gate)
+    altered=_signed(private)
+    altered["outcome"]="EFFECT_CONFIRMED"
+    with pytest.raises(CandidateBudgetHold,match="signed candidate evidence rejected"):
+        gate.settle_attested_candidate(
+            attempt_id="a1",signed_evidence=altered,observed_ms=1500)
+    assert _state(backend).reserved==Decimal("20")
+    assert gate.attempts.inspect("a1").attempt_state=="UNKNOWN"
+
+
+def test_conflicting_signed_terminal_claim_cannot_refund_committed_budget(candidate):
+    backend,gate,private,path=candidate
+    _admit(gate)
+    gate.settle_attested_candidate(
+        attempt_id="a1",signed_evidence=_signed(private,"EFFECT_CONFIRMED"),
+        observed_ms=1500)
+    with pytest.raises(CandidateBudgetHold,match="terminal candidate"):
+        gate.settle_attested_candidate(
+            attempt_id="a1",signed_evidence=_signed(private,"NON_EXECUTION_CONFIRMED"),
+            observed_ms=1600)
+    assert _state(backend).reserved==Decimal("0")
+    assert _state(backend).committed==Decimal("20")
+
+
+def test_injected_settlement_crash_rolls_back_budget_and_evidence(candidate,monkeypatch):
+    backend,gate,private,path=candidate
+    _admit(gate)
+    monkeypatch.setattr(gate,"_before_commit",
+                        lambda: (_ for _ in ()).throw(RuntimeError("settlement precommit crash")))
+    with pytest.raises(RuntimeError,match="settlement precommit crash"):
+        gate.settle_attested_candidate(
+            attempt_id="a1",signed_evidence=_signed(private),
+            observed_ms=1500)
+    assert gate.attempts.inspect("a1").attempt_state=="UNKNOWN"
+    assert _state(backend).reserved==Decimal("20")
+    assert _state(backend).committed==Decimal("0")
+    assert len(gate.attempts.events("a1"))==1
+
+
+def test_out_of_band_budget_commit_blocks_signed_candidate_settlement(candidate):
+    backend,gate,private,path=candidate
+    receipt=_admit(gate)
+    assert backend.commit(receipt.reservation_id).status=="COMMITTED"
+    with pytest.raises(CandidateBudgetHold,match="diverged"):
+        gate.settle_attested_candidate(
+            attempt_id="a1",signed_evidence=_signed(private),
+            observed_ms=1500)
+    assert _state(backend).committed==Decimal("20")
+    assert gate.attempts.inspect("a1").attempt_state=="UNKNOWN"
+
+
+def test_unknown_budget_never_settles_even_with_valid_signature(candidate):
+    backend,gate,private,path=candidate
+    _admit(gate)
+    assert backend.reconcile("candidate:op-1").status=="UNRESOLVED"
+    with pytest.raises(CandidateBudgetHold,match="uncertain"):
+        gate.settle_attested_candidate(
+            attempt_id="a1",signed_evidence=_signed(private,"EFFECT_CONFIRMED"),
+            observed_ms=1500)
+    assert gate.attempts.inspect("a1").attempt_state=="UNKNOWN"
+    assert _state(backend).committed==Decimal("0")
