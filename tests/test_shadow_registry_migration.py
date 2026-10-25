@@ -233,3 +233,75 @@ def test_non_finite_numeric_source_fails_without_shadow_epoch(tmp_path):
     with pytest.raises(ShadowMigrationHold,match="non-finite"):
         migrator.verify_or_stage()
     assert _counts(db)==(0,0)
+
+
+def _child_exit_before_shadow_commit(source_path, db_path):
+    registry=DurableOperationRegistry(source_path)
+    migrator=ShadowOperationMigrator(registry,db_path)
+    migrator._before_commit=lambda: os._exit(86)
+    migrator.verify_or_stage()
+
+
+def test_process_hard_exit_before_shadow_commit_is_rollback(tmp_path):
+    registry,migrator,source,db=_setup(tmp_path)
+    ctx=multiprocessing.get_context("spawn")
+    child=ctx.Process(target=_child_exit_before_shadow_commit,
+                      args=(str(source),str(db)))
+    child.start()
+    child.join(timeout=15)
+    assert child.exitcode==86
+    assert _counts(db)==(0,0)
+    assert migrator.verify_or_stage().status=="SHADOW_MATCHED_NO_CUTOVER"
+    assert _counts(db)==(1,1)
+
+
+def _child_hold_shadow_lock(source, db_path, inside_lock, release):
+    registry=DurableOperationRegistry(source)
+    migrator=ShadowOperationMigrator(registry,db_path)
+    def hold():
+        inside_lock.set()
+        if not release.wait(10):
+            raise RuntimeError("lock test timed out")
+    migrator._before_commit=hold
+    migrator.verify_or_stage()
+
+
+def _child_attempt_registration(source, started, completed):
+    registry=DurableOperationRegistry(source)
+    started.set()
+    assert registry.register(OperationRecord(
+        idempotency_key="later-operation",passage_id="p2",agent_id="agent-2",
+        action_type="audit",state=OperationState.CREATED))
+    completed.set()
+
+
+def test_shadow_import_serializes_with_concurrent_json_writer(tmp_path):
+    registry,migrator,source,db=_setup(tmp_path)
+    ctx=multiprocessing.get_context("spawn")
+    locked,release,started,completed=[ctx.Event() for _ in range(4)]
+    shadow=ctx.Process(target=_child_hold_shadow_lock,
+                       args=(str(source),str(db),locked,release))
+    writer=ctx.Process(target=_child_attempt_registration,
+                       args=(str(source),started,completed))
+    shadow.start()
+    try:
+        assert locked.wait(timeout=15), "migrator never acquired source lock"
+        writer.start()
+        assert started.wait(timeout=15), "writer failed to start"
+        # An active source writer cannot finish while the shadow snapshot
+        # owns the same JSON registry cross-process file lock.
+        assert not completed.wait(timeout=0.3), "JSON writer bypassed source snapshot lock"
+    finally:
+        release.set()
+        for child in (shadow,writer):
+            if child.pid:
+                child.join(timeout=15)
+                if child.is_alive():
+                    child.terminate()
+                    child.join(timeout=5)
+    assert shadow.exitcode==0
+    assert writer.exitcode==0
+    assert completed.is_set()
+    with pytest.raises(ShadowMigrationHold,match="source changed"):
+        migrator.inspect()
+    assert _counts(db)==(1,1)
