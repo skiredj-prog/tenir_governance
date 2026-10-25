@@ -194,3 +194,29 @@ def test_corrupted_record_or_attempted_mutation_cannot_grant_dispatch(setup):
         with pytest.raises(sqlite3.DatabaseError,match="cannot"):
             db.execute("DELETE FROM experimental_native_operations")
     assert authority.inspect(_record()).execution_authorized is False
+
+
+def test_replay_refuses_drifts_in_accounting_counter(setup):
+    _path,backend,authority=setup
+    authority.admit_created(_record())
+    with sqlite3.connect(backend._database_path) as db:
+        db.execute("UPDATE resources SET reserved='21' WHERE resource_id='lab:budget'")
+    with pytest.raises(SqliteAuthorityHold,match="I8 counter"):
+        authority.admit_created(_record())
+
+
+def test_never_use_backend_containing_real_budget_or_reservations(setup):
+    _path,backend,authority=setup
+    assert backend.register_resource("production-budget",Decimal("100"))=="REGISTERED"
+    with pytest.raises(SqliteAuthorityHold,match="non-laboratory"):
+        authority.admit_created(_record())
+
+
+def test_existing_g3_epoch_refuses_candidate_admission(setup):
+    _path,backend,authority=setup
+    with sqlite3.connect(backend._database_path) as db:
+        db.execute("CREATE TABLE shadow_authority_fence(epoch INTEGER PRIMARY KEY)")
+        db.execute("INSERT INTO shadow_authority_fence VALUES (1)")
+    with pytest.raises(SqliteAuthorityHold,match="G3 fenced shadow"):
+        authority.admit_created(_record())
+    assert backend.get_state("lab:budget").reserved==Decimal("0")
