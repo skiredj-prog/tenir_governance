@@ -18,8 +18,8 @@ def setup(tmp_path):
     return store
 
 def evidence(outcome="EFFECT_CONFIRMED", **kw):
-    return dict(verified=True,evidence_id="e1",attempt_id="a1",lei="L1",
-                outcome=outcome,receipt="verified-receipt",**kw)
+    return dict(dict(verified=True,evidence_id="e1",attempt_id="a1",lei="L1",
+                outcome=outcome,receipt="verified-receipt"),**kw)
 
 def test_t6_qualified_resolution_persists_after_restart(tmp_path):
     s=setup(tmp_path)
