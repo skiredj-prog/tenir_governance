@@ -69,11 +69,11 @@ class AttemptQualificationStore:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             active = db.execute(
-                "SELECT attempt_id FROM attempts WHERE lei=? AND state='UNKNOWN'", (lei,)
+                "SELECT attempt_id FROM attempts WHERE lei=?", (lei,)
             ).fetchone()
             if active:
                 db.rollback()
-                raise QualificationError("unresolved LEI blocks additional attempts")
+                raise QualificationError("LEI already bound; T8 retry authorization is not implemented")
             try:
                 db.execute("INSERT INTO attempts(attempt_id,lei,state,deadline_ms) VALUES(?,?,'UNKNOWN',?)",
                            (attempt_id, lei, deadline_ms))
