@@ -234,3 +234,12 @@ def test_governor_without_persistent_registry_fails_closed(tmp_path):
     assert report["decision"] == "HOLD"
     assert report["candidate_status"] == "HOLD"
     assert report["execution_authorized"] is False
+
+
+def test_insecure_custom_verifier_cannot_bind_to_live_operation(tmp_path):
+    _bridge, registry, _attempts, _private = _fixture(tmp_path)
+    fake = AttemptQualificationStore(
+        tmp_path/"untrusted.sqlite", lambda _value: object()
+    )
+    with pytest.raises(OperationLinkError, match="Ed25519"):
+        AttemptOperationObservationBridge(registry, fake)
