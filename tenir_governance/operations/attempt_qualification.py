@@ -143,8 +143,8 @@ class AttemptQualificationStore:
             if row is None:
                 db.rollback()
                 raise KeyError(attempt_id)
-            if proof.attempt_id != attempt_id or proof.lei != row[0] or proof.nonce != row[4]
-                    or proof.operation_digest != row[7]:
+            if (proof.attempt_id != attempt_id or proof.lei != row[0]
+                    or proof.nonce != row[4] or proof.operation_digest != row[7]):
                 db.rollback()
                 raise QualificationError("attempt/LEI evidence binding mismatch")
             if row[1] != "UNKNOWN":
