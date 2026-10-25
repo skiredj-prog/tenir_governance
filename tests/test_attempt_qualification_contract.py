@@ -9,17 +9,17 @@ def verifier(raw):
         raise ValueError("unsigned or unverified")
     return VerifiedEvidence(
         raw["evidence_id"],raw["attempt_id"],raw["lei"],
-        raw["outcome"],"independent-attestor",raw["receipt"],raw["nonce"],
+        raw["outcome"],"independent-attestor",raw["receipt"],raw["nonce"],raw["operation_digest"],
     )
 
 def setup(tmp_path):
     store = AttemptQualificationStore(tmp_path/"attempts.sqlite", verifier)
-    store.begin(attempt_id="a1",lei="L1",nonce="0123456789abcdef",deadline_ms=100)
+    store.begin(attempt_id="a1",lei="L1",nonce="0123456789abcdef",operation_digest="sha256:"+("ab"*32),deadline_ms=100)
     return store
 
 def evidence(outcome="EFFECT_CONFIRMED", **kw):
     return dict(dict(verified=True,evidence_id="e1",attempt_id="a1",lei="L1",
-                outcome=outcome,receipt="verified-receipt",nonce="0123456789abcdef"),**kw)
+                outcome=outcome,receipt="verified-receipt",nonce="0123456789abcdef",operation_digest="sha256:"+("ab"*32)),**kw)
 
 def test_t6_qualified_resolution_persists_after_restart(tmp_path):
     s=setup(tmp_path)
@@ -39,7 +39,7 @@ def test_timeout_never_proves_failure_or_releases_lei(tmp_path):
     assert s.timeout("a1",observed_ms=100)=="UNKNOWN"
     assert s.read("a1")["state"]=="UNKNOWN"
     with pytest.raises(QualificationError,match="LEI already bound"):
-        s.begin(attempt_id="a2",lei="L1",nonce="fedcba9876543210",deadline_ms=200)
+        s.begin(attempt_id="a2",lei="L1",nonce="fedcba9876543210",operation_digest="sha256:"+("ab"*32),deadline_ms=200)
 
 def test_unverified_attestation_does_not_mutate(tmp_path):
     s=setup(tmp_path)
@@ -67,7 +67,7 @@ def test_expired_attempt_may_still_be_resolved_by_evidence(tmp_path):
 
 def test_verifier_return_type_is_not_caller_boolean(tmp_path):
     s=AttemptQualificationStore(tmp_path/"attempts.sqlite",lambda _: True)
-    s.begin(attempt_id="a1",lei="L1",nonce="0123456789abcdef",deadline_ms=100)
+    s.begin(attempt_id="a1",lei="L1",nonce="0123456789abcdef",operation_digest="sha256:"+("ab"*32),deadline_ms=100)
     with pytest.raises(QualificationError,match="VerifiedEvidence"):
         s.qualify("a1",evidence(),observed_ms=99)
 
@@ -75,7 +75,7 @@ def test_t8_new_attempt_denied_even_after_terminal_without_authority(tmp_path):
     s=setup(tmp_path)
     s.qualify("a1",evidence("NON_EXECUTION_CONFIRMED"),observed_ms=99)
     with pytest.raises(QualificationError, match="T8 retry authorization"):
-        s.begin(attempt_id="a2",lei="L1",nonce="fedcba9876543210",deadline_ms=200)
+        s.begin(attempt_id="a2",lei="L1",nonce="fedcba9876543210",operation_digest="sha256:"+("ab"*32),deadline_ms=200)
     # T8 is unimplemented; terminal evidence does not grant retry authority.
 
 def test_nonce_substitution_is_rejected(tmp_path):
@@ -96,3 +96,9 @@ def test_timeout_event_is_idempotent(tmp_path):
     assert s.timeout("a1",observed_ms=120)=="UNKNOWN"
     assert s.timeout("a1",observed_ms=150)=="UNKNOWN"
     assert len([event for event in s.events("a1") if event[0]=="TIMEOUT_UNKNOWN"])==1
+
+def test_signed_context_substitution_rejected_by_store(tmp_path):
+    s=setup(tmp_path)
+    with pytest.raises(QualificationError,match="binding mismatch"):
+        s.qualify("a1",evidence(operation_digest="sha256:"+("cd"*32)),observed_ms=90)
+    assert s.read("a1")["state"]=="UNKNOWN"
