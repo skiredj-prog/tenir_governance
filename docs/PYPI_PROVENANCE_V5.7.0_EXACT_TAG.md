@@ -71,6 +71,18 @@ The wheel's `*.dist-info/RECORD` has **73 rows for 73 wheel archive entries**. A
 
 These checks apply to the downloaded **GitHub Actions build artifact**, not a fresh independent download of the files currently served from PyPI. Network resolution for `pypi.org` from the isolated audit container failed; web retrieval also returned 404 for the queried version endpoints. This is an **access/verification limitation**, not evidence of deletion or compromise. The successful upload and attestation logs remain separate evidence.
 
+## Additional direct-wheel smoke checks (2026-10-25)
+
+Using the GitHub Actions ZIP with verified SHA-256, the published-format wheel was placed directly on Python's module search path **without using an editable Git checkout**. The host container has some runtime dependencies preinstalled; this was **not** an isolated fresh `pip install` and PySyncObj was absent. The following checks were executed against the wheel payload:
+
+- Successful imports: `tenir_kernel`, `tenir_kernel.kernel`, `tenir_kernel.deployment_manifest`, `tenir_governance`, `tenir_governance.operations.sqlite_backend`, `tenir_governance.operations.provider`, `tenir_governance.composition.governor` (7/7).
+- Wheel distribution metadata reports `tenir-governance==5.7.0`.
+- `load_deployment_manifest_schema()` loaded `TENIR-Gov Deployment Manifest v1` from inside the wheel.
+- `enforce_host_scope({'HOST_SCOPE': 'single-host'}, release_version='5.7.0')` returned `single-host`.
+- `enforce_host_scope({'HOST_SCOPE': 'multi-host'}, release_version='5.7.0')` raised `RuntimeError` with the FM-20 multi-host refusal message, as intended.
+
+**Qualification:** these are targeted import/configuration smoke tests only, not a fresh-install compatibility matrix, provider-effect test, installed production deployment, or end-to-end safety guarantee. Network/DNS restrictions still prevent independent downloads directly from PyPI.
+
 ## Outstanding independent checks
 
 1. Retrieve the **live PyPI-hosted** wheel and sdist directly, record their own SHA-256 and compare them against the values above. A separate web retrieval observed stale PyPI index content and a 404 from the version JSON endpoint; this conflicts with the exact-SHA successful upload trace. Do not conclude that the version is currently unavailable without a live independent check that is not stale/cached.
