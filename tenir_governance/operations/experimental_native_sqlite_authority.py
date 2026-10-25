@@ -111,6 +111,59 @@ class ExperimentalSqliteOperationAuthority:
         canonical=self._canonical(record.to_dict())
         return record.idempotency_key,self._sha(canonical),amount
 
+    def _verify_budget_locked(self, db, resource_id: str) -> tuple[Decimal, Decimal, Decimal]:
+        """I8 replay-safe check before claiming that a local binding matches."""
+        if db.execute(
+            "SELECT 1 FROM resources WHERE resource_id NOT LIKE 'lab:%' LIMIT 1"
+        ).fetchone():
+            raise SqliteAuthorityHold("shared non-laboratory budget backend forbidden")
+        if db.execute(
+            "SELECT 1 FROM reservations WHERE idempotency_key NOT LIKE 'lab:%' LIMIT 1"
+        ).fetchone():
+            raise SqliteAuthorityHold("shared non-laboratory reservation forbidden")
+        if db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='shadow_authority_fence'"
+        ).fetchone() and db.execute(
+            "SELECT 1 FROM shadow_authority_fence LIMIT 1"
+        ).fetchone():
+            raise SqliteAuthorityHold("G3 fenced shadow does not grant authority")
+        budget=db.execute(
+            "SELECT capacity,reserved,committed FROM resources WHERE resource_id=?",
+            (resource_id,),
+        ).fetchone()
+        if budget is None:
+            raise SqliteAuthorityHold("missing lab budget")
+        numbers=tuple(
+            self.backend._amount(budget[name],allow_zero=True)
+            for name in ("capacity","reserved","committed")
+        )
+        if any(x is None for x in numbers):
+            raise SqliteAuthorityHold("invalid budget counters")
+        capacity,reserved,committed=numbers
+        if reserved+committed>capacity:
+            raise SqliteAuthorityHold("I8 counters already inconsistent")
+        if db.execute(
+            "SELECT 1 FROM compensations WHERE resource_id=? "
+            "AND status='REQUIRED' LIMIT 1", (resource_id,)
+        ).fetchone():
+            raise SqliteAuthorityHold("pending compensation")
+        totals={"RESERVED":Decimal(0),"COMMITTED":Decimal(0)}
+        for row in db.execute(
+            "SELECT amount,state FROM reservations WHERE resource_id=?",
+            (resource_id,)
+        ):
+            value=self.backend._amount(row["amount"])
+            if value is None:
+                raise SqliteAuthorityHold("invalid reservation amount")
+            if row["state"] in totals:
+                totals[row["state"]]+=value
+            elif row["state"] not in ("RELEASED","REFUNDED"):
+                raise SqliteAuthorityHold("unknown effect/reservation lifecycle")
+        if totals["RESERVED"]!=reserved or totals["COMMITTED"]!=committed:
+            raise SqliteAuthorityHold("I8 counter/ledger divergence")
+        return capacity,reserved,committed
+
     def _validate_locked(self, db, key: str, input_hash: str,
                          resource_id: str, amount: Decimal) -> SqliteAdmissionReceipt:
         entry=db.execute(
@@ -122,6 +175,7 @@ class ExperimentalSqliteOperationAuthority:
         ).fetchone()
         if entry is None or existing is None:
             raise SqliteAuthorityHold("unowned or partially committed operation")
+        self._verify_budget_locked(db,resource_id)
         if (entry["input_sha256"]!=input_hash
                 or entry["reservation_id"]!=existing["reservation_id"]
                 or existing["resource_id"]!=resource_id
@@ -163,46 +217,9 @@ class ExperimentalSqliteOperationAuthority:
                 return self._validate_locked(
                     db,key,input_hash,record.resource_id,amount
                 )
-            budget=db.execute(
-                "SELECT capacity,reserved,committed FROM resources WHERE resource_id=?",
-                (record.resource_id,),
-            ).fetchone()
-            if budget is None:
-                raise SqliteAuthorityHold("missing lab budget")
-            capacity,reserved,committed=map(
-                lambda item: self.backend._amount(item,allow_zero=True),
-                (budget["capacity"],budget["reserved"],budget["committed"]),
+            capacity,reserved,committed=self._verify_budget_locked(
+                db,record.resource_id
             )
-            if any(value is None for value in (capacity,reserved,committed)):
-                raise SqliteAuthorityHold("invalid budget counters")
-            if reserved+committed>capacity:
-                raise SqliteAuthorityHold("I8 counters already inconsistent")
-            if db.execute(
-                "SELECT 1 FROM compensations WHERE resource_id=? "
-                "AND status='REQUIRED' LIMIT 1", (record.resource_id,)
-            ).fetchone():
-                raise SqliteAuthorityHold("pending compensation")
-            # UNKNOWN indicates the real budget authority cannot certify
-            # effect non-execution, so all admission into this resource HOLDS.
-            if db.execute(
-                "SELECT 1 FROM reservations WHERE resource_id=? "
-                "AND state='UNKNOWN' LIMIT 1", (record.resource_id,)
-            ).fetchone():
-                raise SqliteAuthorityHold("unknown effect in resource")
-            totals={"RESERVED":Decimal(0),"COMMITTED":Decimal(0)}
-            for row in db.execute(
-                "SELECT amount,state FROM reservations WHERE resource_id=?",
-                (record.resource_id,)
-            ):
-                value=self.backend._amount(row["amount"])
-                if value is None:
-                    raise SqliteAuthorityHold("invalid reservation amount")
-                if row["state"] in totals:
-                    totals[row["state"]]+=value
-                elif row["state"] not in ("RELEASED","REFUNDED"):
-                    raise SqliteAuthorityHold("unknown reservation lifecycle")
-            if totals["RESERVED"]!=reserved or totals["COMMITTED"]!=committed:
-                raise SqliteAuthorityHold("I8 counter/ledger divergence")
             if reserved+committed+amount>capacity:
                 raise SqliteAuthorityHold("INSUFFICIENT_BUDGET")
             reservation_id=uuid.uuid4().hex
