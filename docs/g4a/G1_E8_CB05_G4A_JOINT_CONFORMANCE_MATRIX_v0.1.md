@@ -43,6 +43,44 @@
 | X18 | E8→provider | confirmed witness head, provider times out | provider outcome UNKNOWN, not CONFIRMED | J7 | provider simulator |
 | X19 | Recovery | witness corrupted/retired; attacker proposes lower head | reject; require signed ceremony and new store_id where applicable | J8 | independent operator |
 | X20 | All three | restore DB+quarantine+trust together while daemon live | next critical transition denied; no stale grant accepted | J2,J3,J6 | active adversarial runner |
+| INT-E8-01 | G1↔E8↔G4-A | stale epoch or divergent head submitted to synchronous pre-authorization | authenticated HARD_HOLD before business write/dispatch; see sub-vectors 01a–01h | J2,J3,J4,J5,J6 | independent witness, real grant, atomic CMT reservation |
+
+## INT-E8-01 — Synchronous pre-authorization rejects a restored or divergent authority (RED-first)
+
+**Boundary:** G1 privileged storage engine ↔ independent E8/CB-05 witness ↔ G4-A durable settlement.
+
+**Claim to falsify:** no irreversible provider dispatch and no new business settlement/idempotency consumption is permitted under a stale epoch, a rolled-back local head, or a divergent head **before** an authenticated, operation-bound authorization is durably established.
+
+**Preconditions:** a known-good witness head exists under externally pinned witness keys, independently retained on a second host; engine and worker use distinct OS identities; valid signed worker envelope and grant are supplied for the *unmodified* case; instrumented business-write boundary, external-dispatch counter and event recorder are observable. The test harness controls the adversarial local snapshot but **not** witness state, keys or the trusted-head pin.
+
+**Negative stimulus:** replace a locally valid snapshot by a prior epoch (example 5 → 4) **or** keep the epoch/sequence while changing `state_digest`/`quarantine_digest`; submit a signed `COMMIT` for that stale authority. A `PRE_AUTH_CHECK` that only compares timestamps or epoch numbers is insufficient.
+
+**Required handshake/oracle:**
+1. G1 validates `SO_PEERCRED`, envelope and grant, binds realm/store, trust generation, epoch, authoritative quarantine head, request ID, transaction ID, payload digest, grant digest and proposed state transition to a unique authorization ID; no business write has occurred.
+2. G1 submits an authenticated, bounded-time `PRE_AUTH_CHECK` to E8 with the **expected previous witness-head digest** and proposed transition. E8 evaluates an atomic compare-and-advance (or equivalent durable reservation) at the relevant linearization point. A read-only `get_head` followed by an unprotected local commit **does not pass**.
+3. If E8 rejects a stale epoch, rolled-back or equal-sequence divergent head, G1 records `E8_ROLLBACK_DETECTED` or `E8_HEAD_DIVERGENCE` and enters `HARD_HOLD`; no business/idempotency rows are created or changed and provider dispatch count remains zero. An independently protected security/HOLD event is allowed and desirable; therefore *zero file/SQLite writes* is **not** the acceptance criterion.
+4. If witness times out or acknowledgment is lost, G1 returns `WITNESS_OUTCOME_UNKNOWN` / `HOLD_GLOBAL`, never `REFUSED_BEFORE_EFFECT` or `CONFIRMED`; it reconciles the witness authorization ID before retry. A rejected signed response must itself be authenticated.
+5. If approved, G1 verifies the CMT's witness signature against **externally pinned** keys and scope (realm/store, audience, trust generation, epoch, previous head, state/quarantine/grant digests, operation/request/transaction IDs, authorization ID, expiry) and durably consumes its one-time right before allowing dispatch. A signed but expired, previously used, swapped or superseded CMT is rejected. The CMT cannot be a transferable bearer permit.
+6. **Concurrency/revocation:** race a second actor's epoch revocation or quarantine transition against the CMT; success is permitted only if the action's authorization and the revocation have a well-defined common ordering. No effect on a grant already invalidated at the authorization/dispatch boundary.
+
+**Sub-vectors and expected results:**
+
+| Case | Injection | Oracle |
+| --- | --- | --- |
+| INT-E8-01a | Epoch 4 presented while external head is at 5 | Authenticated `E8_ROLLBACK_DETECTED`; HARD_HOLD; zero business commits and dispatches |
+| INT-E8-01b | Same epoch/sequence, different state digest | `E8_HEAD_DIVERGENCE`; HARD_HOLD; zero business commits and dispatches |
+| INT-E8-01c | Witness unavailable, maliciously slow or ACK lost | UNKNOWN/HOLD, zero dispatch; query authorization status before retry |
+| INT-E8-01d | E8 approves and returns fresh one-time, fully bound CMT | At most one eligible local settlement; check external head and CMT binding; **does not** establish external provider effect |
+| INT-E8-01e | Replay, wrong realm/transaction/payload, expired token or forged witness key | REJECT/HOLD; no additional settlement or dispatch |
+| INT-E8-01f | Revocation/quarantine races with CMT issuance and dispatch | Invalidated-first action denied; verified unique linearization and no post-revocation dispatch |
+| INT-E8-01g | Crash after witness reservation, before SQLite COMMIT; restart/replay | No untracked effect, recover/release or reconcile reservation without double settlement |
+| INT-E8-01h | Crash after SQLite COMMIT before witness settlement confirmation | LOCAL_COMMITTED_WITNESS_PENDING, no dispatch until reconciled, never a false pre-commit refusal |
+
+**Required evidence:** exact witness and G1/G4-A SUT SHAs, signed witness transcript, externally verified head and key pin, full pre/post SQLite business-table snapshot and idempotency count, a durable security/HOLD event, dispatch call count, precise fault-injection barriers, complete request/CMT digests, independent host/UID topology, negative-control result and raw test logs.
+
+**Verdict:** PASS only if *all* normative sub-vectors pass against the real G1↔independent E8↔G4-A system at the stated trust boundary; FAIL if any rejected case makes a business commit or dispatch, or a stale/replayed CMT authorizes action. `MOCK_PASS` is exploratory and **never** satisfies this integration gate; SKIP/UNKNOWN → **PRODUCTION HOLD**.
+
+**Protocol gap / gating decision:** the proposed `PRE_AUTH_CHECK` and signed CMT are **not implemented** in G1. A read-only check followed by a local commit has a TOCTOU window; witness reservation before local commit introduces crash/compensation ambiguity. Do not declare INT-E8-01 resolved until a single-use, operation-scoped, externally attested reservation/consumption protocol and its failure windows are tested. Witness pinning remains independent of the local storage operator.
 
 ## Transaction boundary design decision (blocking)
 A post-local-commit witness CAS cannot retroactively prevent a provider effect already dispatched. The implementation MUST establish a **pre-effect attested authorization** or an equivalent proven protocol. Local SQLite and remote witness cannot be claimed as one atomic transaction. Define ordering and recovery for: grant reserve → witness authorization anchor → local commit → witness settlement anchor → effect dispatch → provider receipt. This is a *candidate sequence*, not an approved protocol; failure windows at every arrow must be formally resolved before dispatch.
