@@ -1,0 +1,9 @@
+Linux a540c710f5a3 6.18.38+ #1 SMP Thu Oct  1 17:24:34 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+uid=1000(ubuntu) gid=1000(ubuntu) groups=1000(ubuntu),4(adm),20(dialout),24(cdrom),25(floppy),27(sudo),29(audio),30(dip),44(video),46(plugdev)
+Python 3.12.3
+system-python 3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]
+sqlite 3.45.1
+Python 3.12.3
+pytest 9.1.1
+9d8bf1c462589ac497e3e03ece48d1d9ab0b9db3
+repo uid=1000 gid=1000 mode=755 path=.
