@@ -6,7 +6,7 @@
 
 `OperationState` is the durable operation/dispatch state machine. `AttemptState` in `operations.attempt_qualification` is a separate, single-host SQLite-bound **evidence qualification record**. It does not dispatch, reserve, compensate, authorize retry, or change any existing governor decision.
 
-- `begin(attempt_id, lei, nonce, deadline_ms)`: records an UNKNOWN attempt; any previously bound LEI is rejected while T8 is unspecified.
+- `begin(attempt_id, lei, nonce, operation_digest, deadline_ms)`: records an UNKNOWN attempt; any previously bound LEI is rejected while T8 is unspecified.
 - `timeout(attempt_id, observed_ms)`: records timeout knowledge without claiming non-execution, keeping state UNKNOWN.
 - `qualify(...)`: asks an independently provisioned verifier to authenticate evidence; accepted `EFFECT_CONFIRMED` closes as RESOLVED; accepted `NON_EXECUTION_CONFIRMED` closes as FAILED.
 - Terminal rewrites are rejected. An exact same qualified proof replays idempotently only if its evidence ID, signer, outcome and verification receipt remain identical. A changed proof cannot rewrite terminal history.
@@ -14,9 +14,9 @@
 
 ## Trust boundary (critical)
 
-`VerifiedEvidence` is **a verified-result type**, not a signature or proof by itself. Security relies on the supplied verifier authenticating signatures, trust roots, anti-replay, expiry, scope, payload/attempt/LEI binding, source authority, and contradiction policies. The module validates shape, attempt/LEI/**nonce** binding, uniqueness of LEI, and terminal monotonicity. A signed attestation authenticates what a trusted authority asserted; it does **not** independently establish that the authority's claim about external execution is factually correct. Therefore no arbitrary callback is sufficient for certification. Production deployment requires an independently audited attestation verifier and durable provenance binding.
+`VerifiedEvidence` is **a verified-result type**, not a signature or proof by itself. Security relies on the supplied verifier authenticating signatures, trust roots, anti-replay, expiry, scope, payload/attempt/LEI binding, source authority, and contradiction policies. The module validates shape, attempt/LEI/**nonce**/**operation SHA-256 digest** binding, uniqueness of LEI, and terminal monotonicity. A signed attestation authenticates what a trusted authority asserted; it does **not** independently establish that the authority's claim about external execution is factually correct. Therefore no arbitrary callback is sufficient for certification. Production deployment requires an independently audited attestation verifier and durable provenance binding.
 
-To use cryptographically verified evidence, install `tenir-governance[ep02]` and instantiate `Ed25519AttemptVerifier` with trusted Ed25519 public keys, a secured revocation set and a trustworthy clock. It enforces canonical typed signed fields, a bounded validity window, signature integrity, authority allowlisting and revocation. Caller-provided `observed_ms` is **not** the trusted clock and must not be treated as proof of chronology. Generate the attempt nonce with a CSPRNG (at least 128 bits) and bind any external operation/payload context at the authority layer; the prototype does not independently validate a provider's claims.
+To use cryptographically verified evidence, install `tenir-governance[ep02]` and instantiate `Ed25519AttemptVerifier` with trusted Ed25519 public keys, a secured revocation set and a trustworthy clock. It enforces canonical typed signed fields, a bounded validity window, signature integrity, authority allowlisting and revocation. Caller-provided `observed_ms` is **not** the trusted clock and must not be treated as proof of chronology. Generate the attempt nonce with a CSPRNG (at least 128 bits) and supply a canonical, authority-generated SHA-256 digest of the governed operation at `begin()`; the verifier signs the same digest. The prototype does not compute the upstream operation digest or independently validate a provider's claims.
 
 The timeout value is not a proof of failure. No `tau_K` SLA engine or liveness policy is installed by this candidate.
 
@@ -32,3 +32,7 @@ The timeout value is not a proof of failure. No `tau_K` SLA engine or liveness p
 4. Establish reviewed `tau_K` operational semantics and qualified evidence acceptance after expiry.
 5. Implement a separate RFC-4-conformant adapter in REG and distinguish T6/T7 actual conformance from these candidate unit tests.
 6. Keep T8 retry eligibility explicitly out of scope; no merge/release or REG+ claim without separate review.
+
+## Source-to-attempt binding
+
+`operation_digest` is mandatory and syntactically bound as `sha256:<64 lowercase hex>`. It must derive from a **canonical, trusted upstream operation context** (identity, scope, action, resource, payload, policy/version, intended execution site), not from arbitrary caller text. The store detects mismatches but cannot independently prove upstream canonicalization, nor does it coordinate an atomic transaction with the production governor registry. Substitution across otherwise-valid, independently signed operation digests is rejected by test.
