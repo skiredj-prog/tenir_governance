@@ -17,6 +17,12 @@ DENIED = {errno.EACCES, errno.EPERM, errno.EROFS}
 def attempt(label, action):
     try:
         action()
+    except sqlite3.OperationalError as exc:
+        # SQLite maps EACCES into OperationalError; require an access-related message.
+        msg = str(exc).lower()
+        if any(x in msg for x in ('unable to open database file', 'readonly', 'permission denied')):
+            return {'test': label, 'result': 'PASS', 'error': str(exc)}
+        return {'test': label, 'result': 'FAIL', 'error': str(exc)}
     except OSError as exc:
         if exc.errno in DENIED:
             return {'test': label, 'result': 'PASS', 'errno': exc.errno}
