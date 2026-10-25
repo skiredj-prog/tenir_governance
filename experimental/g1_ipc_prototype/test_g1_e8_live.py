@@ -122,3 +122,41 @@ def test_sequential_different_transaction_head_advances(lab):
     assert rows(lab)==(2,2)
     assert external_head(lab)['sequence']==2
     assert external_head(lab)==local_head(lab)
+
+
+def test_unix_socket_daemon_checks_peer_and_preauthed_local_commit(lab,tmp_path):
+    """Actual AF_UNIX request/response; same UID, NOT an OS isolation test."""
+    import os
+    import threading
+    import time
+    from g1_ipc import client_request
+    from g1_e8_guarded import serve_guarded
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    sock = str(tmp_path / 'g1.sock')
+    pub = tmp_path / 'worker.pub'
+    pub.write_bytes(KEY.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw))
+    daemon = threading.Thread(target=serve_guarded,
+                              args=(lab['db'],sock,str(pub),UID,'lab-store',lab['client']),
+                              kwargs={'once':True},daemon=True)
+    daemon.start()
+    for _ in range(200):
+        if os.path.exists(sock):
+            break
+        time.sleep(0.005)
+    assert os.path.exists(sock)
+    reply=client_request(sock,request('r_unix','tx_unix',epoch=5))
+    daemon.join(timeout=2)
+    assert not daemon.is_alive()
+    assert reply['decision']=='LOCAL_COMMITTED_PREAUTHORIZED'
+    assert rows(lab)==(1,1)
+    assert external_head(lab)['sequence']==1
+
+
+@pytest.mark.xfail(strict=True, reason='RED: local DB business rows are not recomputed into the attested head')
+def test_real_engine_must_detect_business_db_tamper_even_when_cached_head_untouched(lab):
+    """Intentionally unmet Q6-like invariant: local head matching != full state proof."""
+    assert submit(lab,request('r_good','tx_good',epoch=5))['decision']=='LOCAL_COMMITTED_PREAUTHORIZED'
+    with sqlite3.connect(lab['db']) as con:
+        con.execute('DELETE FROM g1_local_commits')  # privileged local actor
+    out=submit(lab,request('r_after_tamper','tx_other',epoch=5))
+    assert out['decision']=='HARD_HOLD'
