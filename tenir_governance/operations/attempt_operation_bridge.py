@@ -77,6 +77,9 @@ class AttemptOperationObservationBridge:
             raise OperationLinkError("persistent operation registry required")
         if not isinstance(attempts, AttemptQualificationStore):
             raise OperationLinkError("durable candidate attempt ledger required")
+        from .attempt_attestation import Ed25519AttemptVerifier
+        if not isinstance(attempts.verifier, Ed25519AttemptVerifier):
+            raise OperationLinkError("independently configured Ed25519 verifier required")
         self.registry = registry
         self.attempts = attempts
 
