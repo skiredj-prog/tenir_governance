@@ -38,6 +38,20 @@ class CandidateBudgetReceipt:
     source_is_production: bool = False
 
 
+@dataclass(frozen=True)
+class CandidateBudgetSettlementReceipt:
+    operation_key: str
+    attempt_id: str
+    reservation_id: str
+    attempt_state: str
+    source_state: str
+    budget_state: str
+    status: str = "CANDIDATE_EVIDENCE_SETTLED_HOLD"
+    decision: str = "HOLD"
+    execution_authorized: bool = False
+    is_production_settlement: bool = False
+
+
 class CandidateAtomicBudgetAdmission:
     """One-store admission demonstration with strict candidate-only names."""
 
@@ -211,3 +225,113 @@ class CandidateAtomicBudgetAdmission:
             return CandidateBudgetReceipt(
                 operation_key,attempt_id,rid,resource_id,str(normalized),
             )
+
+    def settle_attested_candidate(self, *, attempt_id: str,
+                                  signed_evidence: Any,
+                                  observed_ms: int) -> CandidateBudgetSettlementReceipt:
+        """ONE transaction: signed candidate outcome + I8 budget disposition.
+
+        This is a sandbox-only modeled settlement, not independent factual
+        truth of external effects, governor compensation or dispatch authority.
+        Signature verification happens before acquiring the SQLite writer
+        lock and is re-bound to immutable attempt/source/LEI/nonce inside it.
+        """
+        if not isinstance(attempt_id, str) or not attempt_id.strip():
+            raise CandidateBudgetHold("attempt identity required")
+        if type(observed_ms) is not int or observed_ms < 0:
+            raise CandidateBudgetHold("valid observation time required")
+        try:
+            proof=self.attempts.verifier(signed_evidence)
+        except Exception as exc:
+            raise CandidateBudgetHold("signed candidate evidence rejected") from exc
+        from .attempt_qualification import VerifiedEvidence
+        if not isinstance(proof,VerifiedEvidence):
+            raise CandidateBudgetHold("typed verified attestation required")
+        outcomes={
+            "EFFECT_CONFIRMED":("RESOLVED","EFFECT_ATTESTED","COMMITTED"),
+            "NON_EXECUTION_CONFIRMED":("FAILED","NO_EFFECT_ATTESTED","RELEASED"),
+        }
+        desired=outcomes.get(proof.outcome)
+        if desired is None:
+            raise CandidateBudgetHold("unknown signed candidate outcome")
+
+        with self.attempts._transaction() as db:
+            db.row_factory=sqlite3.Row
+            self._reject_fenced_handoff(db)
+            row=db.execute("""
+                SELECT a.operation_key,a.attempt_id,a.lei,a.nonce,
+                       s.operation_digest,a.state AS attempt_state,
+                       s.source_state,a.evidence_id,a.receipt,
+                       r.reservation_id,r.resource_id,r.amount,r.state AS budget_state
+                FROM candidate_attempts a
+                JOIN candidate_sources s ON s.operation_key=a.operation_key
+                JOIN reservations r ON r.idempotency_key=a.operation_key
+                WHERE a.attempt_id=?
+                """,(attempt_id,)).fetchone()
+            if row is None:
+                raise CandidateBudgetHold("candidate attempt or reservation missing")
+            op=row["operation_key"]
+            self._candidate_key(op,"operation")
+            self._candidate_key(row["resource_id"],"resource")
+            self._candidate_key(row["lei"],"LEI")
+            if (proof.attempt_id,proof.lei,proof.nonce,proof.operation_digest)!=(
+                    row["attempt_id"],row["lei"],row["nonce"],
+                    row["operation_digest"]):
+                raise CandidateBudgetHold("signed candidate identity/digest mismatch")
+            self._resource_consistent(db,row["resource_id"])
+            snapshot=self.attempts._snapshot_locked(db,attempt_id)
+            if snapshot.attempt_state!="UNKNOWN":
+                if (snapshot.attempt_state==desired[0]
+                        and snapshot.candidate_source_state==desired[1]
+                        and row["budget_state"]==desired[2]
+                        and row["evidence_id"]==proof.evidence_id
+                        and row["receipt"]==proof.verification_receipt
+                        and snapshot.evidence_receipt==proof.verification_receipt):
+                    return CandidateBudgetSettlementReceipt(
+                        op,attempt_id,row["reservation_id"],*desired)
+                raise CandidateBudgetHold("terminal candidate cannot be settled twice")
+            if (snapshot.candidate_source_state!="UNKNOWN"
+                    or row["budget_state"]!="RESERVED"
+                    or snapshot.evidence_id is not None):
+                raise CandidateBudgetHold("candidate already diverged from RESERVED/UNKNOWN")
+            amount=self._safe_decimal(row["amount"])
+            resource=db.execute(
+                "SELECT reserved,committed FROM resources WHERE resource_id=?",
+                (row["resource_id"],)).fetchone()
+            reserved=self._safe_decimal(resource["reserved"],allow_zero=True)
+            committed=self._safe_decimal(resource["committed"],allow_zero=True)
+            if reserved < amount:
+                raise CandidateBudgetHold("I8 reserved counter underflow")
+            next_reserved=reserved-amount
+            next_committed=committed+amount if desired[2]=="COMMITTED" else committed
+            db.execute(
+                "UPDATE resources SET reserved=?,committed=? WHERE resource_id=?",
+                (str(next_reserved),str(next_committed),row["resource_id"]),
+            )
+            budget_field=("committed_at" if desired[2]=="COMMITTED" else "released_at")
+            # The column is selected from a fixed internal enum, never input.
+            db.execute(
+                "UPDATE reservations SET state=?, "+budget_field+"=? "
+                "WHERE reservation_id=? AND state='RESERVED'",
+                (desired[2],time.time(),row["reservation_id"]),
+            )
+            db.execute(
+                "UPDATE candidate_sources SET source_state=?,evidence_id=?,receipt=? "
+                "WHERE operation_key=?",
+                (desired[1],proof.evidence_id,proof.verification_receipt,op),
+            )
+            db.execute(
+                "UPDATE candidate_attempts SET state=?,evidence_id=?,receipt=? "
+                "WHERE attempt_id=?",
+                (desired[0],proof.evidence_id,proof.verification_receipt,attempt_id),
+            )
+            db.execute(
+                "INSERT INTO candidate_events(attempt_id,kind,evidence_id,observed_ms) "
+                "VALUES(?,?,?,?)",
+                (attempt_id,desired[0],proof.evidence_id,observed_ms),
+            )
+            self._resource_consistent(db,row["resource_id"])
+            self.attempts._snapshot_locked(db,attempt_id)
+            self._before_commit()
+            return CandidateBudgetSettlementReceipt(
+                op,attempt_id,row["reservation_id"],*desired)
