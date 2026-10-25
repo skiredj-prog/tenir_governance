@@ -69,15 +69,27 @@ class ExperimentalSqliteOperationAuthority:
                     REFERENCES reservations(reservation_id),
                   state TEXT NOT NULL CHECK(state='RESERVED')
                 );
+                CREATE TABLE IF NOT EXISTS experimental_native_reservation_intents (
+                  operation_key TEXT PRIMARY KEY,
+                  reservation_id TEXT NOT NULL UNIQUE,
+                  authority_epoch TEXT NOT NULL,
+                  input_sha256 TEXT NOT NULL
+                );
+                CREATE TRIGGER IF NOT EXISTS native_intent_immutable
+                BEFORE UPDATE ON experimental_native_reservation_intents
+                BEGIN SELECT RAISE(ABORT,'native reservation intent immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS native_intent_no_delete
+                BEFORE DELETE ON experimental_native_reservation_intents
+                BEGIN SELECT RAISE(ABORT,'native reservation intent cannot be deleted'); END;
                 CREATE TRIGGER IF NOT EXISTS experimental_g3_reservation_only
                 BEFORE INSERT ON reservations
                 BEGIN
                   SELECT CASE WHEN NOT EXISTS (
-                    SELECT 1 FROM experimental_native_operations o
+                    SELECT 1 FROM experimental_native_reservation_intents i
                     JOIN experimental_g3_exclusive_epoch e
-                    ON e.epoch=o.authority_epoch AND e.singleton=1
-                    WHERE o.operation_key=NEW.idempotency_key
-                    AND o.reservation_id=NEW.reservation_id
+                    ON e.epoch=i.authority_epoch AND e.singleton=1
+                    WHERE i.operation_key=NEW.idempotency_key
+                    AND i.reservation_id=NEW.reservation_id
                     AND e.phase='ACTIVE_SQLITE_HOLD'
                   ) THEN RAISE(ABORT,'G3 epoch-bound native owner required') END;
                 END;
@@ -289,8 +301,17 @@ class ExperimentalSqliteOperationAuthority:
         epoch=db.execute(
             "SELECT epoch,phase FROM experimental_g3_exclusive_epoch WHERE singleton=1"
         ).fetchone()
+        intent=db.execute(
+            "SELECT operation_key,reservation_id,authority_epoch,input_sha256 "
+            "FROM experimental_native_reservation_intents WHERE operation_key=?",
+            (key,),
+        ).fetchone()
         if (epoch is None or epoch["phase"]!="ACTIVE_SQLITE_HOLD"
-                or entry["authority_epoch"]!=epoch["epoch"]):
+                or entry["authority_epoch"]!=epoch["epoch"]
+                or intent is None
+                or intent["authority_epoch"]!=epoch["epoch"]
+                or intent["reservation_id"]!=entry["reservation_id"]
+                or intent["input_sha256"]!=entry["input_sha256"]):
             raise SqliteAuthorityHold("reservation/operation authority epoch mismatch")
         if (entry["input_sha256"]!=input_hash
                 or entry["reservation_id"]!=existing["reservation_id"]
@@ -347,16 +368,14 @@ class ExperimentalSqliteOperationAuthority:
                 budget_reserved=True,reservation_id=reservation_id,
             )
             canonical=self._canonical(new_record.to_dict())
+            # Intent is an epoch-bound row in the SAME SQLite transaction.
+            # The reservation trigger refuses direct budget API writes that
+            # have not staged a matching durable intent.
             db.execute(
-                "INSERT INTO experimental_native_operations "
-                "(operation_key,input_sha256,record_sha256,record_json,"
-                "authority_epoch,reservation_id,state) "
-                "VALUES(?,?,?,?,?,?,'RESERVED')",
-                (key,input_hash,self._sha(canonical),
-                 canonical.decode("utf-8"),epoch,reservation_id),
+                "INSERT INTO experimental_native_reservation_intents "
+                "(operation_key,reservation_id,authority_epoch,input_sha256) "
+                "VALUES(?,?,?,?)",(key,reservation_id,epoch,input_hash),
             )
-            # DB-level reservation trigger requires the immutable native
-            # operation row and matching ACTIVE G3 epoch BEFORE any new claim.
             db.execute(
                 "INSERT INTO reservations "
                 "(reservation_id,idempotency_key,resource_id,amount,state,created_at) "
@@ -367,6 +386,15 @@ class ExperimentalSqliteOperationAuthority:
             db.execute(
                 "UPDATE resources SET reserved=? WHERE resource_id=?",
                 (str(reserved+amount),record.resource_id),
+            )
+            # FK enforcement requires the reservation to exist first.
+            db.execute(
+                "INSERT INTO experimental_native_operations "
+                "(operation_key,input_sha256,record_sha256,record_json,"
+                "authority_epoch,reservation_id,state) "
+                "VALUES(?,?,?,?,?,?,'RESERVED')",
+                (key,input_hash,self._sha(canonical),
+                 canonical.decode("utf-8"),epoch,reservation_id),
             )
             return self._validate_locked(
                 db,key,input_hash,record.resource_id,amount
