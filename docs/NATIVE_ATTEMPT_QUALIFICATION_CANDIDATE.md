@@ -36,3 +36,14 @@ The timeout value is not a proof of failure. No `tau_K` SLA engine or liveness p
 ## Source-to-attempt binding
 
 `operation_digest` is mandatory and syntactically bound as `sha256:<64 lowercase hex>`. It must derive from a **canonical, trusted upstream operation context** (identity, scope, action, resource, payload, policy/version, intended execution site), not from arbitrary caller text. The store detects mismatches but cannot independently prove upstream canonicalization, nor does it coordinate an atomic transaction with the production governor registry. Substitution across otherwise-valid, independently signed operation digests is rejected by test.
+
+## Read-only binding to production operation registry (candidate)
+
+`AttemptOperationObservationBridge` (`tenir_governance.operations.attempt_operation_bridge`) reads an actual **persistent** `DurableOperationRegistry` and produces a canonical SHA-256 binding from stable operation fields: idempotency key, passage, principal, action, amount/resource, payload hash, optional operation/scope IDs, payload digest and commit-gate requirement. It is **not** an external LEI-authority resolver: LEI provenance and the trusted source of these fields must be established upstream. In the attempt's SQLite transaction, `operation_key` is recorded and uniquely indexed, preventing the same source operation from being rebound to a different LEI. The signed attestation contains the same fingerprint.
+
+- `begin_observation` accepts only an UNKNOWN operation from a non-corrupt persistent registry. It **never** claims a dispatch or reserves/settles funds.
+- `qualify_observation` checks that the stored operation key/fingerprint and live source remain consistent, records signed evidence only in the attempt ledger, and **rechecks** the source. A mismatch or source-state change produces `HOLD`, with an explicit flag when evidence was recorded despite the race.
+- All results have `execution_authorized=false`. Even `EVIDENCE_RECORDED_NO_COMMIT_AUTHORITY` **must not** be treated as authority to alter `OperationState`, compensate a budget or trigger a retry.
+- There are **two non-atomically coupled stores**, and the registry can change between reads. A passing check is an observation, **not** a linearizable commit grant or distributed correctness proof. A true execution integration requires an agreed authority/transaction contract and crash-safe recovery protocol; it is explicitly **not** wired here.
+
+Adversarial tests use the real JSON-backed registry and SQLite attempt ledger: terminal drift before qualification, source mutation, corrupt registry, mismatched operation key, unsigned evidence, terminal transitions concurrent with signature verification, and unique source-operation ownership. Tests validate HOLD propagation and non-mutation of the governor registry.
