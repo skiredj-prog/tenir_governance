@@ -132,7 +132,7 @@ class ExperimentalSqliteOperationAuthority:
                 sentinel=path+".g3-sqlite-owner.initialized"
                 if (not os.path.isfile(marker) or not os.path.isfile(sentinel)):
                     raise SqliteAuthorityHold("G3 durable fence missing: HOLD")
-                if Path(sentinel).read_bytes()!=b"TENIR-G3-SQLITE-LAB-FENCE-v1\\n":
+                if Path(sentinel).read_bytes()!=b"TENIR-G3-SQLITE-LAB-FENCE-v1\n":
                     raise SqliteAuthorityHold("G3 initialized sentinel invalid")
                 expected={
                     "schema":"tenir.experimental.g3-exclusive.v1",
