@@ -31,7 +31,7 @@ def _public(private):
 def _source():
     return OperationRecord(idempotency_key="lab:op-1",passage_id="lab:passage-1",
                            agent_id="lab:agent-1",action_type="payment",
-                           resource_id="lab:budget",amount=Decimal("20"))
+                           resource_id="lab:budget",amount=20.0)
 
 
 def _open(path,public,*,revoked=frozenset(),now=1500):
