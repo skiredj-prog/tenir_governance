@@ -17,7 +17,8 @@ from tenir_governance.operations.experimental_native_sqlite_authority import Sql
 from tenir_governance.operations.native_attempt_attestation import (
     Ed25519AttemptVerifier, canonical_attestation_payload,
 )
-from tenir_governance.operations.registry import OperationRecord,OperationState
+from tenir_governance.operations.registry import OperationRecord,OperationState,DurableOperationRegistry
+from tenir_governance.operations.experimental_g3_exclusive_owner import G3ExperimentalExclusiveOwner
 from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
 
 NONCE="abcdef0123456789abcdef0123456789"
@@ -50,6 +51,9 @@ def candidate(tmp_path):
     private=Ed25519PrivateKey.generate()
     backend,authority=_open(path,_public(private))
     assert backend.register_resource("lab:budget",Decimal("100"))=="REGISTERED"
+    original=DurableOperationRegistry(str(path)+".json")
+    assert original.register(_source())
+    G3ExperimentalExclusiveOwner(original,backend,experimental_only=True).activate()
     authority.admit_created(_source())
     return backend,authority,private,path
 
