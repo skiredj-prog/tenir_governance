@@ -47,3 +47,9 @@ The timeout value is not a proof of failure. No `tau_K` SLA engine or liveness p
 - There are **two non-atomically coupled stores**, and the registry can change between reads. A passing check is an observation, **not** a linearizable commit grant or distributed correctness proof. A true execution integration requires an agreed authority/transaction contract and crash-safe recovery protocol; it is explicitly **not** wired here.
 
 Adversarial tests use the real JSON-backed registry and SQLite attempt ledger: terminal drift before qualification, source mutation, corrupt registry, mismatched operation key, unsigned evidence, terminal transitions concurrent with signature verification, and unique source-operation ownership. Tests validate HOLD propagation and non-mutation of the governor registry.
+
+## Governor-facing read-only API and security gate
+
+`inspect_governor_attempt(governor, attempts, operation_key=..., attempt_id=...)` reads the actual `DualKernelGovernor.registry` and returns a structured report with **`decision="HOLD"` and `execution_authorized=false` unconditionally**, including when the attempt ledger has signed `RESOLVED` or `FAILED` evidence. It must not call the provider, adjudication, commit or settlement paths. A nonpersistent registry, unlinked attempt, corrupt source, invalid source state or unmatched operation context yields `candidate_status="HOLD"`. The bridge only accepts an `Ed25519AttemptVerifier` for the live-registry boundary; standalone candidate store tests may use a synthetic verifier but do not imply live integration security.
+
+This API is intentionally observational. Adding authority to modify `OperationState` would require a **separate reviewed atomicity/reconciliation design**, accounting for cross-store crashes, stale evidence, concurrent provider effects and budget compensation. No exactly-once external or multi-host guarantee is asserted.
