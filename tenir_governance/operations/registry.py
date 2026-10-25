@@ -401,7 +401,8 @@ class DurableOperationRegistry:
         A missing or removed fence cannot be distinguished from an uninitialized
         one: this does NOT defend against a privileged actor deleting it.
         """
-        if self._store_path and os.path.lexists(self._store_path + ".authority-fence.json"):
+        if self._store_path and (os.path.lexists(self._store_path + ".authority-fence.json")
+                                 or os.path.lexists(self._store_path + ".authority-fence.initialized")):
             raise RuntimeError(
                 "G3 authority fence is installed; legacy JSON registry is read-only. "
                 "No execution authority is granted to the shadow store."
