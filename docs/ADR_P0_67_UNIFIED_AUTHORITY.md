@@ -89,3 +89,11 @@ The candidate `G3ShadowFenceCoordinator` introduces a **cooperative single-host 
 - The marker may be installed during a crash and leave the old registry permanently HOLD; there is **no automatic unfence** or production rollback path. Institutional recovery must be independently authorized, specified and tested.
 - Preexisting provider calls or unobserved effects are not cancelled. The drained precondition is intentionally strict.
 - G3 does not make the candidate SQLite projection an active, authenticated governor owner. The production governor still references JSON; no atomic operation/attempt/budget/dispatch transaction has been deployed. G3 **readiness/fencing is tested, G3 production cutover remains HOLD**.
+
+## G3 finalized-marker tamper gate — verified
+
+A finalized `FENCED_SHADOW_HOLD` epoch **must not automatically recreate** a deleted initialized sentinel or JSON fence marker. An attempted replay after such loss raises `ShadowMigrationHold` and preserves the surviving file's writer block. This separates legitimate restart of an unfinished PREPARED ceremony from attempted silent repair of an already finalized ownership boundary.
+
+- [TENIR-Gov source CI 40171619527](https://github.com/skiredj-prog/tenir_governance/actions/runs/40171619527): **110/110 scoped tests PASS**, pinned implementation `31da28b33cffec474c6321f139032e121b61860e`; [Governance CI 40171619587](https://github.com/skiredj-prog/tenir_governance/actions/runs/40171619587): PASS.
+- [REG independent candidate 40171689306](https://github.com/skiredj-prog/reg-conformance/actions/runs/40171689306): PASS, asserting G3 missing-finalized-marker HOLD and that the remaining sentinel still blocks an already-open legacy registry; [REG Capabilities 40171689307](https://github.com/skiredj-prog/reg-conformance/actions/runs/40171689307): PASS.
+- `FENCED_SHADOW_HOLD` is **not** `COMMIT_AUTHORIZED`. Recovery requires a separately authorized, designed and tested procedure; privileged deletion of all fence files, unpatched legacy clients, multi-host stores and in-flight provider effects remain outside the current guarantees.
