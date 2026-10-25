@@ -85,6 +85,26 @@ class AtomicAttemptCandidateAuthority:
                 BEFORE UPDATE OF attempt_id,operation_key,lei,nonce,deadline_ms
                 ON candidate_attempts
                 BEGIN SELECT RAISE(ABORT,'attempt identity immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS source_terminal_immutable
+                BEFORE UPDATE OF source_state,evidence_id,receipt ON candidate_sources
+                WHEN OLD.source_state != 'UNKNOWN'
+                BEGIN SELECT RAISE(ABORT,'source terminal projection immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS attempt_terminal_immutable
+                BEFORE UPDATE OF state,evidence_id,receipt ON candidate_attempts
+                WHEN OLD.state != 'UNKNOWN'
+                BEGIN SELECT RAISE(ABORT,'attempt terminal projection immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS source_no_delete
+                BEFORE DELETE ON candidate_sources
+                BEGIN SELECT RAISE(ABORT,'candidate source cannot be deleted'); END;
+                CREATE TRIGGER IF NOT EXISTS attempt_no_delete
+                BEFORE DELETE ON candidate_attempts
+                BEGIN SELECT RAISE(ABORT,'candidate attempt cannot be deleted'); END;
+                CREATE TRIGGER IF NOT EXISTS events_no_delete
+                BEFORE DELETE ON candidate_events
+                BEGIN SELECT RAISE(ABORT,'candidate event cannot be deleted'); END;
+                CREATE TRIGGER IF NOT EXISTS events_no_update
+                BEFORE UPDATE ON candidate_events
+                BEGIN SELECT RAISE(ABORT,'candidate event cannot be rewritten'); END;
             """)
 
     @contextmanager
