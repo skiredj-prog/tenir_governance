@@ -1,0 +1,33 @@
+name: G1 E8 experimental loopback integration
+
+on:
+  pull_request:
+    paths:
+      - 'experimental/g1_ipc_prototype/**'
+      - '.github/workflows/g1-e8-experimental.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  loopback-preauth-lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated test dependencies
+        run: python -m pip install 'pytest>=8,<10' 'cryptography>=42,<47'
+      - name: Run G1 E8 lab-only test suite
+        working-directory: experimental/g1_ipc_prototype
+        run: |
+          python -m pytest -q -ra test_g1_ipc.py test_g1_e8_integration.py test_g1_e8_live.py
+      - name: State assurance limits
+        run: |
+          echo 'CI PASS covers only same-host loopback mechanics.'
+          echo 'The xfailed RED tests are intentionally unmet security requirements.'
+          echo 'No real witness independence, production grant, quarantine or dispatch qualification.'
+          echo 'PRODUCTION HOLD'
