@@ -3,11 +3,11 @@ Date: 2026-10-25 | **REPORTED AUDIT, NOT INDEPENDENTLY VERIFIED** | PRODUCTION H
 
 ## Source baseline and provenance
 - SUT baseline: `9d8bf1c462589ac497e3e03ece48d1d9ab0b9db3`.
-- External operator reports 15 EP-02 test files, 190 pytest passes, zero failures, clean clone; evidence held outside repository in `/home/claude/r02/ep02/`. **This document has not inspected those files or rerun the tests.**
-- Operator reports R-02 Q6/Q1/P6 reproduction in `/home/claude/r02/` by same operator, not independent reviewer.
+- The same assistant session on the same host reports 15 EP-02 test files, 190 pytest passes, zero failures, clean clone; evidence held outside repository in `/home/claude/r02/ep02/`. **This document has not inspected those files or rerun the tests.**
+- The same assistant session on the same host reports R-02 Q6/Q1/P6 reproduction in `/home/claude/r02/` by same operator, not independent reviewer.
 - Existing CB-05 documents on this branch: `CB05_INDEPENDENT_CHECKPOINT_ARCHITECTURE_v0.2.md`, `CB05_CHECKPOINT_SPEC.md`, `CB05_ADVERSARIAL_REVIEW_DISPOSITION_2026-10-25.md`, `CB05_WITNESS_PROTOCOL_DECISION_2026-10-25.md`. Earlier baseline contracts live on `draft/g4a-r01-cb05-negative-contracts`. Verify versions against actual blob SHAs before publishing a canonical compilation.
 
-## EP-02 reuse triage (operator-reported code/test review)
+## EP-02 reuse triage (same-session assistant-reported code/test review)
 | Component | Triage | Limitation / next verification |
 | --- | --- | --- |
 | Ed25519 request, receipt, anchor and trust-snapshot verification | Reuse candidate | Inspect trust root, key provenance, revoked key paths and binding |
@@ -32,7 +32,7 @@ Date: 2026-10-25 | **REPORTED AUDIT, NOT INDEPENDENTLY VERIFIED** | PRODUCTION H
 Publish on a dedicated evidence branch, not the SUT or architectural branch, with:
 ```
 evidence/ep02/<run-id>/
-  provenance.md        # operator, SUT SHA, environment, command, exit status, scope/limits
+  provenance.md        # same-session assistant operator, SUT SHA, environment, command, exit status, scope/limits
   pytest.log
   junit.xml
   manifest.sha256      # sha256sum of actual files, generated after execution
