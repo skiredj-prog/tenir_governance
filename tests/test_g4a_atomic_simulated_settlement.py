@@ -278,9 +278,48 @@ def gated_settlement_worker(path, payload, ready, go, result):
     except SqliteAuthorityHold:result.put("HOLD")
 
 
-def quarantine_worker(source_path, started, finished):
-    started.set()
-    DurableOperationRegistry(source_path).set_quarantine(True,locked_by="other-process")
+def quarantine_worker(source_path, database_path, observations, finished):
+    """Observe actual kernel contention on the production lock acquisition.
+
+    A worker-start signal is insufficient: the process could be descheduled
+    before it attempts flock. Probe the same descriptor nonblockingly, then
+    preserve the original blocking call. Never infer contention from elapsed
+    time or from an acknowledgement that has not yet arrived.
+    """
+    from contextlib import closing
+    import fcntl
+    from unittest.mock import patch
+
+    gate = os.stat(source_path + ".quarantine.gate.lock")
+    real_flock = fcntl.flock
+
+    def observed_flock(fd, operation):
+        stat = os.fstat(fd)
+        if (operation != fcntl.LOCK_EX
+                or (stat.st_dev, stat.st_ino) != (gate.st_dev, gate.st_ino)):
+            return real_flock(fd, operation)
+        try:
+            real_flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            observations.put({"phase": "contended", "inode": stat.st_ino,
+                              "device": stat.st_dev})
+            real_flock(fd, operation)
+        else:
+            observations.put({"phase": "uncontended", "inode": stat.st_ino,
+                              "device": stat.st_dev})
+        # Read only after acquiring the gate. WAL readers see the committed
+        # state, not the parent's uncommitted changes. This also checks the
+        # ordering of gate acquisition relative to the SQLite commit.
+        with closing(sqlite3.connect(database_path)) as db:
+            version = db.execute(
+                "SELECT version FROM g4a_current WHERE operation_key='lab:g4a'"
+            ).fetchone()[0]
+            budget_state = db.execute("SELECT state FROM reservations").fetchone()[0]
+        observations.put({"phase": "acquired", "version": version,
+                          "budget_state": budget_state})
+
+    with patch("fcntl.flock", observed_flock):
+        DurableOperationRegistry(source_path).set_quarantine(True, locked_by="other-process")
     finished.set()
 
 
@@ -297,18 +336,34 @@ def test_t02_two_process_quarantine_commit_before_settlement(lab):
 
 def test_t02_settlement_transaction_before_quarantine_commit(lab):
     source,backend,a=lab;issued=admit(a)
-    ctx=mp.get_context("spawn");started=ctx.Event();finished=ctx.Event()
-    p=ctx.Process(target=quarantine_worker,args=(source._store_path,started,finished))
+    ctx=mp.get_context("spawn");observations=ctx.Queue();finished=ctx.Event()
+    p=ctx.Process(target=quarantine_worker,args=(
+        source._store_path, backend._database_path, observations, finished))
     def inside(stage):
         if stage=="after_budget":
-            p.start();assert started.wait(20)
-            # The shared gate is held until commit. No wall-clock sleep or
-            # latency claim: acknowledgement cannot precede this transaction.
+            p.start()
+            observed = observations.get(timeout=20)
+            gate = os.stat(source._store_path + ".quarantine.gate.lock")
+            assert observed == {"phase": "contended", "inode": gate.st_ino,
+                                "device": gate.st_dev}
             assert not finished.is_set()
     a._fault=inside
-    result=a.settle("lab:settle",[evidence(issued)])
-    assert result.operation_state=="SIMULATED_CONFIRMED"
-    assert finished.wait(20);p.join(20);assert p.exitcode==0
+    try:
+        result=a.settle("lab:settle",[evidence(issued)])
+        assert result.operation_state=="SIMULATED_CONFIRMED"
+        assert observations.get(timeout=20) == {
+            "phase": "acquired", "version": 2, "budget_state": "COMMITTED"}
+        assert finished.wait(20)
+        p.join(20)
+        assert p.exitcode==0
+    finally:
+        if p.pid is not None:
+            p.join(5)
+            if p.is_alive():
+                p.terminate()
+                p.join(5)
+        observations.close()
+        observations.join_thread()
     with pytest.raises(SqliteAuthorityHold):admit(a,"lab:other")
     assert counts(backend)["g4a_outbox"]==2
 
