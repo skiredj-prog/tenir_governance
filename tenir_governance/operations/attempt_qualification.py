@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
+from contextlib import closing
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -48,7 +50,7 @@ class AttemptQualificationStore:
             raise TypeError("independent evidence verifier required")
         self.verifier = verifier
         self.path = str(path)
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             db.execute("""CREATE TABLE IF NOT EXISTS attempts (
                 attempt_id TEXT PRIMARY KEY, lei TEXT NOT NULL, state TEXT NOT NULL,
                 deadline_ms INTEGER NOT NULL, nonce TEXT NOT NULL, evidence_id TEXT, authority_id TEXT,
@@ -71,7 +73,7 @@ class AttemptQualificationStore:
                 or not isinstance(nonce, str) or len(nonce) < 16 or len(nonce) > 256
                 or type(deadline_ms) is not int or deadline_ms < 0):
             raise QualificationError("invalid attempt identity or deadline")
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             active = db.execute(
                 "SELECT attempt_id FROM attempts WHERE lei=?", (lei,)
@@ -83,14 +85,14 @@ class AttemptQualificationStore:
                 db.execute("INSERT INTO attempts(attempt_id,lei,nonce,state,deadline_ms) VALUES(?,?,?,'UNKNOWN',?)",
                            (attempt_id, lei, nonce, deadline_ms))
                 db.execute("INSERT INTO events(attempt_id,transition,observed_ms) VALUES(?,'BEGIN',?)",
-                           (attempt_id, deadline_ms))
+                           (attempt_id, int(time.time() * 1000)))
             except sqlite3.IntegrityError as exc:
                 db.rollback()
                 raise QualificationError("duplicate attempt id") from exc
             db.commit()
 
     def read(self, attempt_id: str) -> dict:
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             row = db.execute("SELECT attempt_id,lei,state,deadline_ms,nonce,evidence_id,authority_id,verification_receipt,outcome FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
         if row is None:
             raise KeyError(attempt_id)
@@ -99,7 +101,7 @@ class AttemptQualificationStore:
     def timeout(self, attempt_id: str, *, observed_ms: int) -> str:
         if type(observed_ms) is not int or observed_ms < 0:
             raise QualificationError("invalid clock")
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT state,deadline_ms FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
             if row is None:
@@ -128,7 +130,7 @@ class AttemptQualificationStore:
         if proof.outcome not in ("EFFECT_CONFIRMED", "NON_EXECUTION_CONFIRMED"):
             raise QualificationError("unsupported evidence outcome")
         target = AttemptState.RESOLVED if proof.outcome == "EFFECT_CONFIRMED" else AttemptState.FAILED
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT lei,state,evidence_id,outcome,nonce,authority_id,verification_receipt FROM attempts WHERE attempt_id=?",
                              (attempt_id,)).fetchone()
@@ -154,6 +156,6 @@ class AttemptQualificationStore:
         return target.value
 
     def events(self, attempt_id: str) -> list[tuple]:
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             return db.execute("SELECT transition,evidence_id,observed_ms FROM events WHERE attempt_id=? ORDER BY seq",
                               (attempt_id,)).fetchall()
