@@ -32,3 +32,27 @@ Applies only to draft TENIR-Gov PR #65 and isolated REG Conformance PR #48.
 **HOLD** any claim of native normative CT-R4-011/012 conformance, production dispatch authorization, T8 admission, REG+ promotion, publication, merger and packaging.
 
 A green test result does not allow a silent transition from `EVIDENCE_RECORDED_NO_COMMIT_AUTHORITY` to operational `PASS`. Source and REG candidate require separate review and approval before merging.
+
+## P0 atomic single-store candidate (2026-10-25)
+
+A separate experimental authority now exists at `tenir_governance.operations.attempt_atomic_candidate.AtomicAttemptCandidateAuthority`. In one SQLite WAL transaction it writes:
+
+- A **candidate** source operation projection, uniquely identified by operation key and LEI.
+- The one permitted attempt for that source, with a signed operation digest, attempt ID, LEI, nonce and qualification deadline.
+- The signed evidence receipt and matching source/attempt terminal states, plus a durable event.
+
+The transaction is serialized by `BEGIN IMMEDIATE`, with `synchronous=FULL` and foreign-key enforcement. SQLite triggers prevent identity mutation, terminal-state rewrites and event deletion/modification. The constructor rejects arbitrary verifier callbacks; callers must supply the configured Ed25519 verifier. Conflicting signed outcomes compete for one terminal transition; an exact repeat is idempotent. The tests exercise two-process races, injected rollback and **real child-process hard exit immediately before COMMIT** and immediately after successful COMMIT, followed by restart/replay.
+
+**P0 scoped result:** [66 targeted tests PASS](https://github.com/skiredj-prog/tenir_governance/actions/runs/40168273609) on commit `105ad0755c9730f6c003d46fb98acd5198710a3d`. This proves atomicity of *candidate projection + attempt + evidence* within a single tested SQLite database, not atomicity of a source JSON operation with a second database, and not power-loss/institutional durability.
+
+### Non-contamination constraints
+
+`CandidateAtomicObservation.decision` is always `HOLD`; `execution_authorized=false`; `is_governor_operation_state=false`. The candidate source projection is a separate experimental model, **not** a replacement or mirror authoritative for `DurableOperationRegistry`. It cannot reserve, authorize, dispatch, compensate or grant retries. The production governor and its JSON registry are unchanged.
+
+### Decision options for production work
+
+**Option A — unify actual operation, attempt and budget authority in one transactional durable backend (preferred engineering direction, subject to design review).** Define an integration/migration plan which gives the governor one authoritative operation state and a transactionally bound attempt and evidence lifecycle, respecting the existing budget/consensus contract. Then test crash recovery at every boundary, dispatch claims, provider late effects and budget I8. The candidate is a specification/test fixture, not a deployable adapter.
+
+**Option B — keep separate durable stores with an explicit prepare/reconcile coordinator.** This demands a proved recovery protocol with idempotent state transitions and safe uncertainty, particularly under crash, lost responses and quarantine. Merely acquiring a lock or checking both stores twice is inadequate.
+
+Neither option is approved for execution by these tests. Native normative CT-R4-011/012, T8, production settlement, cross-host and published REG+ claims remain **HOLD**.
