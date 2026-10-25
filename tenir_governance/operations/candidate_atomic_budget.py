@@ -138,6 +138,7 @@ class CandidateAtomicBudgetAdmission:
             raise CandidateBudgetHold("invalid operation SHA-256 binding")
 
         with self.attempts._transaction() as db:
+            db.row_factory = sqlite3.Row
             self._reject_fenced_handoff(db)
             capacity,reserved,committed=self._resource_consistent(db,resource_id)
             source=db.execute(
