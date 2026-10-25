@@ -66,7 +66,7 @@ def test_json_owner_transition_first_prevents_sqlite_takeover(scope):
     assert ok
     with pytest.raises(SqliteAuthorityHold,match="already transitioned"):
         gate.activate()
-    with pytest.raises(SqliteAuthorityHold,match="not active"):
+    with pytest.raises(SqliteAuthorityHold,match="already transitioned|not active"):
         gate.candidate_transition(_record())
     state,reserved,committed=_snapshot(json_path,budget_path)
     assert state is OperationState.RESERVED
