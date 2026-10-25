@@ -56,3 +56,13 @@ The transaction is serialized by `BEGIN IMMEDIATE`, with `synchronous=FULL` and 
 **Option B — keep separate durable stores with an explicit prepare/reconcile coordinator.** This demands a proved recovery protocol with idempotent state transitions and safe uncertainty, particularly under crash, lost responses and quarantine. Merely acquiring a lock or checking both stores twice is inadequate.
 
 Neither option is approved for execution by these tests. Native normative CT-R4-011/012, T8, production settlement, cross-host and published REG+ claims remain **HOLD**.
+
+## Budget colocation and updated CI (2026-10-25)
+
+The one-store candidate schema can also be created **in the same physical SQLite file** as `SQLiteConsensusBackend` without changing real reservation ownership. Tests explicitly demonstrate that even an authenticated no-effect attestation **does not call release or refund**, and an existing COMMITTED budget remains COMMITTED; any compensation requires a separate approved authority and transaction contract.
+
+- [Source scoped CI 40168586084](https://github.com/skiredj-prog/tenir_governance/actions/runs/40168586084): **69/69 PASS**.
+- [Independent REG candidate CI 40168660397](https://github.com/skiredj-prog/reg-conformance/actions/runs/40168660397): **PASS** on source pin `18d24dda78f0234550311ddf1bbcb6a0d94621b2`.
+- Registry JSON is still not part of the SQLite transaction, budget APIs commit in separate transactions, and no external effect is authorized. Physical co-location is a feasibility result only.
+
+The explicit migration acceptance gates are recorded in `docs/ADR_P0_67_UNIFIED_AUTHORITY.md`. Production P0 **remains HOLD** pending migration and full provider/budget crash verification.
