@@ -42,7 +42,12 @@ class CandidateAtomicBudgetAdmission:
     """One-store admission demonstration with strict candidate-only names."""
 
     def __init__(self, backend: SQLiteConsensusBackend,
-                 verifier: Ed25519AttemptVerifier):
+                 verifier: Ed25519AttemptVerifier, *, experimental_only: bool = False):
+        # An explicit opt-in is needed in addition to candidate: naming.
+        # This is an accidental-use guard, NOT deployment-grade isolation.
+        if experimental_only is not True:
+            raise CandidateBudgetHold(
+                "explicit experimental_only=True required; never use a live budget")
         if not isinstance(backend, SQLiteConsensusBackend):
             raise CandidateBudgetHold("SQLiteConsensusBackend required")
         self.backend = backend
