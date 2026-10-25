@@ -74,8 +74,9 @@ def test_well_signed_cross_attempt_nonce_still_rejected(tmp_path):
 @pytest.mark.parametrize("now", [999,2001])
 def test_time_outside_signed_validity_rejected(tmp_path,now):
     store,private=configured(tmp_path,now=now)
-    with pytest.raises(QualificationError,match="expired, premature"):
+    with pytest.raises(QualificationError,match="evidence verification rejected") as failure:
         store.qualify("a1",signed(private),observed_ms=1500)
+    assert "expired, premature" in str(failure.value.__cause__)
 
 def test_revoked_signer_rejected(tmp_path):
     store,private=configured(tmp_path,revoked=frozenset({"trusted-authority"}))
@@ -106,5 +107,6 @@ def test_boolean_clock_rejected(tmp_path):
 def test_oversized_ttl_even_valid_signature_is_rejected(tmp_path):
     store,private=configured(tmp_path)
     proof=signed(private,expires_at_ms=100000)
-    with pytest.raises(QualificationError,match="TTL"):
+    with pytest.raises(QualificationError,match="evidence verification rejected") as failure:
         store.qualify("a1",proof,observed_ms=1500)
+    assert "TTL" in str(failure.value.__cause__)
