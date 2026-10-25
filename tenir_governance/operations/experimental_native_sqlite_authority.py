@@ -93,6 +93,16 @@ class ExperimentalSqliteOperationAuthority:
                     AND e.phase='ACTIVE_SQLITE_HOLD'
                   ) THEN RAISE(ABORT,'G3 epoch-bound native owner required') END;
                 END;
+                -- G4 dispatch and external-effect settlement are absent.
+                -- No budget API may upgrade a lab RESERVED claim to
+                -- COMMITTED/RELEASED/UNKNOWN outside a future epoch-aware
+                -- atomic settlement protocol.
+                CREATE TRIGGER IF NOT EXISTS experimental_g3_no_budget_transition
+                BEFORE UPDATE ON reservations
+                BEGIN SELECT RAISE(ABORT,'G3 budget settlement unavailable'); END;
+                CREATE TRIGGER IF NOT EXISTS experimental_g3_no_budget_delete
+                BEFORE DELETE ON reservations
+                BEGIN SELECT RAISE(ABORT,'G3 budget deletion unavailable'); END;
                 CREATE TRIGGER IF NOT EXISTS experimental_native_no_update
                 BEFORE UPDATE ON experimental_native_operations
                 BEGIN SELECT RAISE(ABORT,'admitted record is immutable'); END;
