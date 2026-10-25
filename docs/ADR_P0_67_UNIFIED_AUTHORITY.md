@@ -116,3 +116,19 @@ The opt-in `CandidateAtomicBudgetAdmission` uses the **actual SQLiteConsensusBac
 - [REG artifact #12590889066](https://github.com/skiredj-prog/reg-conformance/actions/runs/40174454700/artifacts/12590889066): reported archive digest `sha256:9aebe0141bb2b97be14be055a6c7905cedc73001171f8f086d9d4fad21bb4334`.
 
 **Verdict:** G1 experimental atomic operation-candidate/attempt/reservation proof **PASS in a disposable single-host scope**. Actual governor `OperationState` authority, deployment G3 cutover, G4 provider dispatch/settlement, T8 and multi-host/partition guarantees **HOLD**.
+
+## G1 experimental signed evidence ↔ I8 settlement transaction — 2026-10-25
+
+The isolated `CandidateAtomicBudgetAdmission.settle_attested_candidate()` now demonstrates the **other half** of a coherent SQLite candidate lifecycle. With an independently configured `Ed25519AttemptVerifier`, an already RESERVED candidate operation and signed evidence binding attempt, LEI, nonce and operation SHA-256 digest:
+
+- Authenticated `EFFECT_CONFIRMED` maps to candidate attempt `RESOLVED`, source projection `EFFECT_ATTESTED`, existing SQLite budget reservation `COMMITTED` and I8 resource counters (reserved decreases, committed increases).
+- Authenticated `NON_EXECUTION_CONFIRMED` maps to candidate attempt `FAILED`, source projection `NO_EFFECT_ATTESTED`, budget reservation `RELEASED` and I8 counters (reserved decreases without changing committed).
+- The source, attempt, evidence event, reservation disposition and resource counters are written **in a single SQLite transaction**. Exact same qualified proof is idempotent. Changed/contradictory terminal attestations are rejected, including concurrent opposing writers.
+- Failed signature, incorrect digest/nonce/identity, budget `UNKNOWN`, required compensation, outside-budget mutation or ledger disagreement results in HOLD; there is **no automatic provider retry or compensation**.
+- Pre-commit injected rollback and child-process abrupt exit are tested at both admission and settlement boundaries. No automatic T8 new-attempt right is created.
+
+**Security boundary:** Ed25519 verifies who signed a claim, not whether a provider actually performed the claimed effect or whether non-execution is factually established. Only disposable candidate budget resources are permitted, with explicit `experimental_only=True`. The production JSON `OperationState`, institutional grant issuance, external provider calls and production I8 settlement have **not** been coupled to this candidate authority.
+
+**Evidence:** [TENIR-Gov targeted CI 40174913150](https://github.com/skiredj-prog/tenir_governance/actions/runs/40174913150): **144/144 PASS** on source `97c1192c31b67045ec6b8bac11450a79dcd1eab1`. [Governance Gate 40174913178](https://github.com/skiredj-prog/tenir_governance/actions/runs/40174913178): PASS. Independent [REG candidate CI 40175011073](https://github.com/skiredj-prog/reg-conformance/actions/runs/40175011073): PASS, [REG Capabilities 40175011065](https://github.com/skiredj-prog/reg-conformance/actions/runs/40175011065): PASS. [Evidence archive #12591837579](https://github.com/skiredj-prog/reg-conformance/actions/runs/40175011073/artifacts/12591837579), SHA-256 `3ccc16cc6b428f4dc5e429c3ee97ef2046b92d81ef4b8cfc4fa914ffb7614854`.
+
+**Verdict:** G1 full **experimental candidate** admission + signed settlement in one SQLite transaction is tested. **G1 production governor authority, G3 institutional cutover, G4 external provider/commit proof, T8 retry and full REG normative CT-R4-011/012/013 remain HOLD.** No release or merge.
