@@ -1,10 +1,11 @@
-name: P0 SQLite native authority and G3 double owner
+name: P0 G3.1 atomic epoch-bound admission and double owner
 on:
   push:
     branches:
       - integration/p0-sqlite-authority-slice1
       - integration/p0-sqlite-authority-slice2
       - integration/p0-g3-exclusive-owner-gate
+      - integration/p0-g3-1-enforce-sqlite-epoch
   pull_request:
     paths:
       - 'tenir_governance/operations/experimental_native_sqlite_authority.py'
@@ -17,6 +18,7 @@ on:
       - 'tests/test_g3_double_owner_adversarial.py'
       - 'tenir_governance/operations/registry.py'
       - 'docs/P0_G3_DOUBLE_OWNER_GATE.md'
+      - 'docs/P0_G3_1_MANDATORY_EPOCH_GATE.md'
       - 'docs/P0_SQLITE_NATIVE_SLICE2.md'
       - 'tests/test_sqlite_governor_crash_recovery.py'
       - '.github/workflows/p0-native-sqlite-slice.yml'
