@@ -58,3 +58,15 @@ The experimental `ShadowOperationMigrator` creates a **frozen SQLite projection*
 **Remaining production gates**: G1 canonical operation+attempt+budget authority in one transaction, G3 explicit durable owner epoch/fencing and backwards-compatible migration, G4 actual dispatch/commit integration, G5 crash + provider + I1/I8 testing. G0/G2 must not be interpreted as an authorization to cut over or delete JSON source.
 
 **Known limits:** the frozen snapshot proves identity at capture/check time on one host, not permanently synchronized state, monotonic source version fencing, multi-host linearizability, factual correctness of underlying records, or immunity to source ABA between independent runs. Legacy JSON records that do not round-trip exactly require a reviewed transformation/migration plan, not an automatic acceptance.
+
+## G1 budget-parity preflight — SCOPED evidence, NOT single authority
+
+The candidate `ShadowBudgetParityAudit` checks an already-frozen G0/G2 source epoch against `SQLiteConsensusBackend` reservations/resources **while holding** the JSON source writer lock, quarantine gate and one SQLite `BEGIN IMMEDIATE` transaction. This provides a bounded, single-host capture consistency check, **not** a durable unified governor/attempt/budget operation transition.
+
+- Every observed budget reservation must refer to a source operation whose `reservation_id`, key, resource, amount and budget ownership flags match. Orphan/duplicate reservations, missing links, `UNKNOWN` reservation states, unrecognized compensation statuses, and counter arithmetic violating I8 are rejected. The preflight deliberately refuses ambiguous legacy records rather than synthesizing ownership.
+- The frozen G0 source SHA-256 and canonical budget SHA-256 are written to an immutable G1 parity epoch in the same SQLite transaction; later source or reservation drift causes HOLD.
+- The preflight never changes the production JSON registry, budget counters, reservation state, provider effect or candidate dispatch authority. Its report explicitly sets `execution_authorized=false`, `cutover_authorized=false`.
+- [Source CI 40169877931](https://github.com/skiredj-prog/tenir_governance/actions/runs/40169877931): **97/97 targeted tests PASS**, nine new G1 tests. [Governance CI 40169877940](https://github.com/skiredj-prog/tenir_governance/actions/runs/40169877940) PASS, on `22e0452150e382b87eba012eb6eac7c001737722`.
+- [Independent REG candidate CI 40169963549](https://github.com/skiredj-prog/reg-conformance/actions/runs/40169963549): PASS on the same source SHA, with machine classification `SCOPED_G1_PARITY_PASS` and no-authority checks.
+
+**G1 actual transactional authority is not completed.** This is a G1 *preflight* that can block unsafe migration; it does not give the governor a shared atomic `OperationState` + attempt + reservation-commit transition. G3 fencing/cutover, G4 provider dispatch and G5 complete crash/safety proof remain OPEN.
