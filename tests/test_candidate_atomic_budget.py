@@ -244,3 +244,62 @@ def test_child_hard_exit_before_commit_does_not_reserve(candidate):
     assert _state(reopened).reserved==Decimal("0")
     with pytest.raises(KeyError):
         gate.attempts.inspect("a1")
+
+
+def test_preexisting_budget_reservation_without_candidate_is_not_adopted(candidate):
+    backend,gate,_,path=candidate
+    original=backend.reserve("candidate:op-1",Decimal("20"),"candidate:budget")
+    assert original.status=="RESERVED"
+    with pytest.raises(CandidateBudgetHold,match="partial"):
+        _admit(gate)
+    with pytest.raises(KeyError):
+        gate.attempts.inspect("a1")
+    assert _state(backend).reserved==Decimal("20")
+
+
+def test_compensation_pending_blocks_new_candidate_budget_claim(candidate):
+    backend,gate,_,path=candidate
+    # A genuine existing budget record can carry compensation uncertainty.
+    old=backend.reserve("candidate:prior",Decimal("10"),"candidate:budget")
+    assert old.status=="RESERVED"
+    with sqlite3.connect(backend._database_path) as conn:
+        conn.execute(
+            "INSERT INTO compensations (compensation_id,original_reservation_id,"
+            "resource_id,amount,status,reason,created_at) "
+            "VALUES('c1',?,?,?,'REQUIRED','late-effect',0)",
+            (old.reservation_id,"candidate:budget","10"),
+        )
+    with pytest.raises(CandidateBudgetHold,match="compensation"):
+        _admit(gate)
+    assert _state(backend).reserved==Decimal("10")
+
+
+def test_replay_refuses_prior_external_commit_without_grant(candidate):
+    backend,gate,_,path=candidate
+    receipt=_admit(gate)
+    assert backend.commit(receipt.reservation_id).status=="COMMITTED"
+    with pytest.raises(CandidateBudgetHold):
+        _admit(gate)
+    assert _state(backend).committed==Decimal("20")
+    assert _state(backend).reserved==Decimal("0")
+
+
+def _kill_after_commit(path,pub):
+    _,gate=_open(path,pub)
+    receipt=_admit(gate)
+    assert receipt.status=="CANDIDATE_RESERVED_HOLD"
+    os._exit(87)
+
+
+def test_restart_after_committed_candidate_admission_is_exact_replay(candidate):
+    backend,gate,private,path=candidate
+    ctx=multiprocessing.get_context("spawn")
+    child=ctx.Process(target=_kill_after_commit,args=(str(path),_pub(private)))
+    child.start()
+    child.join(timeout=15)
+    assert child.exitcode==87
+    restarted,other_gate=_open(path,_pub(private))
+    assert _state(restarted).reserved==Decimal("20")
+    assert _admit(other_gate)==_admit(gate)
+    assert _state(restarted).reserved==Decimal("20")
+    assert len(other_gate.attempts.events("a1"))==1
