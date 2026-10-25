@@ -66,7 +66,7 @@ def test_json_owner_transition_first_prevents_sqlite_takeover(scope):
     assert ok
     with pytest.raises(SqliteAuthorityHold,match="already transitioned"):
         gate.activate()
-    with pytest.raises(SqliteAuthorityHold,match="already transitioned|not active"):
+    with pytest.raises(SqliteAuthorityHold,match="already transitioned|not active|epoch absent"):
         gate.candidate_transition(_record())
     state,reserved,committed=_snapshot(json_path,budget_path)
     assert state is OperationState.RESERVED
@@ -177,7 +177,7 @@ def test_crash_boundary_never_opens_two_owners(scope,stage,exitcode):
     legacy=DurableOperationRegistry(str(json_path))
     if stage=="prepared":
         # PREPARED is not an active owner; old JSON may still transition.
-        with pytest.raises(SqliteAuthorityHold,match="not active"):
+        with pytest.raises(SqliteAuthorityHold,match="not active|epoch absent"):
             gate.candidate_transition(_record())
         assert legacy.transition_to("lab:op-1",OperationState.RESERVED)[0] is True
         with pytest.raises(SqliteAuthorityHold,match="changed|transitioned"):
@@ -244,25 +244,161 @@ def test_fenced_json_existing_instance_cannot_claim_dispatch_or_budget_flags(sco
     assert gate.candidate_transition(_record()).execution_authorized is False
 
 
-def test_negative_control_unrouted_sqlite_writer_is_not_a_production_g3_guarantee(scope):
-    """Known counterexample: bypassing G3 makes split ownership possible.
-
-    This is *evidence of an OPEN P0 integration blocker*, not a conformant
-    pass. The production cutover gate must reject all such deployments.
-    """
+def test_negative_control_direct_sqlite_no_longer_creates_second_reservation(scope):
+    """Previously failing negative control: direct API MUST now HOLD."""
     json_path,budget_path,gate=scope
     legacy=DurableOperationRegistry(str(json_path))
     assert legacy.transition_to("lab:op-1",OperationState.RESERVED)[0]
     direct=ExperimentalSqliteOperationAuthority(
         SQLiteConsensusBackend(str(budget_path)),experimental_only=True)
-    raw_result=direct.admit_created(_record())
-    assert raw_result.operation_state=="RESERVED"
-    assert raw_result.execution_authorized is False
-    # Both stores now hold an admission for the same logical operation:
-    # production owner exclusivity MUST remain BLOCKED until direct ingress
-    # routes cannot access the unfenced primitive.
+    with pytest.raises(SqliteAuthorityHold,match="epoch absent|not active"):
+        direct.admit_created(_record())
+    # Even raw backend.reserve cannot insert: the DB trigger enforces
+    # native operation/active-epoch binding on reservation insertion.
+    with pytest.raises(sqlite3.DatabaseError,match="G3 epoch-bound"):
+        SQLiteConsensusBackend(str(budget_path)).reserve(
+            "lab:op-1",Decimal("20"),"lab:budget")
     assert legacy.get("lab:op-1").state is OperationState.RESERVED
     assert SQLiteConsensusBackend(str(budget_path)).get_state(
-        "lab:budget").reserved==Decimal("20")
+        "lab:budget").reserved==Decimal("0")
     with pytest.raises(SqliteAuthorityHold,match="already transitioned"):
         gate.activate()
+
+
+def test_direct_sqlite_after_valid_g3_epoch_uses_same_guards(scope):
+    json_path,budget_path,gate=scope
+    epoch=gate.activate()
+    direct=ExperimentalSqliteOperationAuthority(
+        SQLiteConsensusBackend(str(budget_path)),experimental_only=True)
+    admitted=direct.admit_created(_record())
+    assert admitted.authority_epoch==epoch.epoch
+    assert admitted.execution_authorized is False
+    assert gate.candidate_transition(_record())==admitted
+    with sqlite3.connect(SQLiteConsensusBackend(
+            str(budget_path))._database_path) as db:
+        stored=db.execute(
+            "SELECT authority_epoch FROM experimental_native_operations "
+            "WHERE operation_key='lab:op-1'").fetchone()
+        assert stored==(epoch.epoch,)
+
+
+def test_epoch_or_marker_loss_blocks_direct_replay(scope):
+    json_path,budget_path,gate=scope
+    gate.activate()
+    direct=ExperimentalSqliteOperationAuthority(
+        SQLiteConsensusBackend(str(budget_path)),experimental_only=True)
+    direct.admit_created(_record())
+    os.unlink(gate.marker)
+    with pytest.raises(SqliteAuthorityHold,match="fence missing"):
+        direct.admit_created(_record())
+
+
+def test_source_changed_while_fenced_blocks_direct_sqlite(scope):
+    json_path,budget_path,gate=scope
+    gate.activate()
+    direct=ExperimentalSqliteOperationAuthority(
+        SQLiteConsensusBackend(str(budget_path)),experimental_only=True)
+    # Simulates a privileged or unpatched JSON writer bypassing its sentinel.
+    with open(json_path,"r+",encoding="utf-8") as fp:
+        import json
+        snapshot=json.load(fp)
+        snapshot["lab:op-1"]["action_type"]="altered"
+        fp.seek(0)
+        json.dump(snapshot,fp)
+        fp.truncate()
+    with pytest.raises(SqliteAuthorityHold,match="source changed"):
+        direct.admit_created(_record())
+    assert SQLiteConsensusBackend(str(budget_path)).get_state(
+        "lab:budget").reserved==Decimal("0")
+
+
+def _sqlite_direct_claim(budget_path,start,results):
+    try:
+        direct=ExperimentalSqliteOperationAuthority(
+            SQLiteConsensusBackend(str(budget_path)),experimental_only=True)
+        assert start.wait(timeout=10)
+        receipt=direct.admit_created(_record())
+        results.put(("DIRECT_SQLITE","AUTHORIZED",receipt.authority_epoch))
+    except BaseException as exc:
+        results.put(("DIRECT_SQLITE","HOLD",type(exc).__name__,str(exc)))
+
+
+@pytest.mark.parametrize("fence_first", [False,True])
+@pytest.mark.parametrize("round_index",range(3))
+def test_json_vs_unrouted_sqlite_two_process_race_cannot_double_own(
+        tmp_path,fence_first,round_index):
+    """Independent public entrypoints, not via G3 wrapper."""
+    base=tmp_path/("fenced" if fence_first else "unfenced")/str(round_index)
+    base.mkdir(parents=True)
+    source=base/"registry.json"
+    budget=base/"budget"
+    old=DurableOperationRegistry(str(source))
+    assert old.register(_record())
+    backend=SQLiteConsensusBackend(str(budget))
+    assert backend.register_resource("lab:budget",Decimal("100"))=="REGISTERED"
+    coordinator=G3ExperimentalExclusiveOwner(
+        old,backend,experimental_only=True)
+    if fence_first:
+        coordinator.activate()
+    ctx=multiprocessing.get_context("spawn")
+    start,results=ctx.Event(),ctx.Queue()
+    workers=[
+        ctx.Process(target=_json_claim,args=(str(source),start,results)),
+        ctx.Process(target=_sqlite_direct_claim,args=(str(budget),start,results)),
+    ]
+    for child in workers: child.start()
+    start.set()
+    outcomes=[results.get(timeout=35) for _ in workers]
+    for child in workers:
+        child.join(timeout=15)
+        assert child.exitcode==0
+    results_by_owner={x[0]:x[1] for x in outcomes}
+    assert sum(v=="AUTHORIZED" for v in results_by_owner.values())==1,outcomes
+    state,reserved,committed=_snapshot(source,budget)
+    assert committed==Decimal("0")
+    if fence_first:
+        assert state is OperationState.CREATED
+        assert reserved==Decimal("20")
+    else:
+        assert state is OperationState.RESERVED
+        assert reserved==Decimal("0")
+
+
+def test_epoch_change_denies_direct_sqlite_replay(scope):
+    json_path,budget_path,gate=scope
+    gate.activate()
+    direct=ExperimentalSqliteOperationAuthority(
+        SQLiteConsensusBackend(str(budget_path)),experimental_only=True)
+    first=direct.admit_created(_record())
+    dbpath=SQLiteConsensusBackend(str(budget_path))._database_path
+    # Authorized G3 epochs are immutable; deliberately bypass SQL trigger as
+    # a privileged attacker to assert the recheck is nevertheless fail-closed.
+    with sqlite3.connect(dbpath) as db:
+        db.execute("DROP TRIGGER g3_exclusive_monotonic")
+        db.execute("UPDATE experimental_g3_exclusive_epoch SET epoch=?",
+                   ("tampered-epoch",))
+    with pytest.raises(SqliteAuthorityHold,match="marker/epoch mismatch"):
+        direct.admit_created(_record())
+    assert SQLiteConsensusBackend(str(budget_path)).get_state(
+        "lab:budget").reserved==Decimal("20")
+    assert first.authority_epoch!="tampered-epoch"
+
+
+def test_direct_backend_commit_release_and_delete_blocked_until_g4(scope):
+    json_path,budget_path,gate=scope
+    gate.activate()
+    direct=ExperimentalSqliteOperationAuthority(
+        SQLiteConsensusBackend(str(budget_path)),experimental_only=True)
+    receipt=direct.admit_created(_record())
+    backend=SQLiteConsensusBackend(str(budget_path))
+    for method in (backend.commit,backend.release):
+        with pytest.raises(sqlite3.DatabaseError,match="G3 budget settlement unavailable"):
+            method(receipt.reservation_id)
+    with sqlite3.connect(backend._database_path) as db:
+        with pytest.raises(sqlite3.DatabaseError,match="G3 budget deletion unavailable"):
+            db.execute("DELETE FROM reservations WHERE reservation_id=?",
+                       (receipt.reservation_id,))
+    after=backend.get_state("lab:budget")
+    assert after.reserved==Decimal("20")
+    assert after.committed==Decimal("0")
+    assert direct.admit_created(_record())==receipt

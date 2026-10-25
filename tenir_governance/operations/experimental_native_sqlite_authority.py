@@ -10,6 +10,9 @@ a production alternative to DurableOperationRegistry.
 from __future__ import annotations
 
 import hashlib
+import os
+from pathlib import Path
+from contextlib import contextmanager
 import json
 import re
 import time
@@ -17,7 +20,7 @@ import uuid
 from dataclasses import dataclass, replace
 from decimal import Decimal
 
-from .registry import OperationRecord, OperationState
+from .registry import OperationRecord, OperationState, acquire_file_lock
 from .sqlite_backend import SQLiteConsensusBackend
 
 
@@ -36,6 +39,7 @@ class SqliteAdmissionReceipt:
     decision: str = "HOLD"
     execution_authorized: bool = False
     is_production_authority: bool = False
+    authority_epoch: str = ""
 
 
 class ExperimentalSqliteOperationAuthority:
@@ -60,10 +64,45 @@ class ExperimentalSqliteOperationAuthority:
                   input_sha256 TEXT NOT NULL,
                   record_sha256 TEXT NOT NULL,
                   record_json TEXT NOT NULL,
+                  authority_epoch TEXT NOT NULL,
                   reservation_id TEXT NOT NULL UNIQUE
                     REFERENCES reservations(reservation_id),
                   state TEXT NOT NULL CHECK(state='RESERVED')
                 );
+                CREATE TABLE IF NOT EXISTS experimental_native_reservation_intents (
+                  operation_key TEXT PRIMARY KEY,
+                  reservation_id TEXT NOT NULL UNIQUE,
+                  authority_epoch TEXT NOT NULL,
+                  input_sha256 TEXT NOT NULL
+                );
+                CREATE TRIGGER IF NOT EXISTS native_intent_immutable
+                BEFORE UPDATE ON experimental_native_reservation_intents
+                BEGIN SELECT RAISE(ABORT,'native reservation intent immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS native_intent_no_delete
+                BEFORE DELETE ON experimental_native_reservation_intents
+                BEGIN SELECT RAISE(ABORT,'native reservation intent cannot be deleted'); END;
+                CREATE TRIGGER IF NOT EXISTS experimental_g3_reservation_only
+                BEFORE INSERT ON reservations
+                BEGIN
+                  SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1 FROM experimental_native_reservation_intents i
+                    JOIN experimental_g3_exclusive_epoch e
+                    ON e.epoch=i.authority_epoch AND e.singleton=1
+                    WHERE i.operation_key=NEW.idempotency_key
+                    AND i.reservation_id=NEW.reservation_id
+                    AND e.phase='ACTIVE_SQLITE_HOLD'
+                  ) THEN RAISE(ABORT,'G3 epoch-bound native owner required') END;
+                END;
+                -- G4 dispatch and external-effect settlement are absent.
+                -- No budget API may upgrade a lab RESERVED claim to
+                -- COMMITTED/RELEASED/UNKNOWN outside a future epoch-aware
+                -- atomic settlement protocol.
+                CREATE TRIGGER IF NOT EXISTS experimental_g3_no_budget_transition
+                BEFORE UPDATE ON reservations
+                BEGIN SELECT RAISE(ABORT,'G3 budget settlement unavailable'); END;
+                CREATE TRIGGER IF NOT EXISTS experimental_g3_no_budget_delete
+                BEFORE DELETE ON reservations
+                BEGIN SELECT RAISE(ABORT,'G3 budget deletion unavailable'); END;
                 CREATE TRIGGER IF NOT EXISTS experimental_native_no_update
                 BEFORE UPDATE ON experimental_native_operations
                 BEGIN SELECT RAISE(ABORT,'admitted record is immutable'); END;
@@ -71,6 +110,99 @@ class ExperimentalSqliteOperationAuthority:
                 BEFORE DELETE ON experimental_native_operations
                 BEGIN SELECT RAISE(ABORT,'admitted record cannot be deleted'); END;
             """)
+
+    def _g3_path(self) -> str:
+        """Read-only preflight to locate the common lock. NOT authorization."""
+        with self.backend._connection() as db:
+            try:
+                row=db.execute(
+                    "SELECT source_path FROM experimental_g3_exclusive_epoch "
+                    "WHERE singleton=1"
+                ).fetchone()
+            except sqlite3.OperationalError as exc:
+                raise SqliteAuthorityHold("G3 epoch absent: HOLD") from exc
+        if row is None or not row["source_path"]:
+            raise SqliteAuthorityHold("G3 epoch absent: HOLD")
+        path=row["source_path"]
+        if (not isinstance(path,str) or not os.path.isabs(path)
+                or os.path.realpath(path)!=path):
+            raise SqliteAuthorityHold("G3 source path not canonical")
+        return path
+
+    @contextmanager
+    def _g3_transaction(self, *, write: bool):
+        """Owner lock -> SQLite BEGIN IMMEDIATE -> revalidate durable epoch.
+
+        The initial path lookup grants nothing. Under the JSON file lock the
+        SQLite epoch, both marker files and exact frozen source are checked
+        in the SAME transaction in which the reservation is written. No
+        caller-provided g3_checked flag or capability exists.
+        """
+        path=self._g3_path()
+        lock=acquire_file_lock(path+".lock")
+        try:
+            with (self.backend._transaction("experimental_native_admit")
+                  if write else self.backend._connection()) as db:
+                row=db.execute(
+                    "SELECT epoch,source_sha256,source_path,phase "
+                    "FROM experimental_g3_exclusive_epoch WHERE singleton=1"
+                ).fetchone()
+                if (row is None or row["source_path"]!=path
+                        or row["phase"]!="ACTIVE_SQLITE_HOLD"):
+                    raise SqliteAuthorityHold("G3 authority epoch not active: HOLD")
+                marker=path+".g3-sqlite-owner.json"
+                sentinel=path+".g3-sqlite-owner.initialized"
+                if (not os.path.isfile(marker) or not os.path.isfile(sentinel)):
+                    raise SqliteAuthorityHold("G3 durable fence missing: HOLD")
+                if Path(sentinel).read_bytes()!=b"TENIR-G3-SQLITE-LAB-FENCE-v1\n":
+                    raise SqliteAuthorityHold("G3 initialized sentinel invalid")
+                expected={
+                    "schema":"tenir.experimental.g3-exclusive.v1",
+                    "epoch":row["epoch"],"source_sha256":row["source_sha256"],
+                    "execution_authorized":False,
+                }
+                try:
+                    marker_data=json.loads(Path(marker).read_text(encoding="utf-8"))
+                except (OSError,ValueError) as exc:
+                    raise SqliteAuthorityHold("G3 epoch marker invalid") from exc
+                if marker_data!=expected:
+                    raise SqliteAuthorityHold("G3 marker/epoch mismatch")
+                try:
+                    def unique_pairs(pairs):
+                        obj={}
+                        for k,v in pairs:
+                            if k in obj:
+                                raise ValueError("duplicate JSON key")
+                            obj[k]=v
+                        return obj
+                    with open(path,encoding="utf-8") as fp:
+                        inventory=json.load(
+                            fp,object_pairs_hook=unique_pairs,
+                            parse_constant=lambda v: (_ for _ in ()).throw(
+                                ValueError("non-finite source JSON")))
+                    if not isinstance(inventory,dict) or not inventory:
+                        raise ValueError("missing source inventory")
+                    records={}
+                    for key,value in inventory.items():
+                        rec=OperationRecord.from_dict(value)
+                        if (not key.startswith("lab:") or rec.idempotency_key!=key
+                                or rec.state is not OperationState.CREATED
+                                or rec.budget_reserved or rec.budget_committed
+                                or rec.reservation_id or rec.dispatch_claimed_by
+                                or rec.commit_dispatch_claim_id):
+                            raise ValueError("source no longer drained")
+                        records[key]=rec
+                    blob=json.dumps(
+                        {k:v.to_dict() for k,v in sorted(records.items())},
+                        sort_keys=True,separators=(",",":"),allow_nan=False,
+                    ).encode()
+                except (OSError,TypeError,ValueError,KeyError) as exc:
+                    raise SqliteAuthorityHold("G3 source changed or corrupt: HOLD") from exc
+                if hashlib.sha256(blob).hexdigest()!=row["source_sha256"]:
+                    raise SqliteAuthorityHold("G3 source changed after epoch: HOLD")
+                yield db,row["epoch"],records
+        finally:
+            lock.close()
 
     @staticmethod
     def _canonical(data: dict) -> bytes:
@@ -176,6 +308,21 @@ class ExperimentalSqliteOperationAuthority:
         if entry is None or existing is None:
             raise SqliteAuthorityHold("unowned or partially committed operation")
         self._verify_budget_locked(db,resource_id)
+        epoch=db.execute(
+            "SELECT epoch,phase FROM experimental_g3_exclusive_epoch WHERE singleton=1"
+        ).fetchone()
+        intent=db.execute(
+            "SELECT operation_key,reservation_id,authority_epoch,input_sha256 "
+            "FROM experimental_native_reservation_intents WHERE operation_key=?",
+            (key,),
+        ).fetchone()
+        if (epoch is None or epoch["phase"]!="ACTIVE_SQLITE_HOLD"
+                or entry["authority_epoch"]!=epoch["epoch"]
+                or intent is None
+                or intent["authority_epoch"]!=epoch["epoch"]
+                or intent["reservation_id"]!=entry["reservation_id"]
+                or intent["input_sha256"]!=entry["input_sha256"]):
+            raise SqliteAuthorityHold("reservation/operation authority epoch mismatch")
         if (entry["input_sha256"]!=input_hash
                 or entry["reservation_id"]!=existing["reservation_id"]
                 or existing["resource_id"]!=resource_id
@@ -201,11 +348,14 @@ class ExperimentalSqliteOperationAuthority:
             reservation_id=entry["reservation_id"],
             resource_id=resource_id,
             amount=str(amount),
+            authority_epoch=entry["authority_epoch"],
         )
 
     def admit_created(self, record: OperationRecord) -> SqliteAdmissionReceipt:
         key,input_hash,amount=self._input(record)
-        with self.backend._transaction("experimental_native_admit") as db:
+        with self._g3_transaction(write=True) as (db,epoch,source):
+            if key not in source or source[key].to_dict()!=record.to_dict():
+                raise SqliteAuthorityHold("G3 frozen source does not authorize operation")
             entry=db.execute(
                 "SELECT 1 FROM experimental_native_operations WHERE operation_key=?",
                 (key,),
@@ -228,6 +378,14 @@ class ExperimentalSqliteOperationAuthority:
                 budget_reserved=True,reservation_id=reservation_id,
             )
             canonical=self._canonical(new_record.to_dict())
+            # Intent is an epoch-bound row in the SAME SQLite transaction.
+            # The reservation trigger refuses direct budget API writes that
+            # have not staged a matching durable intent.
+            db.execute(
+                "INSERT INTO experimental_native_reservation_intents "
+                "(operation_key,reservation_id,authority_epoch,input_sha256) "
+                "VALUES(?,?,?,?)",(key,reservation_id,epoch,input_hash),
+            )
             db.execute(
                 "INSERT INTO reservations "
                 "(reservation_id,idempotency_key,resource_id,amount,state,created_at) "
@@ -239,12 +397,14 @@ class ExperimentalSqliteOperationAuthority:
                 "UPDATE resources SET reserved=? WHERE resource_id=?",
                 (str(reserved+amount),record.resource_id),
             )
+            # FK enforcement requires the reservation to exist first.
             db.execute(
                 "INSERT INTO experimental_native_operations "
                 "(operation_key,input_sha256,record_sha256,record_json,"
-                "reservation_id,state) VALUES(?,?,?,?,?,'RESERVED')",
+                "authority_epoch,reservation_id,state) "
+                "VALUES(?,?,?,?,?,?,'RESERVED')",
                 (key,input_hash,self._sha(canonical),
-                 canonical.decode("utf-8"),reservation_id),
+                 canonical.decode("utf-8"),epoch,reservation_id),
             )
             return self._validate_locked(
                 db,key,input_hash,record.resource_id,amount
@@ -253,7 +413,9 @@ class ExperimentalSqliteOperationAuthority:
     def inspect(self, record: OperationRecord) -> SqliteAdmissionReceipt:
         """Read-only binding verification. Never authorizes dispatch."""
         key,digest,amount=self._input(record)
-        with self.backend._connection() as db:
+        with self._g3_transaction(write=False) as (db,_epoch,source):
+            if key not in source or source[key].to_dict()!=record.to_dict():
+                raise SqliteAuthorityHold("G3 frozen source does not authorize operation")
             return self._validate_locked(
                 db,key,digest,record.resource_id,amount
             )
