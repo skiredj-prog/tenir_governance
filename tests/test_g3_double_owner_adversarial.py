@@ -216,3 +216,29 @@ def test_g3_strict_opt_in_and_no_direct_provider_dispatch(scope):
     assert not hasattr(gate,"dispatch")
     assert not hasattr(gate,"commit")
     assert not hasattr(gate,"authorize_retry")
+
+
+def test_existing_json_dispatch_claim_forbids_late_sqlite_owner(scope):
+    json_path,budget_path,gate=scope
+    old=DurableOperationRegistry(str(json_path))
+    assert old.transition_to("lab:op-1",OperationState.RESERVED)[0]
+    assert old.transition_to("lab:op-1",OperationState.DISPATCHING,claimed_by="old-worker")[0]
+    with pytest.raises(SqliteAuthorityHold,match="already transitioned"):
+        gate.activate()
+    with pytest.raises(SqliteAuthorityHold):
+        gate.candidate_transition(_record())
+    state,reserved,committed=_snapshot(json_path,budget_path)
+    assert state is OperationState.DISPATCHING
+    assert reserved==Decimal("0") and committed==Decimal("0")
+
+
+def test_fenced_json_existing_instance_cannot_claim_dispatch_or_budget_flags(scope):
+    json_path,budget_path,gate=scope
+    old=DurableOperationRegistry(str(json_path))
+    gate.activate()
+    with pytest.raises(RuntimeError,match="G3_SQLITE_OWNER_HOLD"):
+        old.set_budget_flags("lab:op-1",budget_reserved=True,reservation_id="rogue")
+    assert old.get("lab:op-1").budget_reserved is False
+    with pytest.raises(RuntimeError,match="G3_SQLITE_OWNER_HOLD"):
+        old.transition_to("lab:op-1",OperationState.RESERVED)
+    assert gate.candidate_transition(_record()).execution_authorized is False
