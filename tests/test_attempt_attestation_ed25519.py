@@ -18,6 +18,7 @@ def signed(private_key, *, outcome="EFFECT_CONFIRMED", **overrides):
         "attempt_id":"a1",
         "lei":"LEI-A",
         "nonce":NONCE,
+        "operation_digest":"sha256:"+("ab"*32),
         "outcome":outcome,
         "authority_id":"trusted-authority",
         "issued_at_ms":1000,
@@ -36,7 +37,7 @@ def configured(tmp_path, *, revoked=frozenset(), now=1500):
         {"trusted-authority":public},revoked_authorities=revoked,now_ms=lambda:now,
     )
     store = AttemptQualificationStore(tmp_path/"attempts.sqlite",verifier)
-    store.begin(attempt_id="a1", lei="LEI-A", nonce=NONCE, deadline_ms=1400)
+    store.begin(attempt_id="a1", lei="LEI-A", nonce=NONCE, operation_digest="sha256:"+("ab"*32), deadline_ms=1400)
     return store, private
 
 def test_signed_positive_effect_resolves_and_replays(tmp_path):
@@ -54,6 +55,7 @@ def test_signed_non_execution_fails_after_timeout(tmp_path):
 
 @pytest.mark.parametrize("field,value",[
     ("attempt_id","a2"),("lei","LEI-B"),("nonce","ffffffffffffffff"),
+    ("operation_digest","sha256:"+("cd"*32)),
     ("outcome","NON_EXECUTION_CONFIRMED"),("authority_id","other-authority"),
     ("expires_at_ms",4000),
 ])
@@ -110,3 +112,10 @@ def test_oversized_ttl_even_valid_signature_is_rejected(tmp_path):
     with pytest.raises(QualificationError,match="evidence verification rejected") as failure:
         store.qualify("a1",proof,observed_ms=1500)
     assert "TTL" in str(failure.value.__cause__)
+
+def test_well_signed_other_operation_context_rejected(tmp_path):
+    store, private = configured(tmp_path)
+    with pytest.raises(QualificationError, match="binding mismatch"):
+        store.qualify(
+            "a1", signed(private, operation_digest="sha256:"+("cd"*32)),observed_ms=1500)
+    assert store.read("a1")["state"]=="UNKNOWN"
