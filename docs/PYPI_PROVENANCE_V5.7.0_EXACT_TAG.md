@@ -63,6 +63,14 @@ Five critical module byte sequences were compared using Git's blob SHA-1 object 
 
 Wheel `METADATA`: package `tenir-governance`, version `5.7.0`, Python `>=3.10`, SPDX `Apache-2.0`, extras `api`, `r5`, `test`, `raft`, `ep02`. The DOI URL is clearly labelled **all versions**.
 
+## Additional wheel integrity closure (2026-10-25)
+
+The wheel payload has **68/68** source/resource objects identical to the exact v5.7.0 Git tag: the 66 Python/JSON entries documented above plus `tenir_kernel/schemas/deployment.manifest` (Git blob `1833dfed9230fafb5e09b9dbb658ebaba750a261`) and the bundled `LICENSE` (Git blob `6274ea95f23edf98beff93321641093589dc2a1b`). No mismatch was detected. License provenance was checked against the repository-root `LICENSE` at the tag.
+
+The wheel's `*.dist-info/RECORD` has **73 rows for 73 wheel archive entries**. All **72 rows with a supplied digest** were independently verified against the corresponding uncompressed wheel entry bytes and recorded sizes; **zero missing entries, hash mismatches or size mismatches**. The unhashed entry is `RECORD` itself, as expected. The remaining wheel files are generated packaging metadata and are checked here for internal integrity, not byte identity to Git source paths.
+
+These checks apply to the downloaded **GitHub Actions build artifact**, not a fresh independent download of the files currently served from PyPI. Network resolution for `pypi.org` from the isolated audit container failed; web retrieval also returned 404 for the queried version endpoints. This is an **access/verification limitation**, not evidence of deletion or compromise. The successful upload and attestation logs remain separate evidence.
+
 ## Outstanding independent checks
 
 1. Retrieve the **live PyPI-hosted** wheel and sdist directly, record their own SHA-256 and compare them against the values above. A separate web retrieval observed stale PyPI index content and a 404 from the version JSON endpoint; this conflicts with the exact-SHA successful upload trace. Do not conclude that the version is currently unavailable without a live independent check that is not stale/cached.
