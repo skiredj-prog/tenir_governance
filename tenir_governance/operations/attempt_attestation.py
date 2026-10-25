@@ -15,7 +15,7 @@ from typing import Callable, Mapping
 from .attempt_qualification import QualificationError, VerifiedEvidence
 
 _FIELDS = frozenset({
-    "schema_version", "evidence_id", "attempt_id", "lei", "nonce", "outcome",
+    "schema_version", "evidence_id", "attempt_id", "lei", "nonce", "operation_digest", "outcome",
     "authority_id", "issued_at_ms", "expires_at_ms", "signature_hex",
 })
 _SIGNED_FIELDS = _FIELDS - {"signature_hex"}
@@ -38,6 +38,8 @@ def canonical_attestation_payload(value: Mapping) -> bytes:
             raise QualificationError("invalid attestation timestamps")
     if value["schema_version"] != "tenir.attempt.attestation.v1":
         raise QualificationError("unknown attestation schema version")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", value["operation_digest"]) is None:
+        raise QualificationError("invalid bound operation fingerprint")
     if value["outcome"] not in _OUTCOMES:
         raise QualificationError("unsupported attestation outcome")
     if value["issued_at_ms"] > value["expires_at_ms"]:
@@ -99,4 +101,5 @@ class Ed25519AttemptVerifier:
             authority_id=authority,
             verification_receipt="ed25519-sha256:" + digest,
             nonce=payload["nonce"],
+            operation_digest=payload["operation_digest"],
         )
