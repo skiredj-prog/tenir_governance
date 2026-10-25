@@ -1,0 +1,6 @@
+# Baseline SUT commit: 9d8bf1c462589ac497e3e03ece48d1d9ab0b9db3
+f95340f14da1356787250e3d0a5060ba2d7db678baac49efe5239ef0b547fc6d  tests/test_r01_privileged_writer_boundary.py
+c8e401c1129e74267430f2df6ed8c4af9a49dd12185687e5884411fff7fd341c  docs/g4a/R01_EXECUTION_REPORT_2026-10-25.md
+96ed886870d19428507a60b2d6f67e22e4d843eb4900a71b8f7231104a384eb2  evidence/g4a-r01/environment.txt
+00da8c87362d4e52625f2c052052548c5a77ffabfb628d2aa1485b7a2495f561  evidence/g4a-r01/raw-campaign.txt
+6085e6b99c6512f81adc3c957e1fe9d94b7eb3a5a7521bcdc2958f7105f2387d  evidence/g4a-r01/junit-campaign.xml

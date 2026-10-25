@@ -1,0 +1,14 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.7.0
+rootdir: /tmp/tenir_governance_r01
+configfile: pyproject.toml
+collected 6 items
+
+tests/test_r01_privileged_writer_boundary.py ..{"counterexample": "UPDATE committed using spoofed UDF", "restart": "rejected", "reserved_before": [["lab:budget", "100", "20.0", "0"]], "reserved_after": [["lab:budget", "100", "19", "0"]]}
+.{"counterexample": "DROP TRIGGER + UPDATE committed", "restart": "rejected"}
+.{"counterexample": "same-UID os.replace DB copy succeeded", "uid": 1000, "reopen": "accepted identical copy"}
+.{"independent_source_scan_files": ["tenir_governance/operations/sqlite_backend.py", "tenir_governance/operations/experimental_g3_exclusive_owner.py", "tenir_governance/operations/experimental_g4a_settlement.py", "tenir_governance/operations/experimental_native_attempt_authority.py", "tenir_governance/operations/experimental_native_sqlite_authority.py"], "declared_writer_inventory_artifacts": [], "runtime_process": {"pid": 1621, "uid": 1000, "gid": 1000}, "database": {"path": "/tmp/pytest-of-root/pytest-4/test_R01_N06_independent_write0/budget/consensus.sqlite3", "uid": 1000, "gid": 1000, "mode": "0o644"}, "database_directory": {"uid": 1000, "gid": 1000, "mode": "0o755"}, "scope": "static source scan only; cannot prove runtime exhaustiveness"}
+.
+
+- generated xml file: /tmp/tenir_governance_r01/evidence/g4a-r01/junit-campaign.xml -
+============================== 6 passed in 0.31s ===============================
