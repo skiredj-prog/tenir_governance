@@ -27,7 +27,8 @@ def _verifier(public):
 def _payload(private, outcome):
     data = dict(
         schema_version="tenir.attempt.attestation.v1", evidence_id="e-" + outcome,
-        attempt_id="a1", lei="LEI-A", nonce=NONCE, outcome=outcome,
+        attempt_id="a1", lei="LEI-A", nonce=NONCE,
+        operation_digest="sha256:"+("ab"*32), outcome=outcome,
         authority_id="trusted", issued_at_ms=1000, expires_at_ms=2000,
     )
     return {**data,"signature_hex":private.sign(canonical_attestation_payload(data)).hex()}
@@ -46,7 +47,7 @@ def _worker_begin(path, aid, start, results):
         store=AttemptQualificationStore(path,lambda _: None)
         if not start.wait(10):
             raise RuntimeError("start signal timeout")
-        store.begin(attempt_id=aid,lei="LEI-A",nonce=NONCE,deadline_ms=1800)
+        store.begin(attempt_id=aid,lei="LEI-A",nonce=NONCE,operation_digest="sha256:"+("ab"*32),deadline_ms=1800)
         results.put(("ok",aid))
     except BaseException as exc:
         results.put(("error",type(exc).__name__,str(exc)))
@@ -70,7 +71,7 @@ def test_conflicting_signed_outcomes_cross_process_are_serialized(tmp_path):
         serialization.Encoding.Raw,serialization.PublicFormat.Raw)
     path=str(tmp_path/"race.sqlite")
     parent=AttemptQualificationStore(path,_verifier(public))
-    parent.begin(attempt_id="a1",lei="LEI-A",nonce=NONCE,deadline_ms=1100)
+    parent.begin(attempt_id="a1",lei="LEI-A",nonce=NONCE,operation_digest="sha256:"+("ab"*32),deadline_ms=1100)
     workers=[
         (_worker_qualify,(path,public,_payload(private,"EFFECT_CONFIRMED"))),
         (_worker_qualify,(path,public,_payload(private,"NON_EXECUTION_CONFIRMED"))),
@@ -99,7 +100,7 @@ def test_failed_event_write_rolls_back_terminal_state(tmp_path):
         serialization.Encoding.Raw,serialization.PublicFormat.Raw)
     path=tmp_path/"rollback.sqlite"
     store=AttemptQualificationStore(path,_verifier(public))
-    store.begin(attempt_id="a1",lei="LEI-A",nonce=NONCE,deadline_ms=1100)
+    store.begin(attempt_id="a1",lei="LEI-A",nonce=NONCE,operation_digest="sha256:"+("ab"*32),deadline_ms=1100)
     with sqlite3.connect(path) as db:
         db.execute("""CREATE TRIGGER fault BEFORE INSERT ON events
                    WHEN NEW.transition='RESOLVED'
