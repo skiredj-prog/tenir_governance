@@ -310,3 +310,75 @@ def test_source_changed_while_fenced_blocks_direct_sqlite(scope):
         direct.admit_created(_record())
     assert SQLiteConsensusBackend(str(budget_path)).get_state(
         "lab:budget").reserved==Decimal("0")
+
+
+def _sqlite_direct_claim(budget_path,start,results):
+    try:
+        direct=ExperimentalSqliteOperationAuthority(
+            SQLiteConsensusBackend(str(budget_path)),experimental_only=True)
+        assert start.wait(timeout=10)
+        receipt=direct.admit_created(_record())
+        results.put(("DIRECT_SQLITE","AUTHORIZED",receipt.authority_epoch))
+    except BaseException as exc:
+        results.put(("DIRECT_SQLITE","HOLD",type(exc).__name__,str(exc)))
+
+
+@pytest.mark.parametrize("fence_first", [False,True])
+@pytest.mark.parametrize("round_index",range(3))
+def test_json_vs_unrouted_sqlite_two_process_race_cannot_double_own(
+        tmp_path,fence_first,round_index):
+    """Independent public entrypoints, not via G3 wrapper."""
+    base=tmp_path/("fenced" if fence_first else "unfenced")/str(round_index)
+    base.mkdir(parents=True)
+    source=base/"registry.json"
+    budget=base/"budget"
+    old=DurableOperationRegistry(str(source))
+    assert old.register(_record())
+    backend=SQLiteConsensusBackend(str(budget))
+    assert backend.register_resource("lab:budget",Decimal("100"))=="REGISTERED"
+    coordinator=G3ExperimentalExclusiveOwner(
+        old,backend,experimental_only=True)
+    if fence_first:
+        coordinator.activate()
+    ctx=multiprocessing.get_context("spawn")
+    start,results=ctx.Event(),ctx.Queue()
+    workers=[
+        ctx.Process(target=_json_claim,args=(str(source),start,results)),
+        ctx.Process(target=_sqlite_direct_claim,args=(str(budget),start,results)),
+    ]
+    for child in workers: child.start()
+    start.set()
+    outcomes=[results.get(timeout=35) for _ in workers]
+    for child in workers:
+        child.join(timeout=15)
+        assert child.exitcode==0
+    results_by_owner={x[0]:x[1] for x in outcomes}
+    assert sum(v=="AUTHORIZED" for v in results_by_owner.values())==1,outcomes
+    state,reserved,committed=_snapshot(source,budget)
+    assert committed==Decimal("0")
+    if fence_first:
+        assert state is OperationState.CREATED
+        assert reserved==Decimal("20")
+    else:
+        assert state is OperationState.RESERVED
+        assert reserved==Decimal("0")
+
+
+def test_epoch_change_denies_direct_sqlite_replay(scope):
+    json_path,budget_path,gate=scope
+    gate.activate()
+    direct=ExperimentalSqliteOperationAuthority(
+        SQLiteConsensusBackend(str(budget_path)),experimental_only=True)
+    first=direct.admit_created(_record())
+    dbpath=SQLiteConsensusBackend(str(budget_path))._database_path
+    # Authorized G3 epochs are immutable; deliberately bypass SQL trigger as
+    # a privileged attacker to assert the recheck is nevertheless fail-closed.
+    with sqlite3.connect(dbpath) as db:
+        db.execute("DROP TRIGGER g3_exclusive_monotonic")
+        db.execute("UPDATE experimental_g3_exclusive_epoch SET epoch=?",
+                   ("tampered-epoch",))
+    with pytest.raises(SqliteAuthorityHold,match="marker/epoch mismatch"):
+        direct.admit_created(_record())
+    assert SQLiteConsensusBackend(str(budget_path)).get_state(
+        "lab:budget").reserved==Decimal("20")
+    assert first.authority_epoch!="tampered-epoch"
