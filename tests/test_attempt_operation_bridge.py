@@ -20,7 +20,7 @@ from tenir_governance.operations.attempt_attestation import (
 )
 from tenir_governance.operations.attempt_operation_bridge import (
     AttemptOperationObservationBridge, OperationLinkError,
-    operation_context_digest,
+    operation_context_digest, inspect_governor_attempt,
 )
 
 NONCE = "0123456789abcdef0123456789abcdef"
@@ -185,3 +185,52 @@ def test_same_operation_cannot_be_rebound_to_new_lei(tmp_path):
                        operation_digest=operation_context_digest(registry.get("op-1")),
                        operation_key="op-1",deadline_ms=1900)
     assert bridge.observe(operation_key="op-1",attempt_id="attempt-1").status == "MATCHED_OBSERVATION_ONLY"
+
+
+def test_governor_read_only_inspection_always_hold_and_no_provider_call(tmp_path):
+    from tenir_governance.composition import DualKernelGovernor, ScoringKernelAdapter
+    from tenir_governance.membrane import MembraneState, TransitionMembrane
+    from tenir_kernel.kernel import TenirKernel
+
+    bridge, registry, attempts, private = _fixture(tmp_path)
+    _begin(bridge)
+    digest = operation_context_digest(registry.get("op-1"))
+    qualified = bridge.qualify_observation(
+        operation_key="op-1",attempt_id="attempt-1",
+        signed_evidence=_signed(private,digest), observed_ms=1500)
+    assert qualified.evidence_recorded
+
+    class ExplosiveProvider:
+        def execute(self, **kwargs):
+            raise AssertionError("observer called provider.execute")
+        def reconcile(self, **kwargs):
+            raise AssertionError("observer called provider.reconcile")
+
+    governor = DualKernelGovernor(
+        ScoringKernelAdapter(TenirKernel()), TransitionMembrane(MembraneState()),
+        registry=registry, provider=ExplosiveProvider(),
+    )
+    result = inspect_governor_attempt(
+        governor,attempts,operation_key="op-1",attempt_id="attempt-1")
+    assert result["decision"] == "HOLD"
+    assert result["candidate_status"] == "MATCHED_OBSERVATION_ONLY"
+    assert result["evidence_recorded"] is True
+    assert result["execution_authorized"] is False
+    assert governor.registry.get("op-1").state == OperationState.UNKNOWN
+
+
+def test_governor_without_persistent_registry_fails_closed(tmp_path):
+    from tenir_governance.composition import DualKernelGovernor, ScoringKernelAdapter
+    from tenir_governance.membrane import MembraneState, TransitionMembrane
+    from tenir_kernel.kernel import TenirKernel
+
+    gov = DualKernelGovernor(
+        ScoringKernelAdapter(TenirKernel()), TransitionMembrane(MembraneState()),
+        registry=DurableOperationRegistry(),
+    )
+    attempts = AttemptQualificationStore(tmp_path/"candidate.sqlite", lambda _: True)
+    report = inspect_governor_attempt(
+        gov,attempts,operation_key="op-1",attempt_id="attempt-1")
+    assert report["decision"] == "HOLD"
+    assert report["candidate_status"] == "HOLD"
+    assert report["execution_authorized"] is False
