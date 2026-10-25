@@ -1,0 +1,56 @@
+name: G4-A laboratory exact-head acceptance
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - draft/g4-a-atomic-simulated-settlement
+      - impl/g4-a-atomic-simulated-settlement
+  pull_request:
+    paths:
+      - tenir_governance/operations/**
+      - tests/test_g4a_atomic_simulated_settlement.py
+      - docs/G4_A_*.md
+      - .github/workflows/g4a-laboratory.yml
+permissions:
+  contents: read
+jobs:
+  laboratory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TENIR_ENV: test
+      HOST_SCOPE: single-host
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Record exact source and install declared dependencies
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/checkout-sha.txt
+          python -m pip install --upgrade 'pip>=26.2'
+          python -m pip install -e '.[test,raft,ep02,api]' build twine
+          python -m pip check
+          python -m pip freeze > evidence/environment.txt
+      - name: G4-A and G3.1 acceptance
+        run: |
+          python -m pytest tests/test_g4a_atomic_simulated_settlement.py tests/test_experimental_native_sqlite_authority.py tests/test_experimental_native_attempt_authority.py tests/test_g3_double_owner_adversarial.py tests/test_sqlite_governor_crash_recovery.py --junitxml=evidence/scoped.xml
+      - name: Full tests including Raft
+        run: python -m pytest tests/ --junitxml=evidence/full.xml
+      - name: Build and validate distributions without publishing
+        run: |
+          python -m build
+          python -m twine check dist/*
+          sha256sum dist/* > evidence/distributions.sha256
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: g4a-laboratory-${{ github.event.pull_request.head.sha || github.sha }}
+          path: evidence/
