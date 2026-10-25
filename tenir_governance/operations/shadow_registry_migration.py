@@ -98,6 +98,16 @@ class ShadowOperationMigrator:
         return json.dumps(value, sort_keys=True, separators=(",", ":"),
                           ensure_ascii=False, allow_nan=False).encode("utf-8")
 
+    @staticmethod
+    def _no_duplicate_json_keys(pairs):
+        """Reject ambiguity at every JSON nesting level, not only root."""
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ShadowMigrationHold("duplicate JSON member is ambiguous")
+            obj[key] = value
+        return obj
+
     def _snapshot_locked(self) -> tuple[dict[str, tuple[str, str, str]], str]:
         """Called while both JSON registry writer locks are held."""
         path = self.registry._store_path
@@ -108,7 +118,9 @@ class ShadowOperationMigrator:
             raise ShadowMigrationHold("source JSON too large for bounded shadow import")
         try:
             with open(path, "r", encoding="utf-8") as stream:
-                raw = json.load(stream)
+                raw = json.load(stream, object_pairs_hook=self._no_duplicate_json_keys,
+                                parse_constant=lambda _x: (_ for _ in ()).throw(
+                                    ShadowMigrationHold("non-finite JSON is invalid")) )
             if not isinstance(raw, dict) or not raw:
                 raise ShadowMigrationHold("source must be a non-empty object")
             if len(raw) > self.max_records:
