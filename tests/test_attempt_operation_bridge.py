@@ -157,8 +157,11 @@ def test_source_identity_drift_holds(tmp_path):
     bridge,registry,_attempts,_private = _fixture(tmp_path)
     _begin(bridge)
     # Simulate an upstream persistence bug, not a supported mutation API.
+    source = registry.get("op-1")
+    source.payload_digest = "sha256:" + "cd"*32
+    # A test-only direct persist simulates forbidden upstream identity mutation.
+    # Never call registry.get() while holding registry._lock (non-reentrant).
     with registry._lock:
-        registry.get("op-1").payload_digest = "sha256:" + "cd"*32
         registry._persist()
     observed = bridge.observe(operation_key="op-1",attempt_id="attempt-1")
     assert observed.status == "HOLD"
