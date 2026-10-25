@@ -199,3 +199,37 @@ def test_two_processes_import_one_identical_epoch(tmp_path):
     assert outcome[0][1]==outcome[1][1]
     assert migrator.inspect().snapshot_sha256==outcome[0][1]
     assert _counts(db)==(1,1)
+
+
+def test_duplicate_top_level_key_fails_without_any_shadow_write(tmp_path):
+    _,migrator,source,db=_setup(tmp_path)
+    original=source.read_text(encoding="utf-8")
+    encoded=json.loads(original)["op-1"]
+    source.write_text('{"op-1":'+json.dumps(encoded)+',"op-1":'+json.dumps(encoded)+'}',
+                      encoding="utf-8")
+    with pytest.raises(ShadowMigrationHold,match="duplicate JSON"):
+        migrator.verify_or_stage()
+    assert _counts(db)==(0,0)
+
+
+def test_duplicate_nested_key_fails_even_when_json_parser_would_ignore_it(tmp_path):
+    _,migrator,source,db=_setup(tmp_path)
+    encoded=json.dumps(json.loads(source.read_text())["op-1"])
+    # Duplicate a nested scalar without changing outer member count.
+    assert '"agent_id": "agent-1"' in encoded
+    encoded=encoded.replace('"agent_id": "agent-1"',
+                            '"agent_id": "agent-1", "agent_id": "intruder"')
+    source.write_text('{"op-1":'+encoded+'}',encoding="utf-8")
+    with pytest.raises(ShadowMigrationHold,match="duplicate JSON"):
+        migrator.verify_or_stage()
+    assert _counts(db)==(0,0)
+
+
+def test_non_finite_numeric_source_fails_without_shadow_epoch(tmp_path):
+    _,migrator,source,db=_setup(tmp_path)
+    raw=source.read_text(encoding="utf-8")
+    assert '"amount": 10.0' in raw
+    source.write_text(raw.replace('"amount": 10.0','"amount": NaN'),encoding="utf-8")
+    with pytest.raises(ShadowMigrationHold,match="non-finite"):
+        migrator.verify_or_stage()
+    assert _counts(db)==(0,0)
