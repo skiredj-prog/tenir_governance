@@ -70,3 +70,22 @@ The candidate `ShadowBudgetParityAudit` checks an already-frozen G0/G2 source ep
 - [Independent REG candidate CI 40169963549](https://github.com/skiredj-prog/reg-conformance/actions/runs/40169963549): PASS on the same source SHA, with machine classification `SCOPED_G1_PARITY_PASS` and no-authority checks.
 
 **G1 actual transactional authority is not completed.** This is a G1 *preflight* that can block unsafe migration; it does not give the governor a shared atomic `OperationState` + attempt + reservation-commit transition. G3 fencing/cutover, G4 provider dispatch and G5 complete crash/safety proof remain OPEN.
+
+## G3 experimental fenced shadow — tested, no executable authority
+
+The candidate `G3ShadowFenceCoordinator` introduces a **cooperative single-host writer fence** for updated `DurableOperationRegistry` implementations only. This is deliberately **not** a live governor backend transfer.
+
+**Prerequisites**: frozen G0/G2 source, matching G1 source/budget digest, non-corrupt and non-quarantined JSON store, only CREATED/HOLD operations in the G0 snapshot, **no historical reservations at all**, and drained SQLite budget counters. Ambiguous provider-effect, dispatched, compensated or committed operations cannot use the prototype ceremony.
+
+**Durable sequence under the JSON registry writer lock and quarantine guard**:
+1. A SQLite `shadow_authority_fence` epoch commits `PREPARED` with a unique fence ID and source/budget hashes. A crash here creates **no new authority**. The old writer remains available until a durable fence file exists, and any source drift on retry is a HOLD.
+2. A persistent `.authority-fence.initialized` sentinel is fsynced before writing `.authority-fence.json`; updated legacy writers check either file under their normal writer lock and refuse subsequent JSON mutations. Deleting only the JSON marker cannot reopen writes. A crash after the marker leaves the old writer fenced and the SQLite epoch still PREPARED.
+3. The SQLite epoch advances monotonically to `FENCED_SHADOW_HOLD`. It can be replayed/recovered idempotently only when the frozen hashes and marker still agree. An inspector rechecks the current G1 parity. **Every result carries `execution_authorized=false`, `candidate_dispatch_authorized=false` and `is_production_cutover=false`.**
+
+**Evidence**: [TENIR-Gov CI 40171276528](https://github.com/skiredj-prog/tenir_governance/actions/runs/40171276528) **109/109 scoped tests PASS** on `4def8c9fd39ca758ef271be20d04a8916d67d6c1`, including child-process hard exits before/after marker, subsequent restart, two concurrent ceremonies, stale JSON registry instances, forbidden mutations and monotonic epoch SQL constraints. [Governance CI 40171276493](https://github.com/skiredj-prog/tenir_governance/actions/runs/40171276493) PASS. [Independent REG experiment 40171390160](https://github.com/skiredj-prog/reg-conformance/actions/runs/40171390160) PASS, with `SCOPED_G3_FENCED_HOLD_PASS`.
+
+**Critical limitations**:
+- Older pre-fence binaries that do not check this new sentinel, privileged users deleting **both** durable fence files, and multi-host writers are not excluded by this demonstration. This is a *cooperative single-host* fence, not cryptographic revocation or distributed fencing.
+- The marker may be installed during a crash and leave the old registry permanently HOLD; there is **no automatic unfence** or production rollback path. Institutional recovery must be independently authorized, specified and tested.
+- Preexisting provider calls or unobserved effects are not cancelled. The drained precondition is intentionally strict.
+- G3 does not make the candidate SQLite projection an active, authenticated governor owner. The production governor still references JSON; no atomic operation/attempt/budget/dispatch transaction has been deployed. G3 **readiness/fencing is tested, G3 production cutover remains HOLD**.
