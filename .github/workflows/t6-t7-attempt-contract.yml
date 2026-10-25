@@ -1,0 +1,23 @@
+name: T6-T7 native qualification candidate
+on:
+  push:
+    branches: ['feat/native-attempt-qualification-t6-t7']
+  pull_request:
+    paths:
+      - 'tenir_governance/operations/attempt_qualification.py'
+      - 'tests/test_attempt_qualification_contract.py'
+      - '.github/workflows/t6-t7-attempt-contract.yml'
+permissions:
+  contents: read
+jobs:
+  scoped-attempt-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: python -m pip install -e '.[test]'
+      - name: Test isolated candidate boundary
+        run: python -m pytest -q tests/test_attempt_qualification_contract.py
