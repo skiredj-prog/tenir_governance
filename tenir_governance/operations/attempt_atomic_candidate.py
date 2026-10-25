@@ -227,9 +227,13 @@ class AtomicAttemptCandidateAuthority:
             raise QualificationError("valid observation timestamp required")
         with self._transaction() as db:
             current = self._snapshot_locked(db,attempt_id)
-            if current.attempt_state == "UNKNOWN" and not db.execute(
-                    "SELECT 1 FROM candidate_events WHERE attempt_id=? AND kind='TIMEOUT_UNKNOWN'",
-                    (attempt_id,)).fetchone():
+            deadline = db.execute(
+                "SELECT deadline_ms FROM candidate_attempts WHERE attempt_id=?",
+                (attempt_id,)).fetchone()[0]
+            if (current.attempt_state == "UNKNOWN" and observed_ms >= deadline
+                    and not db.execute(
+                        "SELECT 1 FROM candidate_events WHERE attempt_id=? AND kind='TIMEOUT_UNKNOWN'",
+                        (attempt_id,)).fetchone()):
                 db.execute("""INSERT INTO candidate_events(attempt_id,kind,observed_ms)
                              VALUES(?,'TIMEOUT_UNKNOWN',?)""",(attempt_id,observed_ms))
             return self._snapshot_locked(db,attempt_id)
