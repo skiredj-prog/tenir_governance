@@ -163,3 +163,44 @@ class AttemptOperationObservationBridge:
             attempt_state=after.attempt_state,
             evidence_recorded=True,
         )
+
+
+def inspect_governor_attempt(governor: object, attempts: AttemptQualificationStore,
+                             *, operation_key: str, attempt_id: str) -> dict[str, Any]:
+    """Read-only governor-facing report. Always HOLD execution.
+
+    The governor's provider, adjudication, dispatch and budget paths are never
+    called. A MATCHED observation is *not* a commit grant: the source state may
+    change after the read and there is no transaction across the two stores.
+    """
+    try:
+        from ..composition.governor import DualKernelGovernor
+        if not isinstance(governor, DualKernelGovernor):
+            raise OperationLinkError("actual DualKernelGovernor instance required")
+        bridge = AttemptOperationObservationBridge(governor.registry, attempts)
+        observation = bridge.observe(
+            operation_key=operation_key, attempt_id=attempt_id,
+        )
+        return {
+            "decision": "HOLD",
+            "execution_authorized": False,
+            "candidate_status": observation.status,
+            "candidate_reason": observation.reason,
+            "operation_state": observation.operation_state,
+            "attempt_state": observation.attempt_state,
+            "evidence_recorded": observation.evidence_recorded,
+            "operation_key": operation_key,
+            "attempt_id": attempt_id,
+            "source": "isolated_t6_t7_observation",
+        }
+    except (OperationLinkError, QualificationError, RuntimeError,
+            KeyError, ValueError, OSError) as exc:
+        return {
+            "decision": "HOLD",
+            "execution_authorized": False,
+            "candidate_status": "HOLD",
+            "candidate_reason": f"unavailable: {exc}",
+            "operation_key": operation_key,
+            "attempt_id": attempt_id,
+            "source": "isolated_t6_t7_observation",
+        }
