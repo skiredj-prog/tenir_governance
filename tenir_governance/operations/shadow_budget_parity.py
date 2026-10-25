@@ -7,6 +7,7 @@ two stores. It does NOT cut over ownership, settle budgets or dispatch.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
@@ -130,7 +131,7 @@ class ShadowBudgetParityAudit:
                                 if key not in normalized or resource not in resource_by_id:
                                     raise ShadowMigrationHold("orphan budget reservation/source")
                                 source=OperationRecord.from_dict(
-                                    __import__("json").loads(normalized[key][1])
+                                    json.loads(normalized[key][1])
                                 )
                                 quantity=self._decimal(amount)
                                 if (source.reservation_id != rid
@@ -154,7 +155,7 @@ class ShadowBudgetParityAudit:
                                     raise ShadowMigrationHold("unresolved budget reservation lifecycle")
                                 budget_rows.append([rid,key,resource,str(quantity),state])
                             for key,(rec_hash,payload,_state) in normalized.items():
-                                source=OperationRecord.from_dict(__import__("json").loads(payload))
+                                source=OperationRecord.from_dict(json.loads(payload))
                                 if key not in found and (source.reservation_id or
                                                          source.budget_reserved or
                                                          source.budget_committed):
