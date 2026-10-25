@@ -65,6 +65,7 @@ class G3ExperimentalExclusiveOwner:
                     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                     epoch TEXT NOT NULL UNIQUE,
                     source_sha256 TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
                     phase TEXT NOT NULL CHECK(
                         phase IN ('PREPARED','ACTIVE_SQLITE_HOLD'))
                 );
@@ -74,6 +75,7 @@ class G3ExperimentalExclusiveOwner:
                 CREATE TRIGGER IF NOT EXISTS g3_exclusive_monotonic
                 BEFORE UPDATE ON experimental_g3_exclusive_epoch
                 WHEN OLD.epoch!=NEW.epoch OR OLD.source_sha256!=NEW.source_sha256
+                    OR OLD.source_path!=NEW.source_path
                     OR OLD.phase!='PREPARED' OR NEW.phase!='ACTIVE_SQLITE_HOLD'
                 BEGIN SELECT RAISE(ABORT,'G3 epoch cannot regress'); END;
             """)
@@ -138,7 +140,7 @@ class G3ExperimentalExclusiveOwner:
     def _epoch_locked(self):
         with self.backend._connection() as db:
             return db.execute(
-                "SELECT epoch,source_sha256,phase "
+                "SELECT epoch,source_sha256,source_path,phase "
                 "FROM experimental_g3_exclusive_epoch WHERE singleton=1"
             ).fetchone()
 
@@ -153,7 +155,7 @@ class G3ExperimentalExclusiveOwner:
                     source_hash=self._source_hash_locked()
                     with self.backend._transaction("experimental_g3_prepare") as db:
                         existing=db.execute(
-                            "SELECT epoch,source_sha256,phase "
+                            "SELECT epoch,source_sha256,source_path,phase "
                             "FROM experimental_g3_exclusive_epoch WHERE singleton=1"
                         ).fetchone()
                         if existing is None:
@@ -168,11 +170,14 @@ class G3ExperimentalExclusiveOwner:
                             epoch=uuid.uuid4().hex
                             db.execute(
                                 "INSERT INTO experimental_g3_exclusive_epoch "
-                                "(singleton,epoch,source_sha256,phase) "
-                                "VALUES(1,?,?,'PREPARED')",(epoch,source_hash)
+                                "(singleton,epoch,source_sha256,source_path,phase) "
+                                "VALUES(1,?,?,?,'PREPARED')",(epoch,source_hash,
+                                os.path.realpath(self.registry._store_path))
                             )
                         else:
-                            epoch,old_hash,phase=existing
+                            epoch,old_hash,old_path,phase=existing
+                            if old_path!=os.path.realpath(self.registry._store_path):
+                                raise SqliteAuthorityHold("G3 source path changed")
                             if old_hash!=source_hash:
                                 raise SqliteAuthorityHold("JSON source drift since G3 prepare")
                             if phase=="ACTIVE_SQLITE_HOLD" and (
@@ -191,11 +196,12 @@ class G3ExperimentalExclusiveOwner:
                     self._mark_locked(epoch,source_hash)
                     with self.backend._transaction("experimental_g3_activate") as db:
                         entry=db.execute(
-                            "SELECT epoch,source_sha256,phase "
+                            "SELECT epoch,source_sha256,source_path,phase "
                             "FROM experimental_g3_exclusive_epoch WHERE singleton=1"
                         ).fetchone()
                         if (entry is None or entry["epoch"]!=epoch
-                                or entry["source_sha256"]!=source_hash):
+                                or entry["source_sha256"]!=source_hash
+                                or entry["source_path"]!=os.path.realpath(self.registry._store_path)):
                             raise SqliteAuthorityHold("G3 epoch mismatch")
                         if entry["phase"]=="PREPARED":
                             db.execute(
@@ -210,42 +216,9 @@ class G3ExperimentalExclusiveOwner:
                         lock.close()
 
     def candidate_transition(self, record: OperationRecord) -> SqliteAdmissionReceipt:
-        """Guarded SQLITE RESERVED claim. NOT provider execution authorization.
+        """No bypass privilege: identical path to a direct SQLite admission.
 
-        Re-validates marker, source and epoch under the JSON writer lock.
-        The SQLite budget/operation claim remains atomic in its own DB TX.
+        The core admission method, not this wrapper, acquires the JSON writer
+        lock and checks the durable G3 epoch inside BEGIN IMMEDIATE.
         """
-        with self.registry.quarantine_guard():
-            if self.registry.quarantine_is_active():
-                raise SqliteAuthorityHold("source quarantine: HOLD")
-            with self.registry._lock:
-                lock=self.registry._lock_file()
-                try:
-                    source_hash=self._source_hash_locked()
-                    epoch=self._epoch_locked()
-                    if epoch is None or epoch[2]!="ACTIVE_SQLITE_HOLD":
-                        raise SqliteAuthorityHold("G3 exclusive owner not active")
-                    if source_hash!=epoch[1]:
-                        raise SqliteAuthorityHold("G3 source changed after fencing")
-                    if not os.path.isfile(self.sentinel) or not os.path.isfile(self.marker):
-                        raise SqliteAuthorityHold("G3 durable fence missing")
-                    expect={"schema":"tenir.experimental.g3-exclusive.v1",
-                            "epoch":epoch[0],"source_sha256":epoch[1],
-                            "execution_authorized":False}
-                    try:
-                        actual=json.loads(Path(self.marker).read_text(encoding="utf-8"))
-                    except (OSError,ValueError) as exc:
-                        raise SqliteAuthorityHold("G3 marker corrupt") from exc
-                    if actual!=expect:
-                        raise SqliteAuthorityHold("G3 marker differs from epoch")
-                    if record.idempotency_key not in self.registry._records:
-                        raise SqliteAuthorityHold("operation not in frozen legacy inventory")
-                    legacy=self.registry._records[record.idempotency_key]
-                    if legacy.state is not OperationState.CREATED:
-                        raise SqliteAuthorityHold("legacy operation not drained")
-                    if legacy.to_dict()!=record.to_dict():
-                        raise SqliteAuthorityHold("source identity diverged")
-                    return self.sqlite.admit_created(record)
-                finally:
-                    if lock:
-                        lock.close()
+        return self.sqlite.admit_created(record)
