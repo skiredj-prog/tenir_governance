@@ -1,0 +1,49 @@
+name: T6-T7 native qualification candidate
+on:
+  push:
+    branches: ['feat/native-attempt-qualification-t6-t7']
+  pull_request:
+    paths:
+      - 'tenir_governance/operations/attempt_qualification.py'
+      - 'tenir_governance/operations/attempt_attestation.py'
+      - 'tests/test_attempt_qualification_contract.py'
+      - 'tests/test_attempt_attestation_ed25519.py'
+      - 'tests/test_attempt_qualification_multiprocess.py'
+      - 'tenir_governance/operations/attempt_operation_bridge.py'
+      - 'tests/test_attempt_operation_bridge.py'
+      - 'tenir_governance/operations/attempt_atomic_candidate.py'
+      - 'tests/test_attempt_atomic_candidate.py'
+      - 'tests/test_attempt_budget_colocation.py'
+      - 'tenir_governance/operations/shadow_registry_migration.py'
+      - 'tests/test_shadow_registry_migration.py'
+      - 'tenir_governance/operations/shadow_budget_parity.py'
+      - 'tests/test_shadow_budget_parity.py'
+      - 'tenir_governance/operations/shadow_g3_fence.py'
+      - 'tests/test_shadow_g3_fence.py'
+      - 'tenir_governance/operations/candidate_atomic_budget.py'
+      - 'tests/test_candidate_atomic_budget.py'
+      - 'tenir_governance/operations/registry.py'
+      - '.github/workflows/t6-t7-attempt-contract.yml'
+permissions:
+  contents: read
+jobs:
+  scoped-attempt-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if python -m pip install --retries 4 --timeout 60 -e '.[test,ep02]'; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+      - name: Test isolated candidate boundary
+        run: python -m pytest -q tests/test_attempt_qualification_contract.py tests/test_attempt_attestation_ed25519.py tests/test_attempt_qualification_multiprocess.py tests/test_attempt_operation_bridge.py tests/test_attempt_atomic_candidate.py tests/test_attempt_budget_colocation.py tests/test_shadow_registry_migration.py tests/test_shadow_budget_parity.py tests/test_shadow_g3_fence.py tests/test_candidate_atomic_budget.py
