@@ -44,3 +44,17 @@ The current governor persists `OperationState` in the JSON-backed `DurableOperat
 ## Non-goals
 
 This ADR does not migrate any production data, change the governor dispatch path, modify public releases, claim cross-host consensus or authorize PR merging. Production implementation must be separately reviewed for backward-compatible migration and the external provider/budget fault model.
+
+## G0/G2 shadow inventory — implemented and verified (2026-10-25)
+
+The experimental `ShadowOperationMigrator` creates a **frozen SQLite projection** of the actual JSON-backed `DurableOperationRegistry` without altering the source or the governor's execution path.
+
+- G0: captures every source record under the same cross-process JSON writer file lock used by `register` and `transition_to`, while also holding the source quarantine gate and local registry lock. Rejects corrupt/missing/empty source, duplicate JSON keys at any depth, non-finite JSON values, unknown record fields, key/record mismatch, unroundtrippable data, quarantine and oversized inventory.
+- G2: validates immutable canonical record hashes and ordered-inventory SHA-256 across the entire source; stages the first inventory in **one SQLite WAL transaction** and permits only exact idempotent rechecks. New/changed/missing source records or damaged shadow rows are a **HOLD**, never an incremental unreviewed update.
+- Crash scenarios: an injected exception or child-process hard exit before commit leaves no shadow epoch or partial rows. Two worker processes converge on one identical epoch; registration from another process waits for capture lock, then causes visible source drift after its own successful write.
+- source [CI 40169534749](https://github.com/skiredj-prog/tenir_governance/actions/runs/40169534749) **88/88 PASS** at source commit `fe01013f635ba6117bcce56048b36beb6729ebec`. [Governance CI 40169534772](https://github.com/skiredj-prog/tenir_governance/actions/runs/40169534772) PASS.
+- Independent REG candidate [CI 40169588262](https://github.com/skiredj-prog/reg-conformance/actions/runs/40169588262) PASS, classifying `shadow_registry_migration.status=SCOPED_SHADOW_CAPTURE_PASS`, `cutover_performed=false` and `execution_authorized=false`.
+
+**Remaining production gates**: G1 canonical operation+attempt+budget authority in one transaction, G3 explicit durable owner epoch/fencing and backwards-compatible migration, G4 actual dispatch/commit integration, G5 crash + provider + I1/I8 testing. G0/G2 must not be interpreted as an authorization to cut over or delete JSON source.
+
+**Known limits:** the frozen snapshot proves identity at capture/check time on one host, not permanently synchronized state, monotonic source version fencing, multi-host linearizability, factual correctness of underlying records, or immunity to source ABA between independent runs. Legacy JSON records that do not round-trip exactly require a reviewed transformation/migration plan, not an automatic acceptance.
