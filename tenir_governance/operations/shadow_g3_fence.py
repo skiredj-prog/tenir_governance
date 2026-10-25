@@ -196,6 +196,15 @@ class G3ShadowFenceCoordinator:
                                 fence_id=old[0]
                                 if old[1:3]!=(source_hash,budget_hash):
                                     raise ShadowMigrationHold("G3 owner epoch drift")
+                                # A finalized epoch must never reconstruct a
+                                # missing/corrupt sentinel or marker silently.
+                                # That is a tamper/recovery incident, not an
+                                # ordinary idempotent retry.
+                                if old[3]=="FENCED_SHADOW_HOLD":
+                                    if (not os.path.isfile(self.marker)
+                                            or not os.path.isfile(self.sentinel)):
+                                        raise ShadowMigrationHold(
+                                            "finalized G3 fence file missing; manual recovery required")
                             db.execute("COMMIT")
                         except BaseException:
                             if db.in_transaction:
