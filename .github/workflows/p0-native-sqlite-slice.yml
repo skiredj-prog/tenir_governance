@@ -3,10 +3,16 @@ on:
   push:
     branches:
       - integration/p0-sqlite-authority-slice1
+      - integration/p0-sqlite-authority-slice2
   pull_request:
     paths:
       - 'tenir_governance/operations/experimental_native_sqlite_authority.py'
       - 'tests/test_experimental_native_sqlite_authority.py'
+      - 'tenir_governance/operations/native_attempt_attestation.py'
+      - 'tenir_governance/operations/native_attempt_evidence_types.py'
+      - 'tenir_governance/operations/experimental_native_attempt_authority.py'
+      - 'tests/test_experimental_native_attempt_authority.py'
+      - 'docs/P0_SQLITE_NATIVE_SLICE2.md'
       - 'tests/test_sqlite_governor_crash_recovery.py'
       - '.github/workflows/p0-native-sqlite-slice.yml'
       - 'docs/P0_SQLITE_NATIVE_SLICE1.md'
@@ -34,8 +40,13 @@ jobs:
         run: |
           python -m py_compile tenir_governance/operations/experimental_native_sqlite_authority.py
           python -m py_compile tests/test_experimental_native_sqlite_authority.py
+          python -m py_compile tenir_governance/operations/native_attempt_attestation.py
+          python -m py_compile tenir_governance/operations/native_attempt_evidence_types.py
+          python -m py_compile tenir_governance/operations/experimental_native_attempt_authority.py
+          python -m py_compile tests/test_experimental_native_attempt_authority.py
       - name: Native operation-budget and existing governor recovery regressions
         run: |
           python -m pytest -q -ra --strict-markers \
             tests/test_experimental_native_sqlite_authority.py \
+            tests/test_experimental_native_attempt_authority.py \
             tests/test_sqlite_governor_crash_recovery.py
