@@ -6,6 +6,7 @@ the migrator; a source divergence always requires a new reviewed baseline.
 import hashlib
 import json
 import multiprocessing
+import os
 import sqlite3
 
 import pytest
