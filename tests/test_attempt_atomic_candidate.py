@@ -231,3 +231,55 @@ def test_process_exit_before_commit_leaves_source_attempt_unknown(candidate):
     snap=restored.inspect("a1")
     assert snap.attempt_state==snap.candidate_source_state=="UNKNOWN"
     assert not any(e[0]=="RESOLVED" for e in restored.events("a1"))
+
+
+def test_terminal_sqlite_rewrites_and_deletes_are_denied(candidate):
+    authority,key,path=candidate
+    authority.qualify("a1",_signed(key),observed_ms=1500)
+    for command in (
+        "UPDATE candidate_sources SET source_state='UNKNOWN' WHERE operation_key='op-1'",
+        "UPDATE candidate_attempts SET state='UNKNOWN' WHERE attempt_id='a1'",
+        "UPDATE candidate_sources SET receipt='fabricated' WHERE operation_key='op-1'",
+        "DELETE FROM candidate_attempts WHERE attempt_id='a1'",
+        "DELETE FROM candidate_sources WHERE operation_key='op-1'",
+        "UPDATE candidate_events SET kind='FABRICATED' WHERE attempt_id='a1'",
+        "DELETE FROM candidate_events WHERE attempt_id='a1'",
+    ):
+        with sqlite3.connect(path) as db:
+            with pytest.raises(sqlite3.DatabaseError,match="cannot|immutable"):
+                db.execute(command)
+    assert authority.inspect("a1").attempt_state=="RESOLVED"
+
+
+def _exit_after_committed_proof(path, public, proof):
+    authority=_store(path,public)
+    result=authority.qualify("a1",proof,observed_ms=1500)
+    assert result.attempt_state=="RESOLVED"
+    os._exit(87)
+
+
+def test_process_exit_after_commit_replays_one_terminal_receipt(candidate):
+    authority,key,path=candidate
+    ctx=multiprocessing.get_context("spawn")
+    proof=_signed(key)
+    process=ctx.Process(target=_exit_after_committed_proof,
+                        args=(str(path),_public(key),proof))
+    process.start()
+    process.join(timeout=15)
+    assert process.exitcode==87
+    reopened=_store(path,_public(key))
+    snap=reopened.inspect("a1")
+    assert snap.attempt_state=="RESOLVED"
+    assert snap.candidate_source_state=="EFFECT_ATTESTED"
+    assert reopened.qualify("a1",proof,observed_ms=1600)==snap
+    assert len([e for e in reopened.events("a1") if e[0]=="RESOLVED"])==1
+
+
+def test_invalid_replay_different_signed_receipt_does_not_rewrite(candidate):
+    authority,key,_=candidate
+    old=_signed(key)
+    authority.qualify("a1",old,observed_ms=1500)
+    modified=_signed(key,evidence_id="different-valid-evidence")
+    with pytest.raises(QualificationError,match="terminal outcome"):
+        authority.qualify("a1",modified,observed_ms=1600)
+    assert authority.inspect("a1").evidence_id=="evidence-1"
