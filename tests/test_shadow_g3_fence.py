@@ -112,6 +112,10 @@ def test_deleted_fence_marker_does_not_reactivate_old_json_writers(tmp_path):
         DurableOperationRegistry(str(source)).register(_extra_record())
     with pytest.raises(ShadowMigrationHold,match="files incomplete"):
         coordinator.inspect()
+    with pytest.raises(ShadowMigrationHold,match="manual recovery"):
+        coordinator.fence_shadow()
+    assert not os.path.exists(coordinator.marker)
+
 
 
 def test_corrupted_fence_marker_holds_and_preserves_old_writer_block(tmp_path):
@@ -223,3 +227,15 @@ def test_real_child_process_exit_and_resume(tmp_path,point,exitcode,should_be_fe
         ShadowOperationMigrator(DurableOperationRegistry(str(source)),db)))
     assert recovered.fence_shadow().status=="FENCED_SHADOW_HOLD"
     assert recovered.inspect().execution_authorized is False
+
+
+def test_removed_fence_sentinel_must_not_be_recreated_after_finalization(tmp_path):
+    registry,coordinator,source,_=_setup(tmp_path)
+    coordinator.fence_shadow()
+    os.unlink(coordinator.sentinel)
+    # Marker remains, so JSON writes stay blocked despite sentinel removal.
+    with pytest.raises(RuntimeError,match="G3 authority fence"):
+        registry.register(_extra_record())
+    with pytest.raises(ShadowMigrationHold,match="manual recovery"):
+        coordinator.fence_shadow()
+    assert not os.path.exists(coordinator.sentinel)
