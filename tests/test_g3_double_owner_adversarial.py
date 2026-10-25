@@ -382,3 +382,23 @@ def test_epoch_change_denies_direct_sqlite_replay(scope):
     assert SQLiteConsensusBackend(str(budget_path)).get_state(
         "lab:budget").reserved==Decimal("20")
     assert first.authority_epoch!="tampered-epoch"
+
+
+def test_direct_backend_commit_release_and_delete_blocked_until_g4(scope):
+    json_path,budget_path,gate=scope
+    gate.activate()
+    direct=ExperimentalSqliteOperationAuthority(
+        SQLiteConsensusBackend(str(budget_path)),experimental_only=True)
+    receipt=direct.admit_created(_record())
+    backend=SQLiteConsensusBackend(str(budget_path))
+    for method in (backend.commit,backend.release):
+        with pytest.raises(sqlite3.DatabaseError,match="G3 budget settlement unavailable"):
+            method(receipt.reservation_id)
+    with sqlite3.connect(backend._database_path) as db:
+        with pytest.raises(sqlite3.DatabaseError,match="G3 budget deletion unavailable"):
+            db.execute("DELETE FROM reservations WHERE reservation_id=?",
+                       (receipt.reservation_id,))
+    after=backend.get_state("lab:budget")
+    assert after.reserved==Decimal("20")
+    assert after.committed==Decimal("0")
+    assert direct.admit_created(_record())==receipt
