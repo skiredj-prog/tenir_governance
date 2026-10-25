@@ -27,3 +27,33 @@ Run `python -m pytest -q test_g1_e8_integration.py` from this directory.
 - The mock does not reserve or consume one-time CMTs. Before converting XFAIL to mandatory integration PASS: provision distinct hosts and key pins, implement authenticated compare-and-advance, grant revocation and durable status reconciliation, instrument provider dispatch and crash barriers.
 
 **Status:** test code committed, execution/CI evidence not established, E8 integration not implemented, PRODUCTION HOLD.
+
+## E8/CB-05 experimental pre-authorization — signed loopback, NOT independent
+
+Added:
+- `e8_lab.py`: test-only real HTTP server on **127.0.0.1**, SQLite-backed monotone compare-and-advance, Ed25519 engine request authentication, signed witness responses, scoped CMTs, strict request-ID replay/conflict handling, independently supplied public-key pin *within the test*.
+- `g1_e8_guarded.py`: separate experimental G1 Unix-socket daemon and `process_guarded()` path; witness approval precedes business rows, the local head is updated in the same SQLite transaction as local settlement, and authenticated refusal creates a durable security HOLD.
+- `test_g1_e8_live.py`: loopback HTTP/SQLite/Ed25519 tests for stale epoch, same-epoch head mismatch, transport failure, approved CMT, wrong witness key, simulated crash before SQLite commit, idempotent replay and actual Unix-socket request. It also contains an **XFAIL** exposing the current inability to detect privileged edits of business tables when the cached head is unchanged.
+- `.github/workflows/g1-e8-experimental.yml`: scoped exploratory CI; it must never be represented as an independent-security gate.
+
+Run locally with Python 3.12+:
+```sh
+cd experimental/g1_ipc_prototype
+python -m pip install pytest cryptography
+python -m pytest -q -ra test_g1_ipc.py test_g1_e8_integration.py test_g1_e8_live.py
+```
+
+### The security boundary is NOT complete
+
+1. Witness and engine share the SAME host in these tests. The lab server deliberately refuses non-loopback destinations and provides **no TLS/mTLS**. Separate hosts, operator identities, independently managed roots and provisioned key pins are mandatory for CB-05 qualification.
+2. The CMT authenticates an **intent lineage**, NOT a recomputed digest of all G1/G4-A business rows or actual quarantine sidecars. A privileged attacker can alter business SQLite rows without altering `g1_e8_head`: this is explicitly captured by an expected failing security test. Thus **Q1/Q6/C1/C2 are not closed**.
+3. `auth.grant_signature` still equals `NOT_IMPLEMENTED`. The hash of this placeholder in a CMT is not a valid grant. No issuer standing, one-time authorization, cancellation/epoch revocation or last-moment dispatch check exists. The lab never dispatches provider effects. **R-01 is not closed**.
+4. Witness CAS and local COMMIT cannot be atomic together. A test-only injected exception after witness advance is recoverable by retrying the exact request, but this is **not** a SIGKILL crash campaign. An uncertain response induces `HOLD_GLOBAL` requiring reconciliation. Full recovery, STATUS, TTL semantics, trust rotation and external effect idempotence remain unimplemented.
+5. This lab mutates only the experimental **G1 prototype tables**, not the real G4-A settlement transaction or production runtime. The ordinary `g1_ipc.py` prototype remains available without E8; the new `g1_e8_guarded.py` is a separate opt-in experimental path. No production enforcement is introduced.
+6. Witness response signatures are checked against a client-provided public key, but there is no production-grade external pin provisioning, transport authentication, audit trail, or tamper-resistant witness operator.
+
+### Evidence classification
+
+`MOCK_ORACLE_ONLY` (older shim) < `LOOPBACK_CRYPTO_SQLITE` (this test) < `SEPARATE_HOST_ADVERSARIAL` (NOT DONE). The first two are explorations only; **INT-E8-01 normative PASS is unearned**. Red-first XFAIL is an open finding, not success.
+
+**PRODUCTION HOLD · P0 OPEN · PR #77 normative matrix unchanged by this implementation.**
