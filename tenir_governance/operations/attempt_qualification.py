@@ -56,9 +56,10 @@ class AttemptQualificationStore:
             db.execute("""CREATE TABLE IF NOT EXISTS attempts (
                 attempt_id TEXT PRIMARY KEY, lei TEXT NOT NULL, state TEXT NOT NULL,
                 deadline_ms INTEGER NOT NULL, nonce TEXT NOT NULL,
-                operation_digest TEXT NOT NULL, evidence_id TEXT, authority_id TEXT,
+                operation_digest TEXT NOT NULL, operation_key TEXT, evidence_id TEXT, authority_id TEXT,
                 verification_receipt TEXT, outcome TEXT)""")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_attempt_lei ON attempts(lei)")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_attempt_operation_key ON attempts(operation_key) WHERE operation_key IS NOT NULL")
             db.execute("""CREATE TABLE IF NOT EXISTS events (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 attempt_id TEXT NOT NULL, transition TEXT NOT NULL,
@@ -71,12 +72,15 @@ class AttemptQualificationStore:
         return db
 
     def begin(self, *, attempt_id: str, lei: str, nonce: str,
-              operation_digest: str, deadline_ms: int):
+              operation_digest: str, deadline_ms: int,
+              operation_key: str | None = None):
         if (not isinstance(attempt_id, str) or not attempt_id
                 or not isinstance(lei, str) or not lei
                 or not isinstance(nonce, str) or len(nonce) < 16 or len(nonce) > 256
                 or not isinstance(operation_digest, str)
                 or re.fullmatch(r'sha256:[0-9a-f]{64}', operation_digest) is None
+                or (operation_key is not None and
+                    (not isinstance(operation_key, str) or not operation_key.strip()))
                 or type(deadline_ms) is not int or deadline_ms < 0):
             raise QualificationError("invalid attempt identity or deadline")
         with closing(self._connect()) as db:
@@ -88,8 +92,8 @@ class AttemptQualificationStore:
                 db.rollback()
                 raise QualificationError("LEI already bound; T8 retry authorization is not implemented")
             try:
-                db.execute("INSERT INTO attempts(attempt_id,lei,nonce,operation_digest,state,deadline_ms) VALUES(?,?,?,?,'UNKNOWN',?)",
-                           (attempt_id, lei, nonce, operation_digest, deadline_ms))
+                db.execute("INSERT INTO attempts(attempt_id,lei,nonce,operation_digest,operation_key,state,deadline_ms) VALUES(?,?,?,?,?,'UNKNOWN',?)",
+                           (attempt_id, lei, nonce, operation_digest, operation_key, deadline_ms))
                 db.execute("INSERT INTO events(attempt_id,transition,observed_ms) VALUES(?,'BEGIN',?)",
                            (attempt_id, int(time.time() * 1000)))
             except sqlite3.IntegrityError as exc:
@@ -99,10 +103,10 @@ class AttemptQualificationStore:
 
     def read(self, attempt_id: str) -> dict:
         with closing(self._connect()) as db:
-            row = db.execute("SELECT attempt_id,lei,state,deadline_ms,nonce,operation_digest,evidence_id,authority_id,verification_receipt,outcome FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+            row = db.execute("SELECT attempt_id,lei,state,deadline_ms,nonce,operation_digest,operation_key,evidence_id,authority_id,verification_receipt,outcome FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
         if row is None:
             raise KeyError(attempt_id)
-        return dict(zip(("attempt_id","lei","state","deadline_ms","nonce","operation_digest","evidence_id","authority_id","verification_receipt","outcome"),row))
+        return dict(zip(("attempt_id","lei","state","deadline_ms","nonce","operation_digest","operation_key","evidence_id","authority_id","verification_receipt","outcome"),row))
 
     def timeout(self, attempt_id: str, *, observed_ms: int) -> str:
         if type(observed_ms) is not int or observed_ms < 0:
