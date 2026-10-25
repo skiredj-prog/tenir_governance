@@ -38,7 +38,7 @@ def test_timeout_never_proves_failure_or_releases_lei(tmp_path):
     s=setup(tmp_path)
     assert s.timeout("a1",observed_ms=100)=="UNKNOWN"
     assert s.read("a1")["state"]=="UNKNOWN"
-    with pytest.raises(QualificationError,match="unresolved LEI"):
+    with pytest.raises(QualificationError,match="LEI already bound"):
         s.begin(attempt_id="a2",lei="L1",deadline_ms=200)
 
 def test_unverified_attestation_does_not_mutate(tmp_path):
@@ -71,9 +71,9 @@ def test_verifier_return_type_is_not_caller_boolean(tmp_path):
     with pytest.raises(QualificationError,match="VerifiedEvidence"):
         s.qualify("a1",evidence(),observed_ms=99)
 
-def test_distinct_attempt_allowed_only_after_terminal(tmp_path):
+def test_t8_new_attempt_denied_even_after_terminal_without_authority(tmp_path):
     s=setup(tmp_path)
     s.qualify("a1",evidence("NON_EXECUTION_CONFIRMED"),observed_ms=99)
-    s.begin(attempt_id="a2",lei="L1",deadline_ms=200)
-    assert s.read("a2")["state"]=="UNKNOWN"
-    # This is store-level mutual exclusion, NOT T8 retry eligibility or dispatch authorization.
+    with pytest.raises(QualificationError, match="T8 retry authorization"):
+        s.begin(attempt_id="a2",lei="L1",deadline_ms=200)
+    # T8 is unimplemented; terminal evidence does not grant retry authority.
