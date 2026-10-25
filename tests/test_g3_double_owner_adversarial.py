@@ -22,7 +22,7 @@ from tenir_governance.operations.experimental_g3_exclusive_owner import (
     G3ExperimentalExclusiveOwner,
 )
 from tenir_governance.operations.experimental_native_sqlite_authority import (
-    SqliteAuthorityHold,
+    ExperimentalSqliteOperationAuthority, SqliteAuthorityHold,
 )
 
 
@@ -242,3 +242,27 @@ def test_fenced_json_existing_instance_cannot_claim_dispatch_or_budget_flags(sco
     with pytest.raises(RuntimeError,match="G3_SQLITE_OWNER_HOLD"):
         old.transition_to("lab:op-1",OperationState.RESERVED)
     assert gate.candidate_transition(_record()).execution_authorized is False
+
+
+def test_negative_control_unrouted_sqlite_writer_is_not_a_production_g3_guarantee(scope):
+    """Known counterexample: bypassing G3 makes split ownership possible.
+
+    This is *evidence of an OPEN P0 integration blocker*, not a conformant
+    pass. The production cutover gate must reject all such deployments.
+    """
+    json_path,budget_path,gate=scope
+    legacy=DurableOperationRegistry(str(json_path))
+    assert legacy.transition_to("lab:op-1",OperationState.RESERVED)[0]
+    direct=ExperimentalSqliteOperationAuthority(
+        SQLiteConsensusBackend(str(budget_path)),experimental_only=True)
+    raw_result=direct.admit_created(_record())
+    assert raw_result.operation_state=="RESERVED"
+    assert raw_result.execution_authorized is False
+    # Both stores now hold an admission for the same logical operation:
+    # production owner exclusivity MUST remain BLOCKED until direct ingress
+    # routes cannot access the unfenced primitive.
+    assert legacy.get("lab:op-1").state is OperationState.RESERVED
+    assert SQLiteConsensusBackend(str(budget_path)).get_state(
+        "lab:budget").reserved==Decimal("20")
+    with pytest.raises(SqliteAuthorityHold,match="already transitioned"):
+        gate.activate()
