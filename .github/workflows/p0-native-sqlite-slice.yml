@@ -1,9 +1,10 @@
-name: P0 SQLite native authority slice 1
+name: P0 SQLite native authority and G3 double owner
 on:
   push:
     branches:
       - integration/p0-sqlite-authority-slice1
       - integration/p0-sqlite-authority-slice2
+      - integration/p0-g3-exclusive-owner-gate
   pull_request:
     paths:
       - 'tenir_governance/operations/experimental_native_sqlite_authority.py'
@@ -12,6 +13,10 @@ on:
       - 'tenir_governance/operations/native_attempt_evidence_types.py'
       - 'tenir_governance/operations/experimental_native_attempt_authority.py'
       - 'tests/test_experimental_native_attempt_authority.py'
+      - 'tenir_governance/operations/experimental_g3_exclusive_owner.py'
+      - 'tests/test_g3_double_owner_adversarial.py'
+      - 'tenir_governance/operations/registry.py'
+      - 'docs/P0_G3_DOUBLE_OWNER_GATE.md'
       - 'docs/P0_SQLITE_NATIVE_SLICE2.md'
       - 'tests/test_sqlite_governor_crash_recovery.py'
       - '.github/workflows/p0-native-sqlite-slice.yml'
@@ -44,9 +49,12 @@ jobs:
           python -m py_compile tenir_governance/operations/native_attempt_evidence_types.py
           python -m py_compile tenir_governance/operations/experimental_native_attempt_authority.py
           python -m py_compile tests/test_experimental_native_attempt_authority.py
+          python -m py_compile tenir_governance/operations/experimental_g3_exclusive_owner.py
+          python -m py_compile tests/test_g3_double_owner_adversarial.py
       - name: Native operation-budget and existing governor recovery regressions
         run: |
           python -m pytest -q -ra --strict-markers \
             tests/test_experimental_native_sqlite_authority.py \
             tests/test_experimental_native_attempt_authority.py \
+            tests/test_g3_double_owner_adversarial.py \
             tests/test_sqlite_governor_crash_recovery.py
