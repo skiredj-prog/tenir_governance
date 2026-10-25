@@ -392,6 +392,21 @@ class DurableOperationRegistry:
             # invisible due to corruption.
             self._corrupted = True
 
+    def _assert_legacy_write_unfenced(self) -> None:
+        """Reject JSON writes after an opt-in G3 shadow fence is installed.
+
+        The durable fence is owned by the experimental handoff coordinator.
+        Checking occurs again at _persist under the normal writer file lock;
+        even a stale registry instance cannot overwrite the fenced JSON file.
+        A missing or removed fence cannot be distinguished from an uninitialized
+        one: this does NOT defend against a privileged actor deleting it.
+        """
+        if self._store_path and os.path.lexists(self._store_path + ".authority-fence.json"):
+            raise RuntimeError(
+                "G3 authority fence is installed; legacy JSON registry is read-only. "
+                "No execution authority is granted to the shadow store."
+            )
+
     def _persist(self):
         """Persist records to the durable store.
 
@@ -411,6 +426,7 @@ class DurableOperationRegistry:
         handles all of this internally).
         """
         if self._store_path:
+            self._assert_legacy_write_unfenced()
             data = {k: v.to_dict() for k, v in self._records.items()}
             directory = os.path.dirname(os.path.abspath(self._store_path))
             prefix = os.path.basename(self._store_path) + "."
@@ -785,6 +801,7 @@ class DurableOperationRegistry:
                         "Registry store became corrupted on reload — refuse "
                         "to register new operations."
                     )
+                self._assert_legacy_write_unfenced()
                 if record.idempotency_key in self._records:
                     return False
                 self._records[record.idempotency_key] = record
@@ -975,6 +992,7 @@ class DurableOperationRegistry:
                 if changes and record.hold_record is None:
                     return False, prev_state
 
+                self._assert_legacy_write_unfenced()
                 previous_hold_record = record.hold_record
                 previous_claimed_by = record.dispatch_claimed_by
                 record.state = new_state
