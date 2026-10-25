@@ -403,3 +403,66 @@ def test_unknown_budget_never_settles_even_with_valid_signature(candidate):
             observed_ms=1500)
     assert gate.attempts.inspect("a1").attempt_state=="UNKNOWN"
     assert _state(backend).committed==Decimal("0")
+
+
+def _race_signed_settlement(path,pub,proof,start,queue):
+    try:
+        _,gate=_open(path,pub)
+        assert start.wait(10)
+        receipt=gate.settle_attested_candidate(
+            attempt_id="a1",signed_evidence=proof,observed_ms=1500)
+        queue.put(("ok",receipt.budget_state))
+    except BaseException as exc:
+        queue.put(("error",type(exc).__name__,str(exc)))
+
+
+def test_conflicting_signed_settlements_cross_process_linearize_once(candidate):
+    backend,gate,private,path=candidate
+    _admit(gate)
+    ctx=multiprocessing.get_context("spawn")
+    start,queue=ctx.Event(),ctx.Queue()
+    workers=[
+        ctx.Process(target=_race_signed_settlement,
+                    args=(str(path),_pub(private),_signed(private,outcome),start,queue))
+        for outcome in ("EFFECT_CONFIRMED","NON_EXECUTION_CONFIRMED")
+    ]
+    for p in workers:p.start()
+    start.set()
+    outcomes=[queue.get(timeout=30) for _ in workers]
+    for p in workers:
+        p.join(timeout=15)
+        assert p.exitcode==0
+    assert sum(x[0]=="ok" for x in outcomes)==1,outcomes
+    assert sum(x[0]=="error" for x in outcomes)==1,outcomes
+    snapshot=gate.attempts.inspect("a1")
+    state=_state(backend)
+    assert (snapshot.attempt_state,snapshot.candidate_source_state,
+            state.reserved,state.committed) in (
+                ("RESOLVED","EFFECT_ATTESTED",Decimal("0"),Decimal("20")),
+                ("FAILED","NO_EFFECT_ATTESTED",Decimal("0"),Decimal("0")),
+            )
+    assert len([ev for ev in gate.attempts.events("a1")
+                if ev[0] in ("RESOLVED","FAILED")])==1
+
+
+def _exit_before_signed_settlement(path,pub,proof):
+    _,gate=_open(path,pub)
+    gate._before_commit=lambda:os._exit(88)
+    gate.settle_attested_candidate(attempt_id="a1",
+                                   signed_evidence=proof,observed_ms=1500)
+
+
+def test_process_exit_before_signed_settlement_commit_retains_unknown(candidate):
+    backend,gate,private,path=candidate
+    _admit(gate)
+    ctx=multiprocessing.get_context("spawn")
+    child=ctx.Process(target=_exit_before_signed_settlement,
+                      args=(str(path),_pub(private),_signed(private)))
+    child.start()
+    child.join(timeout=15)
+    assert child.exitcode==88
+    reopened,observer=_open(path,_pub(private))
+    assert observer.attempts.inspect("a1").attempt_state=="UNKNOWN"
+    assert _state(reopened).reserved==Decimal("20")
+    assert _state(reopened).committed==Decimal("0")
+    assert len(observer.attempts.events("a1"))==1
