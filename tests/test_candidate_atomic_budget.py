@@ -35,7 +35,8 @@ def _open(path, pub):
     backend=SQLiteConsensusBackend(str(path))
     gate=CandidateAtomicBudgetAdmission(
         backend,Ed25519AttemptVerifier({"candidate-attestor":pub},
-                                       now_ms=lambda:1500))
+                                       now_ms=lambda:1500),
+        experimental_only=True)
     return backend,gate
 
 
@@ -303,3 +304,14 @@ def test_restart_after_committed_candidate_admission_is_exact_replay(candidate):
     assert _admit(other_gate)==_admit(gate)
     assert _state(restarted).reserved==Decimal("20")
     assert len(other_gate.attempts.events("a1"))==1
+
+
+def test_opt_in_is_mandatory_even_with_candidate_resource_prefix(tmp_path):
+    key=Ed25519PrivateKey.generate()
+    backend=SQLiteConsensusBackend(str(tmp_path/"budget"))
+    assert backend.register_resource("candidate:budget",Decimal("10"))=="REGISTERED"
+    verifier=Ed25519AttemptVerifier({"candidate-attestor":_pub(key)},
+                                    now_ms=lambda:1500)
+    with pytest.raises(CandidateBudgetHold,match="explicit experimental_only"):
+        CandidateAtomicBudgetAdmission(backend,verifier)
+    assert _state(backend).reserved==Decimal("0")
