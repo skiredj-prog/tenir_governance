@@ -12,7 +12,8 @@ from decimal import Decimal
 
 import pytest
 
-from tenir_governance.operations.registry import OperationRecord, OperationState
+from tenir_governance.operations.registry import OperationRecord, OperationState, DurableOperationRegistry
+from tenir_governance.operations.experimental_g3_exclusive_owner import G3ExperimentalExclusiveOwner
 from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
 from tenir_governance.operations.experimental_native_sqlite_authority import (
     ExperimentalSqliteOperationAuthority, SqliteAuthorityHold,
@@ -39,6 +40,13 @@ def setup(tmp_path):
     path=tmp_path/"budget"
     backend,authority=_open(path)
     assert backend.register_resource("lab:budget",Decimal("100"))=="REGISTERED"
+    # All native admissions now require a real, frozen JSON owner epoch.
+    source=DurableOperationRegistry(str(path)+".json")
+    for row in (_record(),_record("lab:fill-90",90.0),
+                _record("lab:race-0",7.0),_record("lab:race-1",7.0),
+                _record("lab:too-expensive",101.0)):
+        assert source.register(row)
+    G3ExperimentalExclusiveOwner(source,backend,experimental_only=True).activate()
     return path,backend,authority
 
 
@@ -77,7 +85,7 @@ def test_conflicting_native_identity_is_not_replayed(setup,mutation):
     _path,backend,authority=setup
     authority.admit_created(_record())
     altered=replace(_record(),**mutation)
-    with pytest.raises(SqliteAuthorityHold,match="replay or state mismatch"):
+    with pytest.raises(SqliteAuthorityHold,match="replay or state mismatch|frozen source"):
         authority.admit_created(altered)
     assert backend.get_state("lab:budget").reserved==Decimal("20")
 
@@ -85,7 +93,7 @@ def test_conflicting_native_identity_is_not_replayed(setup,mutation):
 def test_missing_capacity_cannot_register_operation(setup):
     path,backend,authority=setup
     with pytest.raises(SqliteAuthorityHold,match="INSUFFICIENT_BUDGET"):
-        authority.admit_created(_record(amount=101.0))
+        authority.admit_created(_record("lab:too-expensive",101.0))
     with sqlite3.connect(backend._database_path) as db:
         assert db.execute("SELECT COUNT(*) FROM experimental_native_operations").fetchone()[0]==0
         assert db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0]==0
@@ -94,9 +102,12 @@ def test_missing_capacity_cannot_register_operation(setup):
 
 def test_orphan_reservation_from_legacy_budget_fails_closed(setup):
     _path,backend,authority=setup
-    assert backend.reserve("lab:op-1",Decimal("20"),"lab:budget").status=="RESERVED"
-    with pytest.raises(SqliteAuthorityHold,match="partially"):
-        authority.admit_created(_record())
+    # This path is now blocked by the SQLite trigger before a partial ledger
+    # entry can be written. Privileged raw SQL modifications remain outside
+    # this laboratory gate's authority model.
+    with pytest.raises(sqlite3.DatabaseError,match="G3 epoch-bound"):
+        backend.reserve("lab:op-1",Decimal("20"),"lab:budget")
+    assert authority.admit_created(_record()).execution_authorized is False
     assert backend.get_state("lab:budget").reserved==Decimal("20")
 
 
@@ -149,7 +160,7 @@ def _race(path,key,amount,start,result):
 
 def test_cross_process_budget_limit_only_one_winner(setup):
     path,backend,authority=setup
-    authority.admit_created(_record(amount=90.0))
+    authority.admit_created(_record("lab:fill-90",90.0))
     ctx=multiprocessing.get_context("spawn")
     start,results=ctx.Event(),ctx.Queue()
     children=[ctx.Process(target=_race,args=(
