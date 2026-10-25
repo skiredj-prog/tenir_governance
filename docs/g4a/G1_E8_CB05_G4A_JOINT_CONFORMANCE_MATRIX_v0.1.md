@@ -82,6 +82,18 @@
 
 **Protocol gap / gating decision:** the proposed `PRE_AUTH_CHECK` and signed CMT are **not implemented** in G1. A read-only check followed by a local commit has a TOCTOU window; witness reservation before local commit introduces crash/compensation ambiguity. Do not declare INT-E8-01 resolved until a single-use, operation-scoped, externally attested reservation/consumption protocol and its failure windows are tested. Witness pinning remains independent of the local storage operator.
 
+## Experimental implementation trace (PR #79; NOT conformance evidence)
+
+An isolated implementation now exists on the **separate draft PR #79**:
+- `experimental/g1_ipc_prototype/e8_lab.py`: SQLite-monotone witness, actual loopback HTTP, Ed25519 signed requests/attestations and pinned witness verification in a test fixture.
+- `experimental/g1_ipc_prototype/g1_e8_guarded.py`: separate opt-in G1 Unix-socket prototype, witness pre-authorization prior to local G1 commit.
+- `experimental/g1_ipc_prototype/test_g1_e8_live.py`: exploratory INT-E8-01a/b/c/d/e/g scenarios and live Unix socket check; XFAIL deliberately demonstrates that privileged modification of business tables **without changing the cached head is not detected**.
+- `experimental/g1_ipc_prototype/README.md`: exhaustive limitations and test commands.
+
+Local reconstructed-source exploratory run: **8 PASS, 1 XFAIL** for the new suite. Exact committed-branch GitHub CI and independent witness validation have NOT been verified by this statement.
+
+**Critical deviation from normative INT-E8-01:** this implementation has neither a second independently controlled host nor TLS, nor an actual signed one-time grant, nor an independently recomputed digest of full G4-A business/quarantine state, nor provider dispatch. The G1 local demo tables are not G4-A settlement. It does not satisfy the cross-boundary PASS oracle, and R-01/Q1/Q6/C1/C2 remain P0 open.
+
 ## Transaction boundary design decision (blocking)
 A post-local-commit witness CAS cannot retroactively prevent a provider effect already dispatched. The implementation MUST establish a **pre-effect attested authorization** or an equivalent proven protocol. Local SQLite and remote witness cannot be claimed as one atomic transaction. Define ordering and recovery for: grant reserve → witness authorization anchor → local commit → witness settlement anchor → effect dispatch → provider receipt. This is a *candidate sequence*, not an approved protocol; failure windows at every arrow must be formally resolved before dispatch.
 
