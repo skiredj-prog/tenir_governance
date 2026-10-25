@@ -29,3 +29,9 @@ No actual external execution, dispatch grant, budget settlement or T8 retry is p
 ## Acceptance evidence
 
 The workflow `P0 SQLite native authority and G3 double owner` runs the real two-process race multiple times, both deterministic owner orderings, pre/post-sentinel kill-9 analogues (`os._exit`), restart, missing-marker fail-close, and the full native operation/attempt + incumbent crash-recovery regressions. Publication of the result must refer to an exact successful CI run; a green candidate is not a production G3 sign-off.
+
+## Negative control — why production G3 is STILL BLOCKED
+
+A separate regression deliberately invokes the **unrouted** `ExperimentalSqliteOperationAuthority.admit_created()` after the old JSON registry has already accepted `CREATED → RESERVED`. Today **both lab stores can retain the same logical operation** if callers bypass `G3ExperimentalExclusiveOwner`. This is a controlled reproduction of the defect class, **not a passing conformance invariant**.
+
+The cooperative G3 wrapper prevents dual authorization only for participating code paths. Production closure requires **eliminating or hard-blocking every alternative SQLite entry point**, upgrading/fencing every legacy writer process and proving no direct backend writes are possible. The future production acceptance test must reject this negative control, not simply exclude it from CI. Until then: **G3 production = HOLD / cutover forbidden**.
