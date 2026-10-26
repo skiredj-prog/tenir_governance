@@ -46,7 +46,7 @@ def verifier(*, authorized_by, scope, authorization, reason, lock_id):
     )
 
 
-def as_identity(user, script, args=(), *, timeout=20):
+def as_identity(user, script, args=(), *, timeout=20, import_path=""):
     def drop():
         os.initgroups(user.pw_name, user.pw_gid)
         os.setgid(user.pw_gid)
@@ -56,7 +56,7 @@ def as_identity(user, script, args=(), *, timeout=20):
         capture_output=True, text=True, timeout=timeout,
         preexec_fn=drop, cwd="/tmp",
         env=dict(os.environ, TENIR_ENV="test", HOST_SCOPE="single-host",
-                 PYTHONPATH=""),
+                 PYTHONPATH=str(import_path)),
     )
 
 
@@ -111,6 +111,20 @@ def main():
     os.chmod(base, 0o755)
     observations = []
     try:
+        # The GitHub checkout is intentionally private to the runner UID.
+        # Stage a ROOT-OWNED, read-only copy of the exact checked-out source
+        # into an accessible sandbox import directory. Do not chmod or expose
+        # the checkout itself, and do not use the editable pip finder.
+        import_root = base / "importable"
+        import_root.mkdir(mode=0o755)
+        repo_root = Path(__file__).resolve().parents[1]
+        for package in ("tenir_governance", "tenir_kernel"):
+            shutil.copytree(repo_root / package, import_root / package)
+        for root, directories, files in os.walk(import_root):
+            os.chmod(root, 0o755)
+            for filename in files:
+                os.chmod(os.path.join(root, filename), 0o644)
+
         source_dir = base / "source"
         source_dir.mkdir(mode=0o700)
         budget_dir = base / "budget"
@@ -191,7 +205,7 @@ out=a.admit_created(r,attempt_id='lab:r01-attempt',request_id='lab:r01-admit')
 print(json.dumps({'operation_state':out.operation_state,
                   'execution_authorized':out.execution_authorized}))
 """
-        result = as_identity(engine, positive_script, (budget_dir,))
+        result = as_identity(engine, positive_script, (budget_dir,), import_path=import_root)
         assert result.returncode == 0, {
             "stdout": result.stdout, "stderr": result.stderr,
         }
@@ -211,7 +225,7 @@ fd=os.open(sys.argv[1],os.O_RDWR)
 os.close(fd)
 print('SAME_UID_DB_WRITE_ACCESS')
 """
-        same_uid = as_identity(engine, same_uid_script, (db,))
+        same_uid = as_identity(engine, same_uid_script, (db,), import_path=import_root)
         assert same_uid.returncode == 0
         assert "SAME_UID_DB_WRITE_ACCESS" in same_uid.stdout
 
