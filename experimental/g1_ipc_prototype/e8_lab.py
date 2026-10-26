@@ -95,7 +95,7 @@ class WitnessStore:
         if not isinstance(body, dict):
             raise ValueError('body required')
         required = {'protocol','realm_id','store_id','epoch','expected_head_digest','state_digest',
-                    'key_digest','quarantine_digest','request_id','transaction_id','payload_digest','grant_digest'}
+                    'key_digest','quarantine_digest','next_state_digest','request_id','transaction_id','payload_digest','grant_digest'}
         if set(body) != required or body['protocol'] != 'e8-lab-preauth-v0.1':
             raise ValueError('invalid preauth schema')
         for name in required - {'epoch'}:
@@ -131,8 +131,19 @@ class WitnessStore:
                 return self._response(dict(decision='REJECTED', reason='E8_HEAD_DIVERGENCE', request_digest=request_hash))
             if any(body[k] != old[k] for k in ('state_digest','key_digest','quarantine_digest')):
                 return self._response(dict(decision='REJECTED', reason='E8_HEAD_DIVERGENCE', request_digest=request_hash))
+            # The trusted old digest describes *actual committed business rows*.
+            # The proposed next digest is computed by G1 over its predicted
+            # post-transaction snapshot and signed as part of PRE_AUTH_CHECK.
+            # Witness cannot independently verify G1's proposed state truth.
+            if (not body['next_state_digest'].startswith('sha256:')
+                    or len(body['next_state_digest']) != 71):
+                return self._response(dict(decision='REJECTED', reason='E8_INVALID_NEXT_STATE', request_digest=request_hash))
+            try:
+                bytes.fromhex(body['next_state_digest'][7:])
+            except ValueError:
+                return self._response(dict(decision='REJECTED', reason='E8_INVALID_NEXT_STATE', request_digest=request_hash))
             new = dict(old, sequence=old['sequence']+1, previous_head_digest=old_digest,
-                       state_digest=digest({'predecessor':old['state_digest'],'authorized_request':request_hash}))
+                       state_digest=body['next_state_digest'])
             token = dict(protocol='e8-lab-cmt-v0.1', witness_id=self.witness_id,
                          realm_id=body['realm_id'], store_id=body['store_id'], epoch=body['epoch'],
                          sequence=new['sequence'], previous_head_digest=old_digest,
@@ -177,12 +188,15 @@ class WitnessClient:
                 expected = {'realm_id':body['realm_id'],'store_id':body['store_id'],'epoch':body['epoch'],
                             'previous_head_digest':body['expected_head_digest'], 'request_id':body['request_id'],
                             'request_digest':digest(body), 'transaction_id':body['transaction_id'],
-                            'payload_digest':body['payload_digest'],'grant_digest':body['grant_digest']}
+                            'payload_digest':body['payload_digest'],'grant_digest':body['grant_digest'],
+                            'next_state_digest':body['next_state_digest']}
                 if any(t.get(k) != v for k,v in expected.items()):
                     raise ValueError('CMT scope mismatch')
                 if t['valid_until'] < int(time.time()) or t['protocol'] != 'e8-lab-cmt-v0.1':
                     raise ValueError('CMT stale or invalid')
-                if head_digest(t['new_head']) != t['new_head_digest'] or t['new_head']['sequence'] != t['sequence']:
+                if (head_digest(t['new_head']) != t['new_head_digest']
+                        or t['new_head']['sequence'] != t['sequence']
+                        or t['new_head']['state_digest'] != body['next_state_digest']):
                     raise ValueError('CMT head mismatch')
             elif result_body['decision'] != 'REJECTED':
                 raise ValueError('unexpected witness decision')
