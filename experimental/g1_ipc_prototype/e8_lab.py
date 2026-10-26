@@ -150,7 +150,9 @@ class WitnessStore:
                          new_head_digest=head_digest(new), new_head=new,
                          request_id=body['request_id'], request_digest=request_hash,
                          transaction_id=body['transaction_id'], payload_digest=body['payload_digest'],
-                         grant_digest=body['grant_digest'], valid_until=int(time.time())+30)
+                         grant_digest=body['grant_digest'],
+                         next_state_digest=body['next_state_digest'],
+                         valid_until=int(time.time())+30)
             response = self._response({'decision':'APPROVED','request_digest':request_hash,'cmt':token})
             con.execute('UPDATE heads SET head_json=? WHERE scope=?', (canonical(new).decode(),scope))
             con.execute('INSERT INTO tokens VALUES (?,?,?,?)', (scope,body['request_id'],request_hash,canonical(response).decode()))
