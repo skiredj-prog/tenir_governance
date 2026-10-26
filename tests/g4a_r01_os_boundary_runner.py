@@ -73,9 +73,23 @@ try:
         with open(path, 'r+b') as f:
             f.seek(0); f.write(b'R01')
     elif mode == 'replace':
-        tmp = path.with_name(path.name + '.attacker-replacement')
-        tmp.write_bytes(b'REPLACED')
-        os.replace(tmp, path)
+        # Stage the attacker's file OUTSIDE the protected parent.
+        # A denial must therefore be the destination-directory boundary,
+        # not merely inability to create a temporary file beside the DB.
+        import tempfile
+        fd, staged = tempfile.mkstemp(prefix='g4a-attack-', dir='/tmp')
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                f.write(b'REPLACED')
+            os.replace(staged, path)
+        finally:
+            if os.path.exists(staged):
+                os.unlink(staged)
+    elif mode == 'create':
+        with open(path, 'xb') as f:
+            f.write(b'UNAUTHORIZED')
+    elif mode == 'mkdir':
+        path.mkdir()
     else:
         raise ValueError('unsupported probe')
     print(json.dumps({'result':'BYPASS','path':str(path),'mode':mode}))
@@ -188,6 +202,43 @@ def main():
                 observations.append(detail)
                 if result.returncode != 0 or detail.get("result") != "DENIED":
                     raise AssertionError(f"R01 worker bypass: {detail}")
+        # WAL/SHM/journal and release-pending paths may be absent in a
+        # clean SQLite snapshot. Prove the worker cannot CREATE them, rather
+        # than misclassifying their ENOENT as a permission boundary.
+        absent_paths = [
+            Path(str(db) + "-wal"), Path(str(db) + "-shm"),
+            Path(str(db) + "-journal"),
+            Path(str(source_path) + ".quarantine.release-pending"),
+        ]
+        for target in absent_paths:
+            assert not target.exists(), f"unexpected pre-existing sidecar: {target}"
+            result = as_identity(worker, ATTACK_SCRIPT, (target, "create"))
+            detail = json.loads(result.stdout.strip())
+            detail.update(
+                returncode=result.returncode, stderr=result.stderr[-1000:],
+                path_role="ABSENT_PROTECTED_SIDECAR",
+            )
+            observations.append(detail)
+            if (result.returncode != 0 or detail.get("result") != "DENIED"
+                    or detail.get("errno") not in (1, 13)):
+                raise AssertionError(f"R01 worker created protected sidecar: {detail}")
+            assert not target.exists()
+
+        # The parent directories themselves must reject worker creation.
+        for parent in (source_dir, budget_dir):
+            target = parent / ".worker-unauthorized-subdirectory"
+            result = as_identity(worker, ATTACK_SCRIPT, (target, "mkdir"))
+            detail = json.loads(result.stdout.strip())
+            detail.update(
+                returncode=result.returncode, stderr=result.stderr[-1000:],
+                path_role="PROTECTED_PARENT_DIRECTORY",
+            )
+            observations.append(detail)
+            if (result.returncode != 0 or detail.get("result") != "DENIED"
+                    or detail.get("errno") not in (1, 13)):
+                raise AssertionError(f"R01 worker created protected directory: {detail}")
+            assert not target.exists()
+
         after = {str(path): _sha(path) for path in paths}
         assert before == after, "R01 denied worker nevertheless changed protected bytes"
 
