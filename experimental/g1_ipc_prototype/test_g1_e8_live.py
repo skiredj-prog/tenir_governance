@@ -11,6 +11,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from e8_lab import WitnessClient, WitnessStore, start_loopback_test_server
 from g1_e8_guarded import initialize_guarded, process_guarded
+from g1_e8_snapshot import business_digest
+from g1_ipc import initialize
 from test_g1_ipc import KEY, UID, request
 
 
@@ -19,8 +21,13 @@ def lab(tmp_path):
     engine_key = Ed25519PrivateKey.generate()
     witness_key = Ed25519PrivateKey.generate()
     store = WitnessStore(str(tmp_path/'witness.sqlite'), witness_key, engine_key.public_key())
-    initial = store.provision_for_test('test', 'lab-store', epoch=5)
     db = str(tmp_path/'engine.sqlite')
+    initialize(db)
+    with sqlite3.connect(db) as con:
+        genesis_digest = business_digest(con)
+    initial = store.provision_for_test(
+        'test', 'lab-store', epoch=5, state_digest=genesis_digest
+    )
     initialize_guarded(db, realm='test', store_id='lab-store', initial_head=initial)
     server, url = start_loopback_test_server(store)
     client = WitnessClient(url, engine_key, witness_key.public_key())
@@ -152,11 +159,72 @@ def test_unix_socket_daemon_checks_peer_and_preauthed_local_commit(lab,tmp_path)
     assert external_head(lab)['sequence']==1
 
 
-@pytest.mark.xfail(strict=True, reason='RED: local DB business rows are not recomputed into the attested head')
 def test_real_engine_must_detect_business_db_tamper_even_when_cached_head_untouched(lab):
-    """Intentionally unmet Q6-like invariant: local head matching != full state proof."""
+    """P0 regression: a privileged DELETE without cached-head change is detected."""
     assert submit(lab,request('r_good','tx_good',epoch=5))['decision']=='LOCAL_COMMITTED_PREAUTHORIZED'
+    before = external_head(lab)
     with sqlite3.connect(lab['db']) as con:
-        con.execute('DELETE FROM g1_local_commits')  # privileged local actor
+        con.execute('DELETE FROM g1_local_commits')
     out=submit(lab,request('r_after_tamper','tx_other',epoch=5))
+    assert out == {'decision':'HARD_HOLD','reason':'E8_LOCAL_STATE_DIVERGENCE'}
+    assert external_head(lab) == before
+    assert rows(lab) == (0,1)
+    with sqlite3.connect(lab['db']) as con:
+        assert con.execute('SELECT reason FROM g1_e8_hold').fetchone()[0] == 'E8_LOCAL_STATE_DIVERGENCE'
+
+
+@pytest.mark.parametrize('mutation', [
+    "UPDATE g1_local_commits SET payload_digest='sha256:" + "1"*64 + "'",
+    "UPDATE g1_idempotency_ledger SET result_digest='sha256:" + "2"*64 + "'",
+    "DELETE FROM g1_idempotency_ledger",
+    "ALTER TABLE g1_local_commits ADD COLUMN privileged_field TEXT",
+])
+def test_privileged_row_or_schema_mutation_is_held_before_next_admission(lab, mutation):
+    assert submit(lab,request('r1','tx1',epoch=5))['decision']=='LOCAL_COMMITTED_PREAUTHORIZED'
+    before_head = external_head(lab)
+    with sqlite3.connect(lab['db']) as con:
+        con.execute(mutation)
+    before_rows = rows(lab)
+    out = submit(lab,request('r2','tx2',epoch=5))
     assert out['decision']=='HARD_HOLD'
+    assert out['reason'] in ('E8_LOCAL_STATE_DIVERGENCE','E8_LOCAL_STATE_UNVERIFIABLE')
+    assert rows(lab)==before_rows
+    assert external_head(lab)==before_head
+
+
+def test_identical_replay_is_held_after_privileged_ledger_change(lab):
+    req=request('r_repeat','tx_repeat',epoch=5)
+    assert submit(lab,req)['decision']=='LOCAL_COMMITTED_PREAUTHORIZED'
+    with sqlite3.connect(lab['db']) as con:
+        con.execute("UPDATE g1_idempotency_ledger SET status='REJECTED'")
+    out=submit(lab,req)
+    assert out == {'decision':'HARD_HOLD','reason':'E8_LOCAL_STATE_DIVERGENCE'}
+
+
+def test_full_local_snapshot_matches_witness_after_two_commits(lab):
+    for n in (1,2):
+        assert submit(lab,request(f'req-{n}',f'tx-{n}',epoch=5))['decision']=='LOCAL_COMMITTED_PREAUTHORIZED'
+        with sqlite3.connect(lab['db']) as con:
+            assert business_digest(con)==external_head(lab)['state_digest']
+        assert external_head(lab)['state_digest']==local_head(lab)['state_digest']
+
+
+def test_unattested_genesis_is_refused_before_any_admission(tmp_path):
+    db=str(tmp_path/'genesis.db')
+    store=WitnessStore(str(tmp_path/'genesis-witness.db'),
+                       Ed25519PrivateKey.generate(),Ed25519PrivateKey.generate().public_key())
+    bad_genesis=store.provision_for_test('test','another-store',epoch=5)
+    with pytest.raises(ValueError,match='E8_GENESIS_STATE_MISMATCH'):
+        initialize_guarded(db,realm='test',store_id='another-store',initial_head=bad_genesis)
+
+
+def test_modified_business_rows_and_forged_cached_head_still_rejected_by_witness(lab):
+    assert submit(lab,request('r_good','tx_good',epoch=5))['decision']=='LOCAL_COMMITTED_PREAUTHORIZED'
+    before=external_head(lab)
+    with sqlite3.connect(lab['db']) as con:
+        con.execute('DELETE FROM g1_local_commits')
+        hacked=dict(local_head(lab),state_digest=business_digest(con))
+        con.execute('UPDATE g1_e8_head SET head_json=?',(json.dumps(hacked),))
+    out=submit(lab,request('r_hacked','tx_hacked',epoch=5))
+    assert out=={'decision':'HARD_HOLD','reason':'E8_HEAD_DIVERGENCE'}
+    assert external_head(lab)==before
