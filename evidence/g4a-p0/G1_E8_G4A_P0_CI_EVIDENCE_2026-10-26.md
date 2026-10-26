@@ -8,6 +8,34 @@
 **GitHub Actions run:** [40288518276](https://github.com/skiredj-prog/tenir_governance/actions/runs/40288518276) — **both jobs succeeded**  
 **Overall security verdict:** **R-01 WORKER-UID ONLY BOUNDED PASS; Q1/Q6 SYSTEM FAIL; R-01 PRIVILEGED OPEN; SYSTEM P0 OPEN; PRODUCTION HOLD.**
 
+## Latest strengthened run — 22 worker-UID probes
+
+The original 16-probe run remains an independently reproducible historical
+record at the SHA above. The **latest security-strengthened SUT** is:
+
+- **SUT SHA:** `c241ee5fa093429bf881c8246b4026cc0122cf98`
+- **CI run:** [40288719509](https://github.com/skiredj-prog/tenir_governance/actions/runs/40288719509) — **both jobs SUCCESS**
+- **G4-A Q1/Q6:** `2 passed, 2 xfailed` (two **security failures reproduced**)
+- **G4-A R-01:** `negative_probe_count: 22`, `worker_all_denied: true`,
+  `same_uid_write_access: true`, positive control
+  `RESERVED / execution_authorized=false`
+- **JUnit and stdout:** [CI artifact 12635188162](https://github.com/skiredj-prog/tenir_governance/actions/runs/40288719509/artifacts/12635188162)
+- **OS probe JSON and stdout:** [CI artifact 12634804359](https://github.com/skiredj-prog/tenir_governance/actions/runs/40288719509/artifacts/12634804359)
+
+The strengthened R-01 probes now stage replacement payloads in an
+**attacker-writable external temporary directory** before attempting
+`os.replace` into the protected destination. They additionally check
+creation denial for absent SQLite WAL, SHM and journal paths, quarantine
+release-pending sidecar and both protected parent directories. The latter
+checks require **EACCES or EPERM**; mere `ENOENT` does not count as
+kernel permission denial. All 22 probes passed on the disposable runner.
+The same-UID negative control continues to demonstrate residual
+privileged DB write access.
+
+**No new assurance level is implied:** the tested identities are on one
+CI Linux host; G1 authenticated IPC and independent REG E8/CB-05
+witness remain unintegrated.
+
 ## Provenance and exact observed results
 
 | Test job | GitHub job ID | Observation | Interpretation |
