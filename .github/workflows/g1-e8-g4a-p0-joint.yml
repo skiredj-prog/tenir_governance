@@ -1,0 +1,103 @@
+name: P0 G1 E8 G4-A joint negative controls — not qualification
+
+on:
+  push:
+    branches:
+      - draft/g1-e8-g4a-p0-joint-controls-20261026
+    paths:
+      - 'tests/test_g1_e8_g4a_p0_counterexamples.py'
+      - 'tests/g4a_r01_os_boundary_runner.py'
+      - '.github/workflows/g1-e8-g4a-p0-joint.yml'
+      - 'docs/g4a/G1_E8_G4A_P0_BRIDGE_2026-10-26.md'
+  pull_request:
+    paths:
+      - 'tests/test_g1_e8_g4a_p0_counterexamples.py'
+      - 'tests/g4a_r01_os_boundary_runner.py'
+      - '.github/workflows/g1-e8-g4a-p0-joint.yml'
+      - 'docs/g4a/G1_E8_G4A_P0_BRIDGE_2026-10-26.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  g4a-q1-q6-real-path:
+    name: Actual G4-A Q1/Q6 — counterexamples PASS, conformance XFAIL
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      TENIR_ENV: test
+      HOST_SCOPE: single-host
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install '.[test,raft,ep02,api]'
+      - name: Execute actual G4-A negative controls
+        run: |
+          set -o pipefail
+          mkdir -p evidence/g4a-p0
+          git rev-parse HEAD | tee evidence/g4a-p0/sut-sha.txt
+          python -m pytest -q -ra tests/test_g1_e8_g4a_p0_counterexamples.py \
+            --junitxml=evidence/g4a-p0/q1-q6-junit.xml \
+            | tee evidence/g4a-p0/q1-q6-output.txt
+      - name: Record security interpretation
+        run: |
+          echo 'Q1/Q6 vulnerability-reproduction PASS != security conformance.'
+          echo 'Strict XFAIL means mandatory independent-witness hold is absent.'
+          echo 'G4-A returns simulated receipts; no external effect was invoked.'
+          echo 'SYSTEM P0 OPEN / PRODUCTION HOLD'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: g4a-p0-q1-q6-${{ github.event.pull_request.head.sha || github.sha }}
+          path: evidence/g4a-p0/
+          retention-days: 21
+
+  r01-real-store-worker-uid:
+    name: Actual G4-A storage — worker UID denial and same-UID countercontrol
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TENIR_ENV: test
+      HOST_SCOPE: single-host
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[test,raft,ep02,api]'
+      - name: Provision two ephemeral non-root identities on disposable CI runner
+        run: |
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin tenir_e8_eng
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin tenir_e8_wrk
+          test "$(id -u tenir_e8_eng)" != "$(id -u tenir_e8_wrk)"
+      - name: Execute OS boundary against real G4-A store
+        run: |
+          set -o pipefail
+          mkdir -p evidence/g4a-p0
+          git rev-parse HEAD | tee evidence/g4a-p0/sut-sha.txt
+          sudo env TENIR_ENV=test HOST_SCOPE=single-host \
+            "$(command -v python)" tests/g4a_r01_os_boundary_runner.py \
+            --engine-user tenir_e8_eng --worker-user tenir_e8_wrk \
+            --output "$PWD/evidence/g4a-p0" \
+            | tee evidence/g4a-p0/r01-os-output.txt
+      - name: State bounded verdict
+        run: |
+          echo 'Real G4-A store, two Linux UIDs: worker denied, engine permitted.'
+          echo 'Same-UID privileged writer can still open G4-A SQLite read/write.'
+          echo 'No G1 IPC grant, no independently managed witness, no provider effect.'
+          echo 'R-01 SYSTEM P0 OPEN / PRODUCTION HOLD'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: g4a-r01-os-${{ github.event.pull_request.head.sha || github.sha }}
+          path: evidence/g4a-p0/
+          retention-days: 21
