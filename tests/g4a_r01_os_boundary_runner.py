@@ -54,7 +54,9 @@ def as_identity(user, script, args=(), *, timeout=20):
     return subprocess.run(
         [sys.executable, "-c", script, *map(str, args)],
         capture_output=True, text=True, timeout=timeout,
-        preexec_fn=drop, env=dict(os.environ, TENIR_ENV="test", HOST_SCOPE="single-host"),
+        preexec_fn=drop, cwd="/tmp",
+        env=dict(os.environ, TENIR_ENV="test", HOST_SCOPE="single-host",
+                 PYTHONPATH=""),
     )
 
 
