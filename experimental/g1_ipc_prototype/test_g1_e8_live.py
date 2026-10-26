@@ -71,7 +71,8 @@ def test_int_e8_01b_equal_epoch_head_substitution_refused(lab):
     with sqlite3.connect(lab['db']) as con:
         con.execute('UPDATE g1_e8_head SET head_json=?',(json.dumps(modified),))
     out=submit(lab, request('r_corrupt','tx_corrupt',epoch=5))
-    assert out['reason']=='E8_HEAD_DIVERGENCE'
+    # Earlier local detection is stronger: the cached head itself was altered.
+    assert out['reason']=='E8_LOCAL_STATE_DIVERGENCE'
     assert out['decision']=='HARD_HOLD'
     assert rows(lab)==(0,0)
 
