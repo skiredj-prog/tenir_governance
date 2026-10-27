@@ -1,0 +1,135 @@
+{
+  "schema_version": "proof01-w3-write-path-inventory/candidate-v0.1",
+  "status": "TEMPLATE_NOT_OBSERVATION",
+  "source_sha": null,
+  "deployment_manifest_sha256": null,
+  "topology_id": null,
+  "profile": "LAB-S1|IND-M1",
+  "test_instance_id": null,
+  "roles": [
+    {
+      "role": "agent2-runtime",
+      "principal": {
+        "host_id": null,
+        "operator_id": null,
+        "uid": null,
+        "gid": null,
+        "supplementary_gids": [],
+        "privileges": [],
+        "credential_key_ids": [],
+        "network_admin_scope": null
+      },
+      "observed_write_channels": []
+    },
+    {
+      "role": "agentC-witness",
+      "principal": {
+        "host_id": null,
+        "operator_id": null,
+        "uid": null,
+        "gid": null,
+        "supplementary_gids": [],
+        "privileges": [],
+        "credential_key_ids": [],
+        "network_admin_scope": null
+      },
+      "observed_write_channels": []
+    }
+  ],
+  "storage": [
+    {
+      "id": "runtime-db",
+      "canonical_path": null,
+      "device_id": null,
+      "inode": null,
+      "host_id": null,
+      "volume_id": null,
+      "owner_uid": null,
+      "owner_gid": null,
+      "mode_octal": null,
+      "mount_source": null,
+      "mount_options": [],
+      "privileged_replacement_possible": null,
+      "sqlite_ddl_possible": null,
+      "sqlite_udf_register_possible": null,
+      "realpaths_verified": false
+    },
+    {
+      "id": "witness-db",
+      "canonical_path": null,
+      "device_id": null,
+      "inode": null,
+      "host_id": null,
+      "volume_id": null,
+      "owner_uid": null,
+      "owner_gid": null,
+      "mode_octal": null,
+      "mount_source": null,
+      "mount_options": [],
+      "privileged_replacement_possible": null,
+      "sqlite_ddl_possible": null,
+      "sqlite_udf_register_possible": null,
+      "realpaths_verified": false
+    },
+    {
+      "id": "witness-private-key",
+      "canonical_path": null,
+      "device_id": null,
+      "inode": null,
+      "host_id": null,
+      "volume_id": null,
+      "owner_uid": null,
+      "owner_gid": null,
+      "mode_octal": null,
+      "mount_source": null,
+      "mount_options": [],
+      "privileged_replacement_possible": null,
+      "sqlite_ddl_possible": null,
+      "sqlite_udf_register_possible": null,
+      "realpaths_verified": false
+    }
+  ],
+  "privilege_edges": [
+    {
+      "from": "agent2-runtime",
+      "to": "witness-private-key",
+      "action": "read",
+      "observed": null,
+      "expected": false,
+      "test_vector": "W3-2.1-READ",
+      "evidence_path": null
+    },
+    {
+      "from": "agent2-runtime",
+      "to": "witness-private-key",
+      "action": "write-or-replace",
+      "observed": null,
+      "expected": false,
+      "test_vector": "W3-2.1-WRITE",
+      "evidence_path": null
+    },
+    {
+      "from": "agent2-runtime",
+      "to": "witness-db",
+      "action": "write-sql-and-file",
+      "observed": null,
+      "expected": false,
+      "test_vector": "W3-2.1-DB",
+      "evidence_path": null
+    },
+    {
+      "from": "agent2-runtime",
+      "to": "witness-endpoint",
+      "action": "submit-signed-attestation-as-witness",
+      "observed": null,
+      "expected": false,
+      "test_vector": "W3-2.2-IMPERSONATE",
+      "evidence_path": null
+    }
+  ],
+  "metadata": {
+    "public_only": true,
+    "no_secrets": true,
+    "comment": "Replace nulls only with observations + evidence. Do not place private keys or credentials in this artifact."
+  }
+}
