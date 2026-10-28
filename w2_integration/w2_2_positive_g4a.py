@@ -64,7 +64,9 @@ class PositiveG4A:
                 idempotency_key TEXT,
                 signature BLOB,
                 key_id TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'intent'
+                status TEXT NOT NULL DEFAULT 'intent',
+                dispatch_claim INTEGER NOT NULL DEFAULT 0,
+                payload_json TEXT
             )
         """)
         self.conn.execute("""
@@ -74,7 +76,17 @@ class PositiveG4A:
                 key_id TEXT NOT NULL
             )
         """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS recovery_holds (
+                operation_id TEXT PRIMARY KEY,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
         self.conn.commit()
+        # Lab only: the private key is reloaded from this database in clear.
+        # This is not independent custody and not a privilege boundary.
+        self.key_custody = "LAB_CLEARTEXT_SQLITE"
         self._load_or_create_key()
         self.recover()
 
@@ -102,14 +114,17 @@ class PositiveG4A:
         self.conn.commit()
 
     def recover(self):
-        """Finish an intent that already has a reservation, or drop a pre-dispatch orphan."""
+        """Complete our own intents. Never delete a reservation that has no permit."""
         intents = self.conn.execute("SELECT * FROM permits WHERE status = 'intent'").fetchall()
         for row in intents:
             op_id = row["operation_id"]
             if self.i8.reservation_count(op_id):
                 self._issue_from_intent(row)
             else:
-                self.conn.execute("DELETE FROM permits WHERE permit_id = ? AND status = 'intent'", (row["permit_id"],))
+                self.conn.execute(
+                    "DELETE FROM permits WHERE permit_id = ? AND status = 'intent'",
+                    (row["permit_id"],),
+                )
                 self.conn.commit()
         reserved = self.i8.conn.execute(
             "SELECT operation_id FROM ledger WHERE reserved > 0 AND settled = 0"
@@ -118,9 +133,40 @@ class PositiveG4A:
             permit = self.conn.execute(
                 "SELECT status FROM permits WHERE operation_id = ?", (op_id,)
             ).fetchone()
-            state = self.rc01.get_state(op_id)
-            if permit is None and state in (None, "RESERVED", "PRE_ADMITTED"):
-                self.i8.abandon_pre_dispatch(op_id)
+            if permit is None:
+                self._hold(op_id, "reservation_without_permit_not_abandoned")
+        claimed = self.conn.execute(
+            "SELECT * FROM permits WHERE consumed = 1 AND dispatch_claim = 1"
+        ).fetchall()
+        for row in claimed:
+            self._repair_dispatch_claim(row)
+
+    def _hold(self, op_id: str, reason: str):
+        self.conn.execute(
+            """INSERT OR IGNORE INTO recovery_holds (operation_id, reason, created_at)
+               VALUES (?, ?, ?)""",
+            (op_id, reason, datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+
+    def _project_dispatching(self, op_id: str):
+        state = self.rc01.get_state(op_id)
+        if state in (None, "RESERVED", "PRE_ADMITTED"):
+            self.rc01.transition(op_id, "DISPATCHING", "dispatch_claim_projected")
+
+    def _repair_dispatch_claim(self, row):
+        op_id = row["operation_id"]
+        self._project_dispatching(op_id)
+        if self.provider.execute_count(op_id) > 0:
+            return
+        if not row["payload_json"] or not row["idempotency_key"]:
+            self._hold(op_id, "dispatch_claim_without_replay_material")
+            return
+        payload = json.loads(row["payload_json"])
+        if canon_request_hash(payload) != row["request_hash"]:
+            self._hold(op_id, "dispatch_claim_payload_hash_mismatch")
+            return
+        self.provider.execute(op_id, row["idempotency_key"], payload)
 
     def _sign(self, body: dict) -> bytes:
         return self.private_key.sign(_canonical(body))
@@ -216,15 +262,15 @@ class PositiveG4A:
                 row["request_hash"], row["reservation_id"], row["issued_at"], row["expires_at"],
             )
             self._verify(body, row["signature"])
+            payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
             updated = self.conn.execute(
                 """UPDATE permits
-                   SET consumed = 1, idempotency_key = ?
+                   SET consumed = 1, idempotency_key = ?, dispatch_claim = 1, payload_json = ?
                    WHERE operation_id = ? AND status = 'issued' AND consumed = 0
                      AND request_hash = ? AND expires_at > ?""",
-                (idempotency_key, op_id, rh, now),
+                (idempotency_key, payload_json, op_id, rh, now),
             )
             if updated.rowcount != 1:
                 raise RuntimeError("durable permit consumption failed")
-        self.rc01.transition(op_id, "DISPATCHING", "permit_consumed_intent_persisted")
-        receipt = self.provider.execute(op_id, idempotency_key, payload)
-        return receipt
+        self._project_dispatching(op_id)
+        return self.provider.execute(op_id, idempotency_key, payload)

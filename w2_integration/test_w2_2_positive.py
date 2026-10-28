@@ -109,17 +109,44 @@ def test_key_survives_restart_and_dispatch():
         print("key survives restart: PASS")
 
 
-def test_orphan_reservation_abandoned_on_recover():
+def test_orphan_reservation_held_not_abandoned():
     with tempfile.TemporaryDirectory() as d:
         i8 = I8Ledger(db_path=os.path.join(d, "i8.db"))
         rc01 = RC01Lab(db_path=os.path.join(d, "rc01.db"))
         provider = ProofProvider(db_path=os.path.join(d, "p.db"))
         i8.reserve("op-or", 100)
         rc01.transition("op-or", "RESERVED", "crash_before_permit")
-        PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
-        assert i8.reservation_count("op-or") == 0
-        assert i8.net_settlement_count("op-or") == 0
-        print("orphan reservation abandoned: PASS")
+        g4a = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
+        assert i8.reservation_count("op-or") == 1
+        hold = g4a.conn.execute(
+            "SELECT reason FROM recovery_holds WHERE operation_id = ?", ("op-or",)
+        ).fetchone()
+        assert hold["reason"] == "reservation_without_permit_not_abandoned"
+        print("orphan reservation held: PASS")
+
+
+def test_crash_after_claim_repairs_once():
+    with tempfile.TemporaryDirectory() as d:
+        i8, rc01, provider, g4a = _stack(d)
+        payload = {"amount": 40}
+        g4a.admit_and_reserve("op-c", "eval", payload)
+        g4a.conn.execute(
+            """UPDATE permits
+               SET consumed = 1, dispatch_claim = 1, idempotency_key = ?, payload_json = ?
+               WHERE operation_id = 'op-c'""",
+            ("idem-c", '{"amount":40}'),
+        )
+        g4a.conn.commit()
+        assert rc01.get_state("op-c") == "RESERVED"
+        assert provider.execute_count("op-c") == 0
+        g4a2 = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
+        assert rc01.get_state("op-c") == "DISPATCHING"
+        assert provider.execute_count("op-c") == 1
+        g4a3 = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
+        assert provider.execute_count("op-c") == 1
+        assert g4a2.key_custody == "LAB_CLEARTEXT_SQLITE"
+        assert g4a3.key_id == g4a.key_id
+        print("crash after claim repaired once: PASS")
 
 
 def test_intent_completed_after_restart():
@@ -154,6 +181,7 @@ if __name__ == "__main__":
     test_expired_permit_refused()
     test_contradictory_reissue_refused()
     test_key_survives_restart_and_dispatch()
-    test_orphan_reservation_abandoned_on_recover()
+    test_orphan_reservation_held_not_abandoned()
     test_intent_completed_after_restart()
+    test_crash_after_claim_repairs_once()
     print("Positive contract tests: PASS")
