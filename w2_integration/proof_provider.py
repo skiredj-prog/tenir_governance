@@ -24,7 +24,7 @@ class AckLost(Exception):
     pass
 
 class ProofProvider:
-    def __init__(self, db_path: str = ":memory:"):
+    def __init__(self, db_path: str = ":memory:", *, require_claim: bool = False):
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=FULL")
@@ -33,6 +33,7 @@ class ProofProvider:
         self.public_key = self.private_key.public_key()
         self.provider_id = "lab-provider-reconstructed"
         self.sequence = 0
+        self.require_claim = require_claim
 
     def _init_schema(self):
         self.conn.executescript("""
@@ -79,8 +80,15 @@ class ProofProvider:
     def _sign(self, body: dict) -> bytes:
         return self.private_key.sign(self._canonical(body))
 
-    def execute(self, operation_id: str, idempotency_key: str, payload: dict, lose_ack: bool = False):
+    def execute(self, operation_id: str, idempotency_key: str, payload: dict, lose_ack: bool = False, *, claim=None):
+        if self.require_claim:
+            if not isinstance(claim, dict) or claim.get("operation_key") != operation_id:
+                raise PermissionError("kernel claim required")
+            if claim.get("idempotency_key") != idempotency_key or claim.get("audience") != "proof-provider":
+                raise PermissionError("invalid kernel claim")
         request_hash = canon_request_hash(payload)
+        if self.require_claim and (not claim.get("claim_token") or claim.get("request_hash") not in (None, request_hash)):
+            raise PermissionError("claim payload binding mismatch")
         # Idempotence: same key must not produce different effect
         cur = self.conn.execute(
             "SELECT operation_id, request_hash, receipt_json FROM effects WHERE idempotency_key = ?",
@@ -141,3 +149,10 @@ class ProofProvider:
             "SELECT COUNT(*) FROM effects WHERE operation_id = ?", (operation_id,)
         )
         return cur.fetchone()[0]
+
+
+class KernelClaimProofProvider(ProofProvider):
+    """Native-path adapter: provider calls cannot omit a Kernel claim."""
+
+    def __init__(self, db_path: str = ":memory:"):
+        super().__init__(db_path, require_claim=True)
