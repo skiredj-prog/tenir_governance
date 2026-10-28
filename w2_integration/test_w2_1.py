@@ -110,11 +110,38 @@ def test_concurrent_terminal():
         assert ok_count == 1, f"expected exactly one success, got {results}"
         print(f"concurrent terminal: PASS (winner={final})")
 
+def test_migration_nonunique_index_fail():
+    with tempfile.TemporaryDirectory() as d:
+        db = os.path.join(d, "legacy_nonunique.db")
+        conn = sqlite3.connect(db)
+        conn.execute("""
+            CREATE TABLE effects (
+                operation_id TEXT PRIMARY KEY,
+                idempotency_key TEXT NOT NULL,
+                request_hash TEXT,
+                effect_status TEXT,
+                receipt_json TEXT,
+                signature BLOB,
+                created_at TEXT
+            )
+        """)
+        # Pre-create a NON-unique index with the expected name
+        conn.execute("CREATE INDEX idx_effects_idempotency ON effects(idempotency_key)")
+        conn.commit()
+        conn.close()
+        try:
+            ProofProvider(db_path=db)
+            raise AssertionError("should have refused non-unique index with colliding name")
+        except RuntimeError as e:
+            assert "not UNIQUE" in str(e)
+        print("migration non-unique index collision: PASS")
+
 if __name__ == "__main__":
     test_restart_persistence()
     test_idempotence_conflict()
     test_terminal_not_reverted()
     test_terminal_to_terminal_rejected()
     test_migration_duplicates_fail()
+    test_migration_nonunique_index_fail()
     test_concurrent_terminal()
     print("W2.1 tests: PASS")

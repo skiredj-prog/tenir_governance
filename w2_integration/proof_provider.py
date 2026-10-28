@@ -47,12 +47,15 @@ class ProofProvider:
             self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_effects_idempotency ON effects(idempotency_key)")
         except sqlite3.IntegrityError as e:
             raise RuntimeError("invalid migration: duplicate idempotency_key present, refusing to open") from e
-        # Verify the index exists and is unique on the right column
+        # Verify the index exists, is UNIQUE, and is on the right column
         cur = self.conn.execute("PRAGMA index_list(effects)")
         indexes = {row[1]: row for row in cur.fetchall()}
         if "idx_effects_idempotency" not in indexes:
             raise RuntimeError("migration failed: unique index not created")
-        # Confirm uniqueness
+        # row = (seq, name, unique, origin, partial)
+        if indexes["idx_effects_idempotency"][2] != 1:
+            raise RuntimeError("incompatible index: existing index is not UNIQUE")
+        # Confirm column
         cur = self.conn.execute("PRAGMA index_info(idx_effects_idempotency)")
         cols = [row[2] for row in cur.fetchall()]
         if cols != ["idempotency_key"]:
