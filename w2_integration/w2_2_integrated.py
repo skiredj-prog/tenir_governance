@@ -8,6 +8,7 @@ It uses a single I8 ledger instance for the scenario.
 """
 import os, json, hashlib
 from datetime import datetime, timezone
+from w2_2a_authority import NativeAuthorityGate
 from proof_provider import ProofProvider, AckLost
 from i8_ledger import I8Ledger
 from lab_s1_bridge import RC01Lab
@@ -41,9 +42,9 @@ def run_integrated_candidate(db_dir: str, op_id: str = "op-w22-integrated"):
     i8_db = os.path.join(db_dir, "i8.db")          # single I8 path
     rc01_db = os.path.join(db_dir, "rc01.db")
 
-    auth = LabS1AuthorizationBoundary()
+    auth = NativeAuthorityGate()
     provider = ProofProvider(db_path=provider_db)
-    i8 = I8Ledger(db_path=i8_db)                   # single owner for this scenario
+    i8 = I8Ledger(db_path=i8_db)
     rc01 = RC01Lab(db_path=rc01_db)
 
     payload = {"scope": {"account": "lab", "amount_minor": 100, "currency": "EUR"}, "action_type": "transfer"}
@@ -52,17 +53,37 @@ def run_integrated_candidate(db_dir: str, op_id: str = "op-w22-integrated"):
 
     traces = []
     events = []
+    provider_called = False
 
-    # 1. Lab grant (explicitly not native G4-A)
-    grant = auth.issue_lab_grant(op_id, evaluation_id, request_hash)
+    # 1. Issue grant via native gate
+    grant = auth.issue(op_id, evaluation_id, request_hash)
     traces.append(rc01.transition(op_id, "RESERVED", "lab_grant_issued"))
     i8.reserve(op_id, 100)
     events.append({"stream": "i8", "event": "reserve", "op": op_id, "amount": 100})
 
-    # 2. Validate then dispatch
-    if not auth.validate_dispatch(op_id, request_hash):
-        raise RuntimeError("dispatch refused: no valid lab grant")
+    # 2. Mandatory authorization check before any provider call
+    ok, reason = auth.authorize_dispatch(op_id, request_hash)
+    if not ok:
+        traces.append(rc01.transition(op_id, "HOLD", f"dispatch_refused:{reason}"))
+        events.append({"stream": "authority", "event": "dispatch_refused", "op": op_id, "reason": reason})
+        return {
+            "op_id": op_id,
+            "final_state": rc01.get_state(op_id),
+            "execute_count": 0,
+            "provider_called": False,
+            "settlement_count": 0,
+            "grant": {"grant_id": grant.grant_id, "execution_authorized": grant.execution_authorized},
+            "receipt": None,
+            "traces": traces,
+            "events": events,
+            "i8_db": i8_db,
+            "dispatch_refused": True,
+            "refuse_reason": reason,
+        }
+
+    # Only reached if authorized (currently never, under historical G4-A)
     traces.append(rc01.transition(op_id, "DISPATCHING", "dispatch_intent"))
+    provider_called = True
     try:
         provider.execute(op_id, "idem-w22-001", payload, lose_ack=True)
     except AckLost:
@@ -90,10 +111,12 @@ def run_integrated_candidate(db_dir: str, op_id: str = "op-w22-integrated"):
         "op_id": op_id,
         "final_state": rc01.get_state(op_id),
         "execute_count": provider.execute_count(op_id),
+        "provider_called": provider_called,
         "settlement_count": i8.net_settlement_count(op_id),
-        "grant": grant,
+        "grant": {"grant_id": grant.grant_id, "execution_authorized": grant.execution_authorized},
         "receipt": receipt,
         "traces": traces,
         "events": events,
         "i8_db": i8_db,
+        "dispatch_refused": False,
     }
