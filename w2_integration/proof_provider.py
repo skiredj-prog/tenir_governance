@@ -52,12 +52,23 @@ class ProofProvider:
 
     def execute(self, operation_id: str, idempotency_key: str, payload: dict, lose_ack: bool = False):
         request_hash = hashlib.sha256(self._canonical(payload)).hexdigest()
+        # Idempotence: same key must not produce different effect
+        cur = self.conn.execute(
+            "SELECT operation_id, request_hash, receipt_json FROM effects WHERE idempotency_key = ?",
+            (idempotency_key,)
+        )
+        existing = cur.fetchone()
+        if existing:
+            if existing[1] != request_hash:
+                raise ValueError("idempotency key conflict: different request_hash")
+            return json.loads(existing[2])
+
         cur = self.conn.execute(
             "SELECT receipt_json FROM effects WHERE operation_id = ?", (operation_id,)
         )
         row = cur.fetchone()
         if row:
-            return json.loads(row[0])  # idempotent
+            return json.loads(row[0])
 
         self.sequence += 1
         body = {

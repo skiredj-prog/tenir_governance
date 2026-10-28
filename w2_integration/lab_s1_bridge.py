@@ -26,10 +26,16 @@ class RC01Lab:
         self.states[op_id] = to
         return {"ts": datetime.now(timezone.utc).isoformat(), "op": op_id, "from": prev, "to": to, "reason": reason}
 
-def run_lab_s1_scenario(op_id: str = "op-w2-lab-001"):
-    """Minimal LAB-S1 scenario: grant assumed → reserve → dispatch → lost ACK → REPAIR → recovery"""
-    provider = ProofProvider()
-    i8 = I8Ledger()
+def run_lab_s1_scenario(op_id: str = "op-w2-lab-001", db_dir: str = None):
+    """Minimal LAB-S1 scenario with optional persistent stores"""
+    import tempfile, os
+    if db_dir is None:
+        db_dir = tempfile.mkdtemp(prefix="w2lab_")
+    provider_db = os.path.join(db_dir, "provider.db")
+    i8_db = os.path.join(db_dir, "i8.db")
+
+    provider = ProofProvider(db_path=provider_db)
+    i8 = I8Ledger(db_path=i8_db)
     rc01 = RC01Lab()
     traces = []
 
@@ -50,13 +56,15 @@ def run_lab_s1_scenario(op_id: str = "op-w2-lab-001"):
     receipt = provider.reconcile(op_id)
     assert receipt and receipt["effect_status"] == "EXECUTED"
 
-    # 4. Settle fails → REPAIR
-    traces.append(rc01.transition(op_id, "REPAIR", "settle_failed"))
+    # 4. Settle fails FIRST, then enter REPAIR
     i8.fail_next_settle()
+    settle_failed = False
     try:
         i8.settle(op_id)
     except RuntimeError:
-        pass
+        settle_failed = True
+    if settle_failed:
+        traces.append(rc01.transition(op_id, "REPAIR", "settle_failed"))
 
     # 5. Recovery
     i8.settle(op_id)
