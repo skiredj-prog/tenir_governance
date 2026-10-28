@@ -64,6 +64,13 @@ class I8Ledger:
     def fail_next_settle(self):
         self._fail_next = True
 
+    def reservation_count(self, op_id: str) -> int:
+        cur = self.conn.execute(
+            "SELECT reserved FROM ledger WHERE operation_id = ?", (op_id,)
+        )
+        row = cur.fetchone()
+        return 1 if row and row[0] else 0
+
     def net_settlement_count(self, op_id: str) -> int:
         cur = self.conn.execute(
             "SELECT settled FROM ledger WHERE operation_id = ?", (op_id,)

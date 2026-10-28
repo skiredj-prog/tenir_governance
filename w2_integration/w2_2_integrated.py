@@ -57,11 +57,8 @@ def run_integrated_candidate(db_dir: str, op_id: str = "op-w22-integrated"):
 
     # 1. Issue grant via native gate
     grant = auth.issue(op_id, evaluation_id, request_hash)
-    traces.append(rc01.transition(op_id, "RESERVED", "lab_grant_issued"))
-    i8.reserve(op_id, 100)
-    events.append({"stream": "i8", "event": "reserve", "op": op_id, "amount": 100})
 
-    # 2. Mandatory authorization check before any provider call
+    # 2. Mandatory authorization check BEFORE any reservation or provider call
     ok, reason = auth.authorize_dispatch(op_id, request_hash)
     if not ok:
         traces.append(rc01.transition(op_id, "HOLD", f"dispatch_refused:{reason}"))
@@ -72,6 +69,7 @@ def run_integrated_candidate(db_dir: str, op_id: str = "op-w22-integrated"):
             "execute_count": 0,
             "provider_called": False,
             "settlement_count": 0,
+            "reservation_count": 0,
             "grant": {"grant_id": grant.grant_id, "execution_authorized": grant.execution_authorized},
             "receipt": None,
             "traces": traces,
@@ -80,6 +78,12 @@ def run_integrated_candidate(db_dir: str, op_id: str = "op-w22-integrated"):
             "dispatch_refused": True,
             "refuse_reason": reason,
         }
+
+    # Only reached if authorized (currently never under historical G4-A)
+    # Reservation happens only after positive authorization
+    i8.reserve(op_id, 100)
+    traces.append(rc01.transition(op_id, "RESERVED", "grant_authorized"))
+    events.append({"stream": "i8", "event": "reserve", "op": op_id, "amount": 100})
 
     # Only reached if authorized (currently never, under historical G4-A)
     traces.append(rc01.transition(op_id, "DISPATCHING", "dispatch_intent"))
