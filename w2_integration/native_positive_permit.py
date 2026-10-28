@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
+from w2_2b_canonical import request_hash as canon_request_hash
 
 PERMIT_SCHEMA = "w2-positive-permit/v1"
 TOPOLOGY_ID = "lab-s1-native-sqlite-single-host-2026-10-28"
@@ -110,7 +111,7 @@ class NativePositivePermitAuthority:
         }
 
     def admit_reserve_issue(self, operation_key: str, evaluation_id: str, payload: dict, amount: int = 100) -> dict:
-        request_hash = hashlib.sha256(_canonical(payload)).hexdigest()
+        request_hash = canon_request_hash(payload)
         issued_at = datetime.now(timezone.utc).isoformat()
         expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
         permit_id = f"permit-{operation_key}"
@@ -145,7 +146,7 @@ class NativePositivePermitAuthority:
                 "reservation_id": reservation_id, "schema": PERMIT_SCHEMA, "execution_authorized_historical": False}
 
     def consume_and_claim(self, operation_key: str, payload: dict, idempotency_key: str) -> dict:
-        request_hash = hashlib.sha256(_canonical(payload)).hexdigest()
+        request_hash = canon_request_hash(payload)
         now = datetime.now(timezone.utc).isoformat()
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         with self._tx() as db:
