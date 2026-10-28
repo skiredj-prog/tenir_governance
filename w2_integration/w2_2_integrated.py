@@ -9,6 +9,7 @@ It uses a single I8 ledger instance for the scenario.
 import os, json, hashlib
 from datetime import datetime, timezone
 from w2_2a_authority import NativeAuthorityGate
+from w2_2b_canonical import request_hash as canon_request_hash
 from proof_provider import ProofProvider, AckLost
 from i8_ledger import I8Ledger
 from lab_s1_bridge import RC01Lab
@@ -48,7 +49,7 @@ def run_integrated_candidate(db_dir: str, op_id: str = "op-w22-integrated"):
     rc01 = RC01Lab(db_path=rc01_db)
 
     payload = {"scope": {"account": "lab", "amount_minor": 100, "currency": "EUR"}, "action_type": "transfer"}
-    request_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    request_hash = canon_request_hash(payload)
     evaluation_id = "eval-w22-001"
 
     traces = []
