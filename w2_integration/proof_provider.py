@@ -42,11 +42,16 @@ class ProofProvider:
                 receipt_json TEXT NOT NULL
             );
         """)
-        # Migration: ensure UNIQUE constraint on idempotency_key for existing DBs
+        # Migration: enforce UNIQUE. Fail closed if duplicates exist.
         try:
             self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_effects_idempotency ON effects(idempotency_key)")
-        except sqlite3.IntegrityError:
-            pass  # existing duplicates would surface on next write
+        except sqlite3.IntegrityError as e:
+            raise RuntimeError("invalid migration: duplicate idempotency_key present, refusing to open") from e
+        # Verify index is actually unique
+        cur = self.conn.execute("PRAGMA index_list(effects)")
+        indexes = [row[1] for row in cur.fetchall()]
+        if "idx_effects_idempotency" not in indexes:
+            raise RuntimeError("migration failed: unique index not created")
         self.conn.commit()
 
     def _canonical(self, obj: dict) -> bytes:

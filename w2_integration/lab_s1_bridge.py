@@ -31,16 +31,21 @@ class RC01Lab:
         self.conn.commit()
 
     def transition(self, op_id: str, to: str, reason: str):
-        prev = self.get_state(op_id) or "INIT"
         terminal = {"RECONCILED_CONFIRMED", "RECONCILED_NOT_EXECUTED", "CONFIRMED", "FAILED"}
-        if prev in terminal and to not in terminal:
-            raise RuntimeError(f"refusing to leave terminal state {prev} -> {to}")
-        ts = datetime.now(timezone.utc).isoformat()
-        self.conn.execute(
-            "INSERT OR REPLACE INTO rc01_states (operation_id, state, updated_at) VALUES (?, ?, ?)",
-            (op_id, to, ts)
-        )
-        self.conn.commit()
+        with self.conn:  # atomic transaction
+            cur = self.conn.execute("SELECT state FROM rc01_states WHERE operation_id = ?", (op_id,))
+            row = cur.fetchone()
+            prev = row[0] if row else "INIT"
+            if prev in terminal:
+                if to not in terminal:
+                    raise RuntimeError(f"refusing to leave terminal state {prev} -> {to}")
+                if to != prev:
+                    raise RuntimeError(f"refusing terminal-to-terminal replacement {prev} -> {to}")
+            ts = datetime.now(timezone.utc).isoformat()
+            self.conn.execute(
+                "INSERT OR REPLACE INTO rc01_states (operation_id, state, updated_at) VALUES (?, ?, ?)",
+                (op_id, to, ts)
+            )
         return {"ts": ts, "op": op_id, "from": prev, "to": to, "reason": reason}
 
     def get_state(self, op_id: str):
