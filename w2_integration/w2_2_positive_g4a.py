@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 import hashlib
 import json
 import sqlite3
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
     Encoding, NoEncryption, PrivateFormat, PublicFormat,
@@ -155,9 +156,12 @@ class PositiveG4A:
             self.rc01.transition(op_id, "DISPATCHING", "dispatch_claim_projected")
 
     def _repair_dispatch_claim(self, row):
+        """Replay only an authenticated claim. Expiry after consumption does not block it."""
         op_id = row["operation_id"]
-        self._project_dispatching(op_id)
+        if not self._claim_authenticated(row):
+            return
         if self.provider.execute_count(op_id) > 0:
+            self._project_dispatching(op_id)
             return
         if not row["payload_json"] or not row["idempotency_key"]:
             self._hold(op_id, "dispatch_claim_without_replay_material")
@@ -166,7 +170,27 @@ class PositiveG4A:
         if canon_request_hash(payload) != row["request_hash"]:
             self._hold(op_id, "dispatch_claim_payload_hash_mismatch")
             return
+        self._project_dispatching(op_id)
         self.provider.execute(op_id, row["idempotency_key"], payload)
+
+    def _claim_authenticated(self, row) -> bool:
+        op_id = row["operation_id"]
+        if row["status"] != "issued" or not row["signature"] or row["key_id"] != self.key_id:
+            self._hold(op_id, "dispatch_claim_unauthenticated")
+            return False
+        body = self._body(
+            row["permit_id"], row["operation_id"], row["evaluation_id"],
+            row["request_hash"], row["reservation_id"], row["issued_at"], row["expires_at"],
+        )
+        try:
+            self._verify(body, row["signature"])
+        except (InvalidSignature, ValueError):
+            self._hold(op_id, "dispatch_claim_signature_invalid")
+            return False
+        if self.i8.reservation_count(op_id) == 0:
+            self._hold(op_id, "dispatch_claim_without_reservation")
+            return False
+        return True
 
     def _sign(self, body: dict) -> bytes:
         return self.private_key.sign(_canonical(body))

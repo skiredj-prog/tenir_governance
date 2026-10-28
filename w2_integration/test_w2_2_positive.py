@@ -149,6 +149,73 @@ def test_crash_after_claim_repairs_once():
         print("crash after claim repaired once: PASS")
 
 
+def _claim(g4a, op_id, idem, payload_json):
+    g4a.conn.execute(
+        """UPDATE permits
+           SET consumed = 1, dispatch_claim = 1, idempotency_key = ?, payload_json = ?
+           WHERE operation_id = ?""",
+        (idem, payload_json, op_id),
+    )
+    g4a.conn.commit()
+
+
+def test_altered_claim_does_not_dispatch():
+    with tempfile.TemporaryDirectory() as d:
+        i8, rc01, provider, g4a = _stack(d)
+        g4a.admit_and_reserve("op-bad", "eval", {"amount": 40})
+        _claim(g4a, "op-bad", "idem-bad", '{"amount":40}')
+        g4a.conn.execute("UPDATE permits SET signature = ? WHERE operation_id = 'op-bad'", (b"altered",))
+        g4a.conn.commit()
+        g4a2 = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
+        assert provider.execute_count("op-bad") == 0
+        assert rc01.get_state("op-bad") == "RESERVED"
+        reason = g4a2.conn.execute(
+            "SELECT reason FROM recovery_holds WHERE operation_id = 'op-bad'"
+        ).fetchone()["reason"]
+        assert reason == "dispatch_claim_signature_invalid"
+        print("altered claim refused: PASS")
+
+
+def test_claim_without_reservation_does_not_dispatch():
+    with tempfile.TemporaryDirectory() as d:
+        i8, rc01, provider, g4a = _stack(d)
+        g4a.admit_and_reserve("op-nr", "eval", {"amount": 40})
+        _claim(g4a, "op-nr", "idem-nr", '{"amount":40}')
+        i8.abandon_pre_dispatch("op-nr")
+        g4a2 = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
+        assert provider.execute_count("op-nr") == 0
+        reason = g4a2.conn.execute(
+            "SELECT reason FROM recovery_holds WHERE operation_id = 'op-nr'"
+        ).fetchone()["reason"]
+        assert reason == "dispatch_claim_without_reservation"
+        print("claim without reservation refused: PASS")
+
+
+def test_expired_consumed_claim_still_replays():
+    with tempfile.TemporaryDirectory() as d:
+        i8, rc01, provider, g4a = _stack(d)
+        payload = {"amount": 40}
+        permit = g4a.admit_and_reserve("op-ex", "eval", payload)
+        past = "2020-01-01T00:00:00+00:00"
+        body = g4a._body(
+            permit.permit_id, "op-ex", "eval", permit.request_hash,
+            permit.reservation_id, permit.issued_at, past,
+        )
+        signature = g4a._sign(body)
+        g4a.conn.execute(
+            """UPDATE permits
+               SET expires_at = ?, signature = ?, consumed = 1, dispatch_claim = 1,
+                   idempotency_key = ?, payload_json = ?
+               WHERE operation_id = 'op-ex'""",
+            (past, signature, "idem-ex", '{"amount":40}'),
+        )
+        g4a.conn.commit()
+        PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
+        assert provider.execute_count("op-ex") == 1
+        assert rc01.get_state("op-ex") == "DISPATCHING"
+        print("expired consumed claim replays: PASS")
+
+
 def test_intent_completed_after_restart():
     with tempfile.TemporaryDirectory() as d:
         i8, rc01, provider, g4a = _stack(d)
@@ -184,4 +251,7 @@ if __name__ == "__main__":
     test_orphan_reservation_held_not_abandoned()
     test_intent_completed_after_restart()
     test_crash_after_claim_repairs_once()
+    test_altered_claim_does_not_dispatch()
+    test_claim_without_reservation_does_not_dispatch()
+    test_expired_consumed_claim_still_replays()
     print("Positive contract tests: PASS")
