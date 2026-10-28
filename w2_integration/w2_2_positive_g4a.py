@@ -10,6 +10,8 @@ Experimental only. Not a wiring of historical ExperimentalG4AAuthority.
 from datetime import datetime, timezone, timedelta
 import hashlib
 import json
+import os
+import signal
 import sqlite3
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -297,4 +299,7 @@ class PositiveG4A:
             if updated.rowcount != 1:
                 raise RuntimeError("durable permit consumption failed")
         self._project_dispatching(op_id)
+        # Test seam only: kill this process after the durable claim, before B3.
+        if os.environ.get("W2_CRASH_AFTER_CLAIM") == "1":
+            os.kill(os.getpid(), signal.SIGKILL)
         return self.provider.execute(op_id, idempotency_key, payload)

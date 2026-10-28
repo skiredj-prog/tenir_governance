@@ -241,6 +241,92 @@ def test_intent_completed_after_restart():
         print("intent completed after restart: PASS")
 
 
+
+def test_key_id_mismatch_refused():
+    with tempfile.TemporaryDirectory() as d:
+        i8, rc01, provider, g4a = _stack(d)
+        g4a.admit_and_reserve("op-kid", "eval", {"amount": 40})
+        _claim(g4a, "op-kid", "idem-kid", '{"amount":40}')
+        g4a.conn.execute("UPDATE permits SET key_id = ? WHERE operation_id = 'op-kid'", ("0" * 64,))
+        g4a.conn.commit()
+        g4a2 = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
+        assert provider.execute_count("op-kid") == 0
+        assert rc01.get_state("op-kid") == "RESERVED"
+        reason = g4a2.conn.execute(
+            "SELECT reason FROM recovery_holds WHERE operation_id = 'op-kid'"
+        ).fetchone()["reason"]
+        assert reason == "dispatch_claim_unauthenticated"
+        print("key_id mismatch refused: PASS")
+
+
+def test_sigkill_after_claim_recovers_once():
+    import multiprocessing
+    with tempfile.TemporaryDirectory() as d:
+        i8, rc01, provider, g4a = _stack(d)
+        payload = {"amount": 40}
+        g4a.admit_and_reserve("op-kill", "eval", payload)
+        i8.conn.close()
+        rc01.conn.close()
+        provider.conn.close()
+        g4a.conn.close()
+
+        def child(path):
+            os.environ["W2_CRASH_AFTER_CLAIM"] = "1"
+            ci8 = I8Ledger(db_path=os.path.join(path, "i8.db"))
+            crc = RC01Lab(db_path=os.path.join(path, "rc01.db"))
+            cp = ProofProvider(db_path=os.path.join(path, "p.db"))
+            cg = PositiveG4A(ci8, crc, cp, permit_db=os.path.join(path, "permits.db"))
+            cg.consume_and_dispatch("op-kill", {"amount": 40}, "idem-kill")
+
+        proc = multiprocessing.Process(target=child, args=(d,))
+        proc.start()
+        proc.join(10)
+        assert not proc.is_alive()
+        assert proc.exitcode != 0
+        i8b = I8Ledger(db_path=os.path.join(d, "i8.db"))
+        rc01b = RC01Lab(db_path=os.path.join(d, "rc01.db"))
+        providerb = ProofProvider(db_path=os.path.join(d, "p.db"))
+        assert providerb.execute_count("op-kill") == 0
+        PositiveG4A(i8b, rc01b, providerb, permit_db=os.path.join(d, "permits.db"))
+        assert providerb.execute_count("op-kill") == 1
+        assert rc01b.get_state("op-kill") == "DISPATCHING"
+        PositiveG4A(i8b, rc01b, providerb, permit_db=os.path.join(d, "permits.db"))
+        assert providerb.execute_count("op-kill") == 1
+        print("SIGKILL after claim recovers once: PASS")
+
+
+def test_concurrent_consume_one_effect():
+    import multiprocessing
+    with tempfile.TemporaryDirectory() as d:
+        i8, rc01, provider, g4a = _stack(d)
+        g4a.admit_and_reserve("op-race", "eval", {"amount": 40})
+        i8.conn.close()
+        rc01.conn.close()
+        provider.conn.close()
+        g4a.conn.close()
+        q = multiprocessing.Queue()
+
+        def worker(path, idem, queue):
+            try:
+                wi8 = I8Ledger(db_path=os.path.join(path, "i8.db"))
+                wrc = RC01Lab(db_path=os.path.join(path, "rc01.db"))
+                wp = ProofProvider(db_path=os.path.join(path, "p.db"))
+                wg = PositiveG4A(wi8, wrc, wp, permit_db=os.path.join(path, "permits.db"))
+                wg.consume_and_dispatch("op-race", {"amount": 40}, idem)
+                queue.put("ok")
+            except Exception as exc:
+                queue.put(type(exc).__name__)
+
+        p1 = multiprocessing.Process(target=worker, args=(d, "idem-a", q))
+        p2 = multiprocessing.Process(target=worker, args=(d, "idem-b", q))
+        p1.start(); p2.start()
+        p1.join(10); p2.join(10)
+        results = [q.get(timeout=5), q.get(timeout=5)]
+        providerb = ProofProvider(db_path=os.path.join(d, "p.db"))
+        assert providerb.execute_count("op-race") == 1
+        assert results.count("ok") == 1
+        print(f"concurrent consume one effect: PASS {results}")
+
 if __name__ == "__main__":
     test_positive_sequence()
     test_historical_still_refused()
@@ -254,4 +340,7 @@ if __name__ == "__main__":
     test_altered_claim_does_not_dispatch()
     test_claim_without_reservation_does_not_dispatch()
     test_expired_consumed_claim_still_replays()
+    test_key_id_mismatch_refused()
+    test_sigkill_after_claim_recovers_once()
+    test_concurrent_consume_one_effect()
     print("Positive contract tests: PASS")
