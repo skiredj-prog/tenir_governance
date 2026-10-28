@@ -1,5 +1,6 @@
 """AC-04: positive permit lives in native consensus.sqlite3."""
 import hashlib
+import inspect
 import os
 import sqlite3
 import tempfile
@@ -140,6 +141,11 @@ def test_private_key_not_stored_and_old_store_refused():
         print("private key not stored: PASS")
 
 
+def test_private_key_constructor_injection_is_not_supported():
+    assert "private_key_hex" not in inspect.signature(NativePositivePermitAuthority).parameters
+    print("constructor key injection refused: PASS")
+
+
 def test_external_key_hex_not_written():
     key = Ed25519PrivateKey.generate()
     raw = key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
@@ -224,6 +230,7 @@ if __name__ == "__main__":
     test_rollback_capacity_without_permit()
     test_historical_reserve_blocked_after_positive()
     test_private_key_not_stored_and_old_store_refused()
+    test_private_key_constructor_injection_is_not_supported()
     test_external_key_hex_not_written()
     test_kernel_claim_required()
     test_exact_replay_same_execution()

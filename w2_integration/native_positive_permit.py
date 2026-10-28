@@ -30,14 +30,13 @@ def _canonical(obj: dict) -> bytes:
 
 
 class NativePositivePermitAuthority:
-    def __init__(self, backend: SQLiteConsensusBackend, *, private_key_hex: str | None = None):
+    def __init__(self, backend: SQLiteConsensusBackend):
         if not isinstance(backend, SQLiteConsensusBackend):
             raise TypeError("SQLiteConsensusBackend required")
         self.backend = backend
         self.db_path = backend._database_path
         self.topology_id = TOPOLOGY_ID
         self.productive = False
-        self._private_key_hex = private_key_hex
         with self._tx() as db:
             if db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='w2_positive_v1_keys'"
@@ -127,7 +126,7 @@ class NativePositivePermitAuthority:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def _load_key(self):
-        secret = os.environ.get("TENIR_W2_PRIVATE_KEY_HEX") or self._private_key_hex
+        secret = os.environ.get("TENIR_W2_PRIVATE_KEY_HEX")
         if secret:
             try:
                 raw = bytes.fromhex(secret.strip())
