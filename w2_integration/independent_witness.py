@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 
@@ -91,7 +92,7 @@ class IndependentWitness:
         try:
             signature = bytes.fromhex(evidence["signature"])
             self.private_key.public_key().verify(signature, _canonical(record))
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, InvalidSignature):
             return False
         db = sqlite3.connect(self.db_path)
         try:
