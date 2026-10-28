@@ -30,7 +30,7 @@ class ProofProvider:
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS effects (
                 operation_id TEXT PRIMARY KEY,
-                idempotency_key TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
                 request_hash TEXT NOT NULL,
                 effect_status TEXT NOT NULL,
                 receipt_json TEXT NOT NULL,

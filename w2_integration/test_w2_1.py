@@ -1,6 +1,6 @@
 """W2.1 tests: persistence, restart, idempotence conflict"""
 import os, tempfile, json
-from lab_s1_bridge import run_lab_s1_scenario
+from lab_s1_bridge import run_lab_s1_scenario, RC01Lab
 from proof_provider import ProofProvider
 
 def test_restart_persistence():
@@ -8,10 +8,13 @@ def test_restart_persistence():
         r1 = run_lab_s1_scenario(op_id="op-restart", db_dir=d)
         assert r1["execute_count"] == 1
         assert r1["settlement_count"] == 1
+        assert r1["final_state"] == "RECONCILED_CONFIRMED"
         # Re-open stores
         provider = ProofProvider(db_path=os.path.join(d, "provider.db"))
         assert provider.execute_count("op-restart") == 1
-        print("restart persistence: PASS")
+        rc01 = RC01Lab(db_path=os.path.join(d, "rc01.db"))
+        assert rc01.get_state("op-restart") == "RECONCILED_CONFIRMED"
+        print("restart persistence (B3 + RC-01): PASS")
 
 def test_idempotence_conflict():
     with tempfile.TemporaryDirectory() as d:

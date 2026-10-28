@@ -15,16 +15,35 @@ Responsibilities preserved:
 from proof_provider import ProofProvider, AckLost
 from i8_ledger import I8Ledger
 import json
+import sqlite3
 from datetime import datetime, timezone
 
 class RC01Lab:
-    def __init__(self):
-        self.states = {}
+    def __init__(self, db_path: str = ":memory:"):
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS rc01_states (
+                operation_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        self.conn.commit()
 
     def transition(self, op_id: str, to: str, reason: str):
-        prev = self.states.get(op_id, "INIT")
-        self.states[op_id] = to
-        return {"ts": datetime.now(timezone.utc).isoformat(), "op": op_id, "from": prev, "to": to, "reason": reason}
+        prev = self.get_state(op_id) or "INIT"
+        ts = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO rc01_states (operation_id, state, updated_at) VALUES (?, ?, ?)",
+            (op_id, to, ts)
+        )
+        self.conn.commit()
+        return {"ts": ts, "op": op_id, "from": prev, "to": to, "reason": reason}
+
+    def get_state(self, op_id: str):
+        cur = self.conn.execute("SELECT state FROM rc01_states WHERE operation_id = ?", (op_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
 
 def run_lab_s1_scenario(op_id: str = "op-w2-lab-001", db_dir: str = None):
     """Minimal LAB-S1 scenario with optional persistent stores"""
@@ -34,9 +53,10 @@ def run_lab_s1_scenario(op_id: str = "op-w2-lab-001", db_dir: str = None):
     provider_db = os.path.join(db_dir, "provider.db")
     i8_db = os.path.join(db_dir, "i8.db")
 
+    rc01_db = os.path.join(db_dir, "rc01.db")
     provider = ProofProvider(db_path=provider_db)
     i8 = I8Ledger(db_path=i8_db)
-    rc01 = RC01Lab()
+    rc01 = RC01Lab(db_path=rc01_db)
     traces = []
 
     # 1. Authorization boundary (LAB-S1 explicit, not historical G4-A wiring)
@@ -72,7 +92,7 @@ def run_lab_s1_scenario(op_id: str = "op-w2-lab-001", db_dir: str = None):
 
     return {
         "op_id": op_id,
-        "final_state": rc01.states[op_id],
+        "final_state": rc01.get_state(op_id),
         "execute_count": provider.execute_count(op_id),
         "settlement_count": i8.net_settlement_count(op_id),
         "receipt_status": receipt["effect_status"],
