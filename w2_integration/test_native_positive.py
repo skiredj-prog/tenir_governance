@@ -147,8 +147,9 @@ def test_external_key_hex_not_written():
     try:
         with tempfile.TemporaryDirectory() as d:
             auth = NativePositivePermitAuthority(SQLiteConsensusBackend(d))
-            assert auth.key_custody == "EXTERNAL_HEX"
+            assert auth.key_custody == "ENV_INJECTED"
             assert auth.productive is False
+            assert auth.writers()[0]["production_allowed"] is False
             pub = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
             assert auth.key_id == hashlib.sha256(pub).hexdigest()
             with auth.backend._connection() as db:
@@ -162,37 +163,52 @@ def test_external_key_hex_not_written():
 def test_kernel_claim_required():
     from w2_integration.kernel_claim_provider import KernelClaimProofProvider
     with tempfile.TemporaryDirectory() as d:
-        provider = KernelClaimProofProvider(db_path=d + "/p.db", audience="kernel-dispatch")
+        backend = SQLiteConsensusBackend(d)
+        auth = NativePositivePermitAuthority(backend)
         payload = {"amount": 1}
+        auth.admit_reserve_issue("op", "eval", payload)
+        issued = auth.consume_and_claim("op", payload, "idem")
+        provider = KernelClaimProofProvider(d + "/p.db", auth)
         try:
-            provider.execute("op", "idem", payload)
-            raise AssertionError("missing claim should refuse")
-        except RuntimeError as exc:
-            assert "claim required" in str(exc)
+            provider.execute("op", "idem", payload, claim={"operation_key": "op", "idempotency_key": "idem",
+                                                           "audience": "proof-provider", "claim_token": "forged",
+                                                           "execution_id": issued["execution_id"]})
+            raise AssertionError("forged claim should refuse")
+        except PermissionError as exc:
+            assert "authority" in str(exc)
         assert provider.execute_count("op") == 0
-        claim = {
-            "operation": "op",
-            "idempotency_key": "idem",
-            "audience": "kernel-dispatch",
-            "token": "tok-1",
-            "nonce": "n-1",
-        }
-        body = provider.execute("op", "idem", payload, claim=claim)
+        body = provider.execute("op", "idem", payload, claim=issued)
         assert body["effect_status"] == "EXECUTED"
-        for operation_id, idem, bad, reason in (
-            ("op", "idem", {**claim, "operation": "other", "nonce": "n-2"}, "operation"),
-            ("op", "idem", {**claim, "idempotency_key": "other", "nonce": "n-3"}, "idempotency"),
-            ("op", "idem", {**claim, "audience": "other", "nonce": "n-4"}, "audience"),
-            ("op", "idem", {**claim, "token": "", "nonce": "n-5"}, "token"),
-            ("op", "idem", claim, "replay"),
-        ):
-            try:
-                provider.execute(operation_id, idem, payload, claim=bad)
-                raise AssertionError(reason)
-            except RuntimeError as exc:
-                assert reason in str(exc)
+        again = provider.execute("op", "idem", payload, claim=issued)
+        assert again["effect_status"] == "EXECUTED"
         assert provider.execute_count("op") == 1
-        print("kernel claim required: PASS")
+        print("authority claim required: PASS")
+
+
+def test_exact_replay_same_execution():
+    with tempfile.TemporaryDirectory() as d:
+        auth = NativePositivePermitAuthority(SQLiteConsensusBackend(d))
+        payload = {"amount": 3, "currency": "EUR"}
+        auth.admit_reserve_issue("op-replay", "approval-1", payload)
+        first = auth.consume_and_claim("op-replay", payload, "idem-replay")
+        second = auth.consume_and_claim("op-replay", payload, "idem-replay")
+        assert second["replayed"] is True
+        assert second["execution_id"] == first["execution_id"]
+        assert second["claim_token"] == first["claim_token"]
+        print("exact replay: PASS")
+
+
+def test_replay_mismatch_rejected():
+    with tempfile.TemporaryDirectory() as d:
+        auth = NativePositivePermitAuthority(SQLiteConsensusBackend(d))
+        auth.admit_reserve_issue("op-conflict", "approval-1", {"amount": 3})
+        auth.consume_and_claim("op-conflict", {"amount": 3}, "idem-conflict")
+        try:
+            auth.consume_and_claim("op-conflict", {"amount": 4}, "idem-conflict")
+            raise AssertionError("conflicting replay must be refused")
+        except RuntimeError as exc:
+            assert "conflict" in str(exc)
+        print("replay mismatch rejected: PASS")
 
 
 if __name__ == "__main__":
@@ -205,4 +221,6 @@ if __name__ == "__main__":
     test_private_key_not_stored_and_old_store_refused()
     test_external_key_hex_not_written()
     test_kernel_claim_required()
+    test_exact_replay_same_execution()
+    test_replay_mismatch_rejected()
     print("native positive tests: PASS")
