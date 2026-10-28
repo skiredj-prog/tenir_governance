@@ -10,6 +10,8 @@ import hashlib
 import json
 import os
 import sqlite3
+import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from cryptography.exceptions import InvalidSignature
@@ -88,12 +90,32 @@ class NativePositivePermitAuthority:
                 BEGIN
                   SELECT RAISE(ABORT, 'historical reservation owns this key');
                 END;
+                CREATE TABLE IF NOT EXISTS w2_positive_v1_outbox (
+                  execution_id TEXT PRIMARY KEY,
+                  operation_key TEXT NOT NULL UNIQUE,
+                  idempotency_key TEXT NOT NULL UNIQUE,
+                  request_hash TEXT NOT NULL,
+                  payload_json TEXT NOT NULL,
+                  claim_token TEXT NOT NULL UNIQUE,
+                  status TEXT NOT NULL CHECK(status IN ('PENDING','UNKNOWN','CONFIRMED','FAILED')),
+                  created_at TEXT NOT NULL
+                );
             """)
+            self._add_column(db, "w2_positive_v1_permits", "nonce_hash", "TEXT")
+            self._add_column(db, "w2_positive_v1_permits", "nonce_status", "TEXT NOT NULL DEFAULT 'ISSUED'")
+            self._add_column(db, "w2_positive_v1_permits", "execution_id", "TEXT")
+            self._add_column(db, "w2_positive_v1_permits", "audience", "TEXT NOT NULL DEFAULT 'kernel-dispatch'")
         self._load_key()
 
     def _tx(self):
         """Autocommit connection for schema and reads. Not a write transaction."""
         return self.backend._connection()
+
+    @staticmethod
+    def _add_column(db, table, column, definition):
+        cols = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def _write(self, operation: str):
         """BEGIN IMMEDIATE … COMMIT, or ROLLBACK if the body raises."""
@@ -117,7 +139,8 @@ class NativePositivePermitAuthority:
         pub = self.private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
         self.key_id = hashlib.sha256(pub).hexdigest()
 
-    def _body(self, permit_id, op, evaluation_id, request_hash, reservation_id, issued_at, expires_at) -> dict:
+    def _body(self, permit_id, op, evaluation_id, request_hash, reservation_id, issued_at, expires_at,
+              nonce_hash=None, audience="kernel-dispatch") -> dict:
         return {
             "schema": PERMIT_SCHEMA,
             "permit_id": permit_id,
@@ -127,6 +150,8 @@ class NativePositivePermitAuthority:
             "reservation_id": reservation_id,
             "issued_at": issued_at,
             "expires_at": expires_at,
+            "nonce_hash": nonce_hash,
+            "audience": audience,
             "key_id": self.key_id,
             "decision": "ALLOW",
             "scope": "experimental-positive-v1",
@@ -136,9 +161,11 @@ class NativePositivePermitAuthority:
         request_hash = canon_request_hash(payload)
         issued_at = datetime.now(timezone.utc).isoformat()
         expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        nonce_hash = hashlib.sha256(secrets.token_bytes(32)).hexdigest()
         permit_id = f"permit-{operation_key}"
         reservation_id = f"res-{operation_key}"
-        body = self._body(permit_id, operation_key, evaluation_id, request_hash, reservation_id, issued_at, expires_at)
+        body = self._body(permit_id, operation_key, evaluation_id, request_hash, reservation_id, issued_at,
+                          expires_at, nonce_hash)
         signature = self.private_key.sign(_canonical(body))
         try:
             with self._write("positive_admit") as db:
@@ -164,7 +191,7 @@ class NativePositivePermitAuthority:
                     "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,)
                 ).fetchone()
                 if existing:
-                    if existing["request_hash"] != request_hash or existing["consumed"]:
+                    if existing["request_hash"] != request_hash or existing["evaluation_id"] != evaluation_id:
                         raise RuntimeError("contradictory permit")
                     return dict(existing)
                 db.execute(
@@ -176,10 +203,11 @@ class NativePositivePermitAuthority:
                 db.execute(
                     """INSERT INTO w2_positive_v1_permits
                        (permit_id, operation_key, evaluation_id, request_hash, reservation_id,
-                        issued_at, expires_at, signature, key_id, schema_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       issued_at, expires_at, nonce_hash, execution_id, audience, signature, key_id, schema_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (permit_id, operation_key, evaluation_id, request_hash, reservation_id,
-                     issued_at, expires_at, signature, self.key_id, PERMIT_SCHEMA),
+                     issued_at, expires_at, nonce_hash, permit_id, "kernel-dispatch",
+                     signature, self.key_id, PERMIT_SCHEMA),
                 )
                 db.execute(
                     "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) VALUES (?, ?, ?, ?)",
@@ -196,17 +224,34 @@ class NativePositivePermitAuthority:
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         try:
             with self._write("positive_claim") as db:
+                replay = db.execute(
+                    "SELECT execution_id, operation_key, idempotency_key, request_hash, claim_token, status "
+                    "FROM w2_positive_v1_outbox WHERE operation_key=? OR idempotency_key=?",
+                    (operation_key, idempotency_key),
+                ).fetchone()
+                if replay:
+                    if replay["operation_key"] != operation_key or replay["idempotency_key"] != idempotency_key or replay["request_hash"] != request_hash:
+                        raise RuntimeError("idempotency key conflict")
+                    return {"operation_key": operation_key, "idempotency_key": idempotency_key,
+                            "execution_id": replay["execution_id"], "claim_token": replay["claim_token"],
+                            "operation": operation_key, "audience": "kernel-dispatch",
+                            "status": replay["status"], "claimed": True, "replayed": True}
                 row = db.execute(
                     "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,)
                 ).fetchone()
-                if not row or row["consumed"] or row["request_hash"] != request_hash:
+                if not row or row["request_hash"] != request_hash:
                     raise RuntimeError("no valid unconsumed permit")
+                if row["consumed"] or row["nonce_status"] != "ISSUED":
+                    raise RuntimeError("nonce already consumed")
+                if row["audience"] != "kernel-dispatch":
+                    raise RuntimeError("claim audience mismatch")
                 if row["expires_at"] <= now:
                     raise RuntimeError("permit expired")
                 if row["key_id"] != self.key_id:
                     raise RuntimeError("key_id mismatch")
                 body = self._body(row["permit_id"], row["operation_key"], row["evaluation_id"],
-                                  row["request_hash"], row["reservation_id"], row["issued_at"], row["expires_at"])
+                                  row["request_hash"], row["reservation_id"], row["issued_at"], row["expires_at"],
+                                  row["nonce_hash"], row["audience"])
                 try:
                     self.private_key.public_key().verify(row["signature"], _canonical(body))
                 except (InvalidSignature, ValueError) as exc:
@@ -217,14 +262,23 @@ class NativePositivePermitAuthority:
                 ).fetchone()
                 if not cap or not cap["reserved"]:
                     raise RuntimeError("no native reservation")
+                execution_id = f"exec-{uuid.uuid4().hex}"
+                claim_token = secrets.token_urlsafe(32)
                 updated = db.execute(
                     """UPDATE w2_positive_v1_permits
-                       SET consumed=1, dispatch_claim=1, idempotency_key=?, payload_json=?
-                       WHERE operation_key=? AND consumed=0 AND request_hash=?""",
-                    (idempotency_key, payload_json, operation_key, request_hash),
+                       SET consumed=1, dispatch_claim=1, idempotency_key=?, payload_json=?,
+                           nonce_status='CONSUMED', execution_id=?
+                       WHERE operation_key=? AND consumed=0 AND nonce_status='ISSUED' AND request_hash=?""",
+                    (idempotency_key, payload_json, execution_id, operation_key, request_hash),
                 )
                 if updated.rowcount != 1:
                     raise RuntimeError("atomic claim failed")
+                db.execute(
+                    "INSERT INTO w2_positive_v1_outbox "
+                    "(execution_id, operation_key, idempotency_key, request_hash, payload_json, claim_token, status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?)",
+                    (execution_id, operation_key, idempotency_key, request_hash, payload_json, claim_token, now),
+                )
                 db.execute(
                     "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) VALUES (?, ?, ?, ?)",
                     (operation_key, "dispatch_claimed", now, idempotency_key),
@@ -233,7 +287,11 @@ class NativePositivePermitAuthority:
             raise RuntimeError("exclusive authority refused") from exc
         if os.environ.get("W2_CRASH_AFTER_NATIVE_CLAIM") == "1":
             os.kill(os.getpid(), __import__("signal").SIGKILL)
-        return {"operation_key": operation_key, "idempotency_key": idempotency_key, "claimed": True}
+        return {"operation_key": operation_key, "idempotency_key": idempotency_key,
+                "operation": operation_key, "audience": "kernel-dispatch",
+                "execution_id": execution_id, "claim_token": claim_token,
+                "token": claim_token, "nonce": claim_token,
+                "status": "PENDING", "claimed": True}
 
     def writers(self) -> list[dict]:
         return [{

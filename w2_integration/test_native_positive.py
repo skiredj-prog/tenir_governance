@@ -192,6 +192,7 @@ def test_kernel_claim_required():
             except RuntimeError as exc:
                 assert reason in str(exc)
         assert provider.execute_count("op") == 1
+        provider.conn.close()
         print("kernel claim required: PASS")
 
 
