@@ -45,8 +45,21 @@ def test_provider_requires_kernel_claim_when_enabled():
         provider.conn.close()
 
 
+def test_private_key_never_enters_authority_sqlite():
+    with tempfile.TemporaryDirectory() as d:
+        backend = SQLiteConsensusBackend(d)
+        auth = NativePositivePermitAuthority(backend, private_key_hex=("11" * 32))
+        with backend._connection() as db:
+            assert db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='w2_positive_v1_keys'"
+            ).fetchone() is None
+        assert auth.key_custody == "ENV_INJECTED"
+        assert auth.writers()[0]["production_allowed"] is True
+
+
 if __name__ == "__main__":
     test_exact_replay_returns_same_execution_without_reexecution()
     test_replay_mismatch_is_rejected()
     test_provider_requires_kernel_claim_when_enabled()
+    test_private_key_never_enters_authority_sqlite()
     print("nonce/claim contract: PASS")
