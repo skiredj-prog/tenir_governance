@@ -163,26 +163,31 @@ def test_external_key_hex_not_written():
 def test_kernel_claim_required():
     from w2_integration.kernel_claim_provider import KernelClaimProofProvider
     with tempfile.TemporaryDirectory() as d:
-        backend = SQLiteConsensusBackend(d)
-        auth = NativePositivePermitAuthority(backend)
-        payload = {"amount": 1}
-        auth.admit_reserve_issue("op", "eval", payload)
-        issued = auth.consume_and_claim("op", payload, "idem")
-        provider = KernelClaimProofProvider(d + "/p.db", auth)
+        provider = None
         try:
-            provider.execute("op", "idem", payload, claim={"operation_key": "op", "idempotency_key": "idem",
-                                                           "audience": "proof-provider", "claim_token": "forged",
-                                                           "execution_id": issued["execution_id"]})
-            raise AssertionError("forged claim should refuse")
-        except PermissionError as exc:
-            assert "authority" in str(exc)
-        assert provider.execute_count("op") == 0
-        body = provider.execute("op", "idem", payload, claim=issued)
-        assert body["effect_status"] == "EXECUTED"
-        again = provider.execute("op", "idem", payload, claim=issued)
-        assert again["effect_status"] == "EXECUTED"
-        assert provider.execute_count("op") == 1
-        print("authority claim required: PASS")
+            backend = SQLiteConsensusBackend(d)
+            auth = NativePositivePermitAuthority(backend)
+            payload = {"amount": 1}
+            auth.admit_reserve_issue("op", "eval", payload)
+            issued = auth.consume_and_claim("op", payload, "idem")
+            provider = KernelClaimProofProvider(d + "/p.db", auth)
+            try:
+                provider.execute("op", "idem", payload, claim={"operation_key": "op", "idempotency_key": "idem",
+                                                               "audience": "proof-provider", "claim_token": "forged",
+                                                               "execution_id": issued["execution_id"]})
+                raise AssertionError("forged claim should refuse")
+            except PermissionError as exc:
+                assert "authority" in str(exc)
+            assert provider.execute_count("op") == 0
+            body = provider.execute("op", "idem", payload, claim=issued)
+            assert body["effect_status"] == "EXECUTED"
+            again = provider.execute("op", "idem", payload, claim=issued)
+            assert again["effect_status"] == "EXECUTED"
+            assert provider.execute_count("op") == 1
+            print("authority claim required: PASS")
+        finally:
+            if provider is not None:
+                provider.conn.close()
 
 
 def test_exact_replay_same_execution():
