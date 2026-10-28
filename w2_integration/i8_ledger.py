@@ -61,6 +61,24 @@ class I8Ledger:
             )
             self.conn.commit()
 
+    def abandon_pre_dispatch(self, op_id: str) -> bool:
+        """Drop a reservation that never received a permit. Refuses settled rows."""
+        with self.lock:
+            cur = self.conn.execute(
+                "SELECT reserved, settled FROM ledger WHERE operation_id = ?", (op_id,)
+            )
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return False
+            if row[1]:
+                raise PermissionError("abandon refused after settlement")
+            self.conn.execute(
+                "DELETE FROM ledger WHERE operation_id = ? AND settled = 0",
+                (op_id,),
+            )
+            self.conn.commit()
+            return True
+
     def fail_next_settle(self):
         self._fail_next = True
 
