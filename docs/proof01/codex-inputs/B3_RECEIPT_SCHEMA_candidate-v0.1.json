@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tenir-lab:proof-provider-receipt:candidate-v0.1",
+  "title": "Laboratory Provider Receipt (candidate, non-normative)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "provider_id",
+    "key_id",
+    "sequence",
+    "operation_id",
+    "idempotency_key",
+    "request_hash",
+    "scope",
+    "action_type",
+    "effect_status",
+    "effect_digest",
+    "finality",
+    "issued_at",
+    "reason"
+  ],
+  "properties": {
+    "schema": {
+      "const": "proof-provider-receipt/candidate-v0.1"
+    },
+    "provider_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "key_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "operation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "request_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "amount_minor",
+        "currency"
+      ],
+      "properties": {
+        "account": {
+          "type": "string",
+          "minLength": 1
+        },
+        "amount_minor": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "currency": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+        }
+      }
+    },
+    "action_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "effect_status": {
+      "enum": [
+        "EXECUTED",
+        "NOT_EXECUTED_FINAL"
+      ]
+    },
+    "effect_digest": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "finality": {
+      "const": "PROVIDER_LEDGER_TERMINAL"
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

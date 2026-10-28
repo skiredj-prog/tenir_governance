@@ -1,0 +1,120 @@
+{
+  "schema": "reg-rc-01-adversarial-vectors/candidate-v0.1",
+  "status": "proposed-not-ratified",
+  "required_evidence": [
+    "exact-source-commit",
+    "fixture-provider-id",
+    "deployment-scope",
+    "pinned-verification-key",
+    "independently-pinned-checkpoint",
+    "input-payload-hash",
+    "durable-operation-record",
+    "signed-provider-receipt-or-epistemic-unknown",
+    "ledger-conservation",
+    "negative-control-exit"
+  ],
+  "vectors": [
+    {
+      "id": "RC-01",
+      "attack": "Lost ACK after durable provider effect",
+      "expected": "UNKNOWN locally; signed EXECUTED receipt on reconciliation; no second effect",
+      "coverage": "implemented fixture"
+    },
+    {
+      "id": "RC-02",
+      "attack": "Crash after dispatch intent before provider effect",
+      "expected": "UNKNOWN until verified; no assumption about send",
+      "coverage": "E2E pending"
+    },
+    {
+      "id": "RC-03",
+      "attack": "Crash after verified effect before local budget settlement",
+      "expected": "REPAIR and retained provider truth; budget held",
+      "coverage": "E2E pending"
+    },
+    {
+      "id": "RC-04",
+      "attack": "Forged receipt or wrong provider public key",
+      "expected": "Reject effect evidence",
+      "coverage": "implemented fixture"
+    },
+    {
+      "id": "RC-05",
+      "attack": "Stale receipt / wrong provider scope",
+      "expected": "Reject for configured freshness and scope",
+      "coverage": "implemented fixture"
+    },
+    {
+      "id": "RC-06",
+      "attack": "Contradictory final receipts for same operation",
+      "expected": "Reject equivocation and escalate; no auto release",
+      "coverage": "partial bundle verifier"
+    },
+    {
+      "id": "RC-07",
+      "attack": "Two workers reconcile same UNKNOWN concurrently",
+      "expected": "At most one atomic local settlement, replay same truth",
+      "coverage": "E2E pending (fixture has concurrent idempotent execute)"
+    },
+    {
+      "id": "RC-08",
+      "attack": "Lost ACK after successful local settlement",
+      "expected": "Idempotent observation of same terminal result",
+      "coverage": "E2E pending"
+    },
+    {
+      "id": "RC-09",
+      "attack": "Attempt to use consumed grant after reconciliation",
+      "expected": "Reject unless new Standing/Structure/Commit grant issued",
+      "coverage": "E2E pending"
+    },
+    {
+      "id": "RC-10",
+      "attack": "Q1 delete quarantine state while UNKNOWN",
+      "expected": "Reject new admission despite local marker absence",
+      "coverage": "W1 cooperative pass; direct G4-A SYSTEM FAIL"
+    },
+    {
+      "id": "RC-11",
+      "attack": "Q6 roll back to old valid released state",
+      "expected": "Reject new admission against independent current witness",
+      "coverage": "W1 cooperative pass; direct G4-A SYSTEM FAIL"
+    },
+    {
+      "id": "RC-12",
+      "attack": "W1-BYPASS-01 direct admission bypassing witness wrapper",
+      "expected": "All provider effects bound to mandatory G4-A authority; bypass denied",
+      "coverage": "OPEN security FAIL"
+    },
+    {
+      "id": "RC-13",
+      "attack": "W1-PRIV-01 same UID rewrites witness checkpoint",
+      "expected": "Privilege boundary refuses mutation and fail-closed detects drift",
+      "coverage": "OPEN security FAIL"
+    },
+    {
+      "id": "RC-14",
+      "attack": "No row returned by incomplete provider search",
+      "expected": "UNKNOWN, never NOT_EXECUTED_FINAL",
+      "coverage": "implemented fixture"
+    },
+    {
+      "id": "RC-15",
+      "attack": "Attempt execute after atomic non-effect tombstone",
+      "expected": "Reject the attempt and preserve negative proof",
+      "coverage": "implemented fixture"
+    },
+    {
+      "id": "RC-16",
+      "attack": "Append or remove Merkle entries after checkpoint pin",
+      "expected": "Independent verification rejects digest mismatch",
+      "coverage": "implemented fixture"
+    },
+    {
+      "id": "RC-17",
+      "attack": "Witness intent committed without matching local transaction",
+      "expected": "No ACK, no new dispatch, repair/hold until consistency verified",
+      "coverage": "protocol candidate; E2E pending"
+    }
+  ]
+}
