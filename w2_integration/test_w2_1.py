@@ -136,6 +136,36 @@ def test_migration_nonunique_index_fail():
             assert "not UNIQUE" in str(e)
         print("migration non-unique index collision: PASS")
 
+def test_migration_partial_unique_index_fail():
+    with tempfile.TemporaryDirectory() as d:
+        db = os.path.join(d, "legacy_partial.db")
+        conn = sqlite3.connect(db)
+        conn.execute("""
+            CREATE TABLE effects (
+                operation_id TEXT PRIMARY KEY,
+                idempotency_key TEXT NOT NULL,
+                request_hash TEXT,
+                effect_status TEXT,
+                receipt_json TEXT,
+                signature BLOB,
+                created_at TEXT
+            )
+        """)
+        # Pre-create a partial UNIQUE index with the expected name
+        conn.execute("""
+            CREATE UNIQUE INDEX idx_effects_idempotency
+            ON effects(idempotency_key)
+            WHERE effect_status = 'EXECUTED'
+        """)
+        conn.commit()
+        conn.close()
+        try:
+            ProofProvider(db_path=db)
+            raise AssertionError("should have refused partial UNIQUE index")
+        except RuntimeError as e:
+            assert "partial" in str(e)
+        print("migration partial UNIQUE index: PASS")
+
 if __name__ == "__main__":
     test_restart_persistence()
     test_idempotence_conflict()
@@ -143,5 +173,6 @@ if __name__ == "__main__":
     test_terminal_to_terminal_rejected()
     test_migration_duplicates_fail()
     test_migration_nonunique_index_fail()
+    test_migration_partial_unique_index_fail()
     test_concurrent_terminal()
     print("W2.1 tests: PASS")
