@@ -30,7 +30,7 @@ class ProofProvider:
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS effects (
                 operation_id TEXT PRIMARY KEY,
-                idempotency_key TEXT NOT NULL UNIQUE,
+                idempotency_key TEXT NOT NULL,
                 request_hash TEXT NOT NULL,
                 effect_status TEXT NOT NULL,
                 receipt_json TEXT NOT NULL,
@@ -42,6 +42,11 @@ class ProofProvider:
                 receipt_json TEXT NOT NULL
             );
         """)
+        # Migration: ensure UNIQUE constraint on idempotency_key for existing DBs
+        try:
+            self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_effects_idempotency ON effects(idempotency_key)")
+        except sqlite3.IntegrityError:
+            pass  # existing duplicates would surface on next write
         self.conn.commit()
 
     def _canonical(self, obj: dict) -> bytes:

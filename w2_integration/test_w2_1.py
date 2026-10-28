@@ -29,7 +29,21 @@ def test_idempotence_conflict():
             assert "idempotency key conflict" in str(e)
         print("idempotence conflict: PASS")
 
+def test_terminal_not_reverted():
+    with tempfile.TemporaryDirectory() as d:
+        r1 = run_lab_s1_scenario(op_id="op-terminal", db_dir=d)
+        assert r1["final_state"] == "RECONCILED_CONFIRMED"
+        rc01 = RC01Lab(db_path=os.path.join(d, "rc01.db"))
+        try:
+            rc01.transition("op-terminal", "RESERVED", "replay_attempt")
+            raise AssertionError("should have refused leaving terminal state")
+        except RuntimeError as e:
+            assert "refusing to leave terminal state" in str(e)
+        assert rc01.get_state("op-terminal") == "RECONCILED_CONFIRMED"
+        print("terminal state protected: PASS")
+
 if __name__ == "__main__":
     test_restart_persistence()
     test_idempotence_conflict()
+    test_terminal_not_reverted()
     print("W2.1 tests: PASS")

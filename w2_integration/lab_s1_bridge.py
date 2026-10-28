@@ -32,6 +32,9 @@ class RC01Lab:
 
     def transition(self, op_id: str, to: str, reason: str):
         prev = self.get_state(op_id) or "INIT"
+        terminal = {"RECONCILED_CONFIRMED", "RECONCILED_NOT_EXECUTED", "CONFIRMED", "FAILED"}
+        if prev in terminal and to not in terminal:
+            raise RuntimeError(f"refusing to leave terminal state {prev} -> {to}")
         ts = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             "INSERT OR REPLACE INTO rc01_states (operation_id, state, updated_at) VALUES (?, ?, ?)",
