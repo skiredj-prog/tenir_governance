@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from cryptography.exceptions import InvalidSignature
@@ -72,11 +73,34 @@ class NativePositivePermitAuthority:
                   private_key BLOB NOT NULL,
                   key_id TEXT NOT NULL
                 );
+                CREATE TRIGGER IF NOT EXISTS w2_block_historical_after_positive
+                BEFORE INSERT ON reservations
+                WHEN EXISTS (
+                  SELECT 1 FROM w2_positive_v1_capacity
+                  WHERE operation_key = NEW.idempotency_key
+                )
+                BEGIN
+                  SELECT RAISE(ABORT, 'positive capacity owns this key');
+                END;
+                CREATE TRIGGER IF NOT EXISTS w2_block_positive_after_historical
+                BEFORE INSERT ON w2_positive_v1_capacity
+                WHEN EXISTS (
+                  SELECT 1 FROM reservations
+                  WHERE idempotency_key = NEW.operation_key
+                )
+                BEGIN
+                  SELECT RAISE(ABORT, 'historical reservation owns this key');
+                END;
             """)
         self._load_or_create_key()
 
     def _tx(self):
+        """Autocommit connection for schema and reads. Not a write transaction."""
         return self.backend._connection()
+
+    def _write(self, operation: str):
+        """BEGIN IMMEDIATE … COMMIT, or ROLLBACK if the body raises."""
+        return self.backend._transaction(operation)
 
     def _load_or_create_key(self):
         with self._tx() as db:
@@ -118,48 +142,53 @@ class NativePositivePermitAuthority:
         reservation_id = f"res-{operation_key}"
         body = self._body(permit_id, operation_key, evaluation_id, request_hash, reservation_id, issued_at, expires_at)
         signature = self.private_key.sign(_canonical(body))
-        with self._tx() as db:
-            historical = db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('reservations','experimental_native_operations')"
-            ).fetchall()
-            names = {row["name"] for row in historical}
-            if "reservations" in names:
-                prior = db.execute(
-                    "SELECT reservation_id FROM reservations WHERE idempotency_key=?",
-                    (operation_key,),
+        try:
+            with self._write("positive_admit") as db:
+                historical = db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('reservations','experimental_native_operations')"
+                ).fetchall()
+                names = {row["name"] for row in historical}
+                if "reservations" in names:
+                    prior = db.execute(
+                        "SELECT reservation_id FROM reservations WHERE idempotency_key=?",
+                        (operation_key,),
+                    ).fetchone()
+                    if prior:
+                        raise RuntimeError("historical I8 reservation exists; positive authority refused")
+                if "experimental_native_operations" in names:
+                    prior = db.execute(
+                        "SELECT operation_key FROM experimental_native_operations WHERE operation_key=?",
+                        (operation_key,),
+                    ).fetchone()
+                    if prior:
+                        raise RuntimeError("historical native operation exists; positive authority refused")
+                existing = db.execute(
+                    "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,)
                 ).fetchone()
-                if prior:
-                    raise RuntimeError("historical I8 reservation exists; positive authority refused")
-            if "experimental_native_operations" in names:
-                prior = db.execute(
-                    "SELECT operation_key FROM experimental_native_operations WHERE operation_key=?",
-                    (operation_key,),
-                ).fetchone()
-                if prior:
-                    raise RuntimeError("historical native operation exists; positive authority refused")
-            existing = db.execute(
-                "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,)
-            ).fetchone()
-            if existing:
-                if existing["request_hash"] != request_hash or existing["consumed"]:
-                    raise RuntimeError("contradictory permit")
-                return dict(existing)
-            db.execute(
-                "INSERT INTO w2_positive_v1_capacity (operation_key, amount) VALUES (?, ?)",
-                (operation_key, amount),
-            )
-            db.execute(
-                """INSERT INTO w2_positive_v1_permits
-                   (permit_id, operation_key, evaluation_id, request_hash, reservation_id,
-                    issued_at, expires_at, signature, key_id, schema_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (permit_id, operation_key, evaluation_id, request_hash, reservation_id,
-                 issued_at, expires_at, signature, self.key_id, PERMIT_SCHEMA),
-            )
-            db.execute(
-                "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) VALUES (?, ?, ?, ?)",
-                (operation_key, "permit_issued_after_reservation", issued_at, reservation_id),
-            )
+                if existing:
+                    if existing["request_hash"] != request_hash or existing["consumed"]:
+                        raise RuntimeError("contradictory permit")
+                    return dict(existing)
+                db.execute(
+                    "INSERT INTO w2_positive_v1_capacity (operation_key, amount) VALUES (?, ?)",
+                    (operation_key, amount),
+                )
+                if os.environ.get("W2_FAIL_AFTER_CAPACITY") == "1":
+                    raise RuntimeError("injected failure after capacity")
+                db.execute(
+                    """INSERT INTO w2_positive_v1_permits
+                       (permit_id, operation_key, evaluation_id, request_hash, reservation_id,
+                        issued_at, expires_at, signature, key_id, schema_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (permit_id, operation_key, evaluation_id, request_hash, reservation_id,
+                     issued_at, expires_at, signature, self.key_id, PERMIT_SCHEMA),
+                )
+                db.execute(
+                    "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) VALUES (?, ?, ?, ?)",
+                    (operation_key, "permit_issued_after_reservation", issued_at, reservation_id),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise RuntimeError("exclusive authority refused") from exc
         return {"permit_id": permit_id, "operation_key": operation_key, "request_hash": request_hash,
                 "reservation_id": reservation_id, "schema": PERMIT_SCHEMA, "execution_authorized_historical": False}
 
@@ -167,40 +196,43 @@ class NativePositivePermitAuthority:
         request_hash = canon_request_hash(payload)
         now = datetime.now(timezone.utc).isoformat()
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        with self._tx() as db:
-            row = db.execute(
-                "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,)
-            ).fetchone()
-            if not row or row["consumed"] or row["request_hash"] != request_hash:
-                raise RuntimeError("no valid unconsumed permit")
-            if row["expires_at"] <= now:
-                raise RuntimeError("permit expired")
-            if row["key_id"] != self.key_id:
-                raise RuntimeError("key_id mismatch")
-            body = self._body(row["permit_id"], row["operation_key"], row["evaluation_id"],
-                              row["request_hash"], row["reservation_id"], row["issued_at"], row["expires_at"])
-            try:
-                self.private_key.public_key().verify(row["signature"], _canonical(body))
-            except (InvalidSignature, ValueError) as exc:
-                raise RuntimeError("permit signature invalid") from exc
-            cap = db.execute(
-                "SELECT reserved, settled FROM w2_positive_v1_capacity WHERE operation_key=?",
-                (operation_key,),
-            ).fetchone()
-            if not cap or not cap["reserved"]:
-                raise RuntimeError("no native reservation")
-            updated = db.execute(
-                """UPDATE w2_positive_v1_permits
-                   SET consumed=1, dispatch_claim=1, idempotency_key=?, payload_json=?
-                   WHERE operation_key=? AND consumed=0 AND request_hash=?""",
-                (idempotency_key, payload_json, operation_key, request_hash),
-            )
-            if updated.rowcount != 1:
-                raise RuntimeError("atomic claim failed")
-            db.execute(
-                "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) VALUES (?, ?, ?, ?)",
-                (operation_key, "dispatch_claimed", now, idempotency_key),
-            )
+        try:
+            with self._write("positive_claim") as db:
+                row = db.execute(
+                    "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,)
+                ).fetchone()
+                if not row or row["consumed"] or row["request_hash"] != request_hash:
+                    raise RuntimeError("no valid unconsumed permit")
+                if row["expires_at"] <= now:
+                    raise RuntimeError("permit expired")
+                if row["key_id"] != self.key_id:
+                    raise RuntimeError("key_id mismatch")
+                body = self._body(row["permit_id"], row["operation_key"], row["evaluation_id"],
+                                  row["request_hash"], row["reservation_id"], row["issued_at"], row["expires_at"])
+                try:
+                    self.private_key.public_key().verify(row["signature"], _canonical(body))
+                except (InvalidSignature, ValueError) as exc:
+                    raise RuntimeError("permit signature invalid") from exc
+                cap = db.execute(
+                    "SELECT reserved, settled FROM w2_positive_v1_capacity WHERE operation_key=?",
+                    (operation_key,),
+                ).fetchone()
+                if not cap or not cap["reserved"]:
+                    raise RuntimeError("no native reservation")
+                updated = db.execute(
+                    """UPDATE w2_positive_v1_permits
+                       SET consumed=1, dispatch_claim=1, idempotency_key=?, payload_json=?
+                       WHERE operation_key=? AND consumed=0 AND request_hash=?""",
+                    (idempotency_key, payload_json, operation_key, request_hash),
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeError("atomic claim failed")
+                db.execute(
+                    "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) VALUES (?, ?, ?, ?)",
+                    (operation_key, "dispatch_claimed", now, idempotency_key),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise RuntimeError("exclusive authority refused") from exc
         if os.environ.get("W2_CRASH_AFTER_NATIVE_CLAIM") == "1":
             os.kill(os.getpid(), __import__("signal").SIGKILL)
         return {"operation_key": operation_key, "idempotency_key": idempotency_key, "claimed": True}
