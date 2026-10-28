@@ -30,9 +30,36 @@ def test_replay_same_hash():
     assert request_hash(payload) == h
     print("replay same hash: PASS")
 
+def test_canon_overwrite_rejected():
+    try:
+        request_hash({"_canon": "evil", "amount": 100})
+        raise AssertionError("should have rejected _canon key")
+    except ValueError as e:
+        assert "_canon" in str(e)
+    print("_canon overwrite rejected: PASS")
+
+def test_nan_rejected():
+    try:
+        request_hash({"amount": float("nan")})
+        raise AssertionError("should have rejected NaN")
+    except ValueError as e:
+        assert "NaN" in str(e)
+    print("NaN rejected: PASS")
+
+def test_inf_rejected():
+    try:
+        request_hash({"amount": float("inf")})
+        raise AssertionError("should have rejected Infinity")
+    except ValueError as e:
+        assert "Infinity" in str(e)
+    print("Infinity rejected: PASS")
+
 if __name__ == "__main__":
     test_same_bytes_same_hash()
     test_substitution_detected()
     test_binding_complete()
     test_replay_same_hash()
+    test_canon_overwrite_rejected()
+    test_nan_rejected()
+    test_inf_rejected()
     print("W2.2b tests: PASS")
