@@ -14,9 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import (
-    Encoding, NoEncryption, PrivateFormat, PublicFormat,
-)
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
 from w2_2b_canonical import request_hash as canon_request_hash
@@ -35,9 +33,13 @@ class NativePositivePermitAuthority:
             raise TypeError("SQLiteConsensusBackend required")
         self.backend = backend
         self.db_path = backend._database_path
-        self.key_custody = "LAB_CLEARTEXT_SQLITE"
         self.topology_id = TOPOLOGY_ID
+        self.productive = False
         with self._tx() as db:
+            if db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='w2_positive_v1_keys'"
+            ).fetchone():
+                raise RuntimeError("refusing store that contains w2_positive_v1_keys")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS w2_positive_v1_capacity (
                   operation_key TEXT PRIMARY KEY,
@@ -68,11 +70,6 @@ class NativePositivePermitAuthority:
                   at TEXT NOT NULL,
                   detail TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS w2_positive_v1_keys (
-                  id INTEGER PRIMARY KEY CHECK (id = 1),
-                  private_key BLOB NOT NULL,
-                  key_id TEXT NOT NULL
-                );
                 CREATE TRIGGER IF NOT EXISTS w2_block_historical_after_positive
                 BEFORE INSERT ON reservations
                 WHEN EXISTS (
@@ -92,7 +89,7 @@ class NativePositivePermitAuthority:
                   SELECT RAISE(ABORT, 'historical reservation owns this key');
                 END;
             """)
-        self._load_or_create_key()
+        self._load_key()
 
     def _tx(self):
         """Autocommit connection for schema and reads. Not a write transaction."""
@@ -102,22 +99,23 @@ class NativePositivePermitAuthority:
         """BEGIN IMMEDIATE … COMMIT, or ROLLBACK if the body raises."""
         return self.backend._transaction(operation)
 
-    def _load_or_create_key(self):
-        with self._tx() as db:
-            row = db.execute("SELECT private_key, key_id FROM w2_positive_v1_keys WHERE id=1").fetchone()
-            if row:
-                self.private_key = Ed25519PrivateKey.from_private_bytes(row["private_key"])
-            else:
-                self.private_key = Ed25519PrivateKey.generate()
-                raw = self.private_key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
-                pub = self.private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-                key_id = hashlib.sha256(pub).hexdigest()
-                db.execute(
-                    "INSERT INTO w2_positive_v1_keys (id, private_key, key_id) VALUES (1, ?, ?)",
-                    (raw, key_id),
-                )
-            pub = self.private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-            self.key_id = hashlib.sha256(pub).hexdigest()
+    def _load_key(self):
+        raw_hex = os.environ.get("TENIR_W2_PRIVATE_KEY_HEX")
+        if raw_hex:
+            try:
+                raw = bytes.fromhex(raw_hex.strip())
+            except ValueError as exc:
+                raise RuntimeError("TENIR_W2_PRIVATE_KEY_HEX is not hex") from exc
+            if len(raw) != 32:
+                raise RuntimeError("TENIR_W2_PRIVATE_KEY_HEX must be 32 bytes")
+            self.private_key = Ed25519PrivateKey.from_private_bytes(raw)
+            self.key_custody = "EXTERNAL_HEX"
+        else:
+            self.private_key = Ed25519PrivateKey.generate()
+            self.key_custody = "LAB_EPHEMERAL_MEMORY"
+        self.productive = False
+        pub = self.private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        self.key_id = hashlib.sha256(pub).hexdigest()
 
     def _body(self, permit_id, op, evaluation_id, request_hash, reservation_id, issued_at, expires_at) -> dict:
         return {
@@ -243,4 +241,6 @@ class NativePositivePermitAuthority:
             "database": self.db_path,
             "tables": ["w2_positive_v1_capacity", "w2_positive_v1_permits", "w2_positive_v1_events"],
             "historical_g4a_modified": False,
+            "key_custody": self.key_custody,
+            "productive": False,
         }]

@@ -1,7 +1,12 @@
 """AC-04: positive permit lives in native consensus.sqlite3."""
+import hashlib
 import os
 import sqlite3
 import tempfile
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import (
+    Encoding, NoEncryption, PrivateFormat, PublicFormat,
+)
 from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
 from tenir_governance.operations.experimental_g4a_settlement import G4AReceipt
 from w2_integration.native_positive_permit import NativePositivePermitAuthority, PERMIT_SCHEMA
@@ -115,6 +120,81 @@ def test_historical_reserve_blocked_after_positive():
         print("historical reserve blocked after positive: PASS")
 
 
+def test_private_key_not_stored_and_old_store_refused():
+    with tempfile.TemporaryDirectory() as d:
+        backend = SQLiteConsensusBackend(d)
+        auth = NativePositivePermitAuthority(backend)
+        assert auth.key_custody == "LAB_EPHEMERAL_MEMORY"
+        assert auth.productive is False
+        with backend._connection() as db:
+            assert db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='w2_positive_v1_keys'"
+            ).fetchone() is None
+        with backend._connection() as db:
+            db.execute("CREATE TABLE w2_positive_v1_keys (id INTEGER)")
+        try:
+            NativePositivePermitAuthority(backend)
+            raise AssertionError("old key table should be refused")
+        except RuntimeError as exc:
+            assert "w2_positive_v1_keys" in str(exc)
+        print("private key not stored: PASS")
+
+
+def test_external_key_hex_not_written():
+    key = Ed25519PrivateKey.generate()
+    raw = key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+    os.environ["TENIR_W2_PRIVATE_KEY_HEX"] = raw.hex()
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            auth = NativePositivePermitAuthority(SQLiteConsensusBackend(d))
+            assert auth.key_custody == "EXTERNAL_HEX"
+            assert auth.productive is False
+            pub = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+            assert auth.key_id == hashlib.sha256(pub).hexdigest()
+            with auth.backend._connection() as db:
+                blob = db.execute("SELECT sql FROM sqlite_master").fetchall()
+                assert not any("private_key" in (row[0] or "") for row in blob)
+        print("external key not written: PASS")
+    finally:
+        os.environ.pop("TENIR_W2_PRIVATE_KEY_HEX", None)
+
+
+def test_kernel_claim_required():
+    from w2_integration.kernel_claim_provider import KernelClaimProofProvider
+    with tempfile.TemporaryDirectory() as d:
+        provider = KernelClaimProofProvider(db_path=d + "/p.db", audience="kernel-dispatch")
+        payload = {"amount": 1}
+        try:
+            provider.execute("op", "idem", payload)
+            raise AssertionError("missing claim should refuse")
+        except RuntimeError as exc:
+            assert "claim required" in str(exc)
+        assert provider.execute_count("op") == 0
+        claim = {
+            "operation": "op",
+            "idempotency_key": "idem",
+            "audience": "kernel-dispatch",
+            "token": "tok-1",
+            "nonce": "n-1",
+        }
+        body = provider.execute("op", "idem", payload, claim=claim)
+        assert body["effect_status"] == "EXECUTED"
+        for operation_id, idem, bad, reason in (
+            ("op", "idem", {**claim, "operation": "other", "nonce": "n-2"}, "operation"),
+            ("op", "idem", {**claim, "idempotency_key": "other", "nonce": "n-3"}, "idempotency"),
+            ("op", "idem", {**claim, "audience": "other", "nonce": "n-4"}, "audience"),
+            ("op", "idem", {**claim, "token": "", "nonce": "n-5"}, "token"),
+            ("op", "idem", claim, "replay"),
+        ):
+            try:
+                provider.execute(operation_id, idem, payload, claim=bad)
+                raise AssertionError(reason)
+            except RuntimeError as exc:
+                assert reason in str(exc)
+        assert provider.execute_count("op") == 1
+        print("kernel claim required: PASS")
+
+
 if __name__ == "__main__":
     test_same_native_database()
     test_historical_receipt_unchanged()
@@ -122,4 +202,7 @@ if __name__ == "__main__":
     test_refuses_if_historical_reservation_exists()
     test_rollback_capacity_without_permit()
     test_historical_reserve_blocked_after_positive()
+    test_private_key_not_stored_and_old_store_refused()
+    test_external_key_hex_not_written()
+    test_kernel_claim_required()
     print("native positive tests: PASS")
