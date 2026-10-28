@@ -56,3 +56,32 @@ if __name__ == "__main__":
     test_historical_receipt_unchanged()
     test_hash_mismatch_refused()
     print("native positive tests: PASS")
+
+
+def test_refuses_if_historical_reservation_exists():
+    with tempfile.TemporaryDirectory() as d:
+        backend = SQLiteConsensusBackend(d)
+        with backend._connection() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO resources (resource_id, capacity, reserved, committed) VALUES ('res', '10', '0', '0')"
+            )
+            db.execute(
+                """INSERT INTO reservations
+                   (reservation_id, idempotency_key, resource_id, amount, state, created_at)
+                   VALUES ('hist-1', 'op-hist', 'res', '1', 'RESERVED', 'now')"""
+            )
+        auth = NativePositivePermitAuthority(backend)
+        try:
+            auth.admit_reserve_issue("op-hist", "eval", {"amount": 1})
+            raise AssertionError("should refuse historical reservation")
+        except RuntimeError as exc:
+            assert "historical I8" in str(exc)
+        print("historical reservation blocks positive admit: PASS")
+
+
+if __name__ == "__main__":
+    test_same_native_database()
+    test_historical_receipt_unchanged()
+    test_hash_mismatch_refused()
+    test_refuses_if_historical_reservation_exists()
+    print("native positive tests: PASS")

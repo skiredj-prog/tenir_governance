@@ -119,6 +119,24 @@ class NativePositivePermitAuthority:
         body = self._body(permit_id, operation_key, evaluation_id, request_hash, reservation_id, issued_at, expires_at)
         signature = self.private_key.sign(_canonical(body))
         with self._tx() as db:
+            historical = db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('reservations','experimental_native_operations')"
+            ).fetchall()
+            names = {row["name"] for row in historical}
+            if "reservations" in names:
+                prior = db.execute(
+                    "SELECT reservation_id FROM reservations WHERE idempotency_key=?",
+                    (operation_key,),
+                ).fetchone()
+                if prior:
+                    raise RuntimeError("historical I8 reservation exists; positive authority refused")
+            if "experimental_native_operations" in names:
+                prior = db.execute(
+                    "SELECT operation_key FROM experimental_native_operations WHERE operation_key=?",
+                    (operation_key,),
+                ).fetchone()
+                if prior:
+                    raise RuntimeError("historical native operation exists; positive authority refused")
             existing = db.execute(
                 "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,)
             ).fetchone()
