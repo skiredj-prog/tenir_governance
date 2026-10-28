@@ -11,6 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
+from w2_2b_canonical import request_hash as canon_request_hash
+import json
+import hashlib
+import base64
+from datetime import datetime, timezone
+from pathlib import Path
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
 
 class AckLost(Exception):
     pass
@@ -72,7 +80,7 @@ class ProofProvider:
         return self.private_key.sign(self._canonical(body))
 
     def execute(self, operation_id: str, idempotency_key: str, payload: dict, lose_ack: bool = False):
-        request_hash = hashlib.sha256(self._canonical(payload)).hexdigest()
+        request_hash = canon_request_hash(payload)
         # Idempotence: same key must not produce different effect
         cur = self.conn.execute(
             "SELECT operation_id, request_hash, receipt_json FROM effects WHERE idempotency_key = ?",
