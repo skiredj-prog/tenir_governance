@@ -226,10 +226,13 @@ class NativePositivePermitAuthority:
                     "SELECT kernel_key_id,witness_key_id "
                     "FROM w2_verifiable_custody WHERE singleton=1"
                 ).fetchone()
-                if (pinned is None or not self.verifiable_recovery
-                        or pinned["kernel_key_id"]!=self.key_id
-                        or pinned["witness_key_id"]!=self.witness.key_id):
+                if pinned is None:
+                    raise RuntimeError("JW-10 kernel custody pin missing: HOLD")
+                if not self.verifiable_recovery:
                     raise RuntimeError("JW-10 previous Kernel instance fenced by custody pin")
+                if (pinned["kernel_key_id"]!=self.key_id
+                        or pinned["witness_key_id"]!=self.witness.key_id):
+                    raise RuntimeError("JW-10 kernel/witness key changed on restart")
             yield db
 
     def _require_native_i8(self, db, operation_key: str, payload: dict, *, allow_committed: bool = False) -> None:
