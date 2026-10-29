@@ -105,7 +105,11 @@ class NativePositiveG4A:
     ) -> dict:
         command = snapshot_command(payload)
         self._require_grant(operation_key, command, grant)
-        claim = self.authority.consume_and_claim(operation_key, command, idempotency_key)
+        self.authority._accepted_grant_id = grant["grant_id"]
+        try:
+            claim = self.authority.consume_and_claim(operation_key, command, idempotency_key)
+        finally:
+            self.authority._accepted_grant_id = None
         if claim.get("claimed") is not True:
             raise RuntimeError("positive grant did not produce a claim")
         with self.authority._write("positive_g4a_consume") as db:

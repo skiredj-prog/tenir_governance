@@ -44,6 +44,7 @@ class NativePositivePermitAuthority:
         self.db_path = backend._database_path
         self.topology_id = TOPOLOGY_ID
         self.productive = False
+        self._accepted_grant_id = None
         self.witness = (
             witness if witness is not None
             else IndependentWitness(self.db_path + ".witness.sqlite3")
@@ -412,6 +413,17 @@ class NativePositivePermitAuthority:
                             if replay["provider_receipt_json"] else None}
                 if review_latched:
                     raise RuntimeError("manual review precedes send")
+                grant_table = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='w2_positive_g4a_v1_grants'"
+                ).fetchone()
+                if grant_table:
+                    grant_row = db.execute(
+                        "SELECT grant_id FROM w2_positive_g4a_v1_grants WHERE operation_key=?",
+                        (operation_key,),
+                    ).fetchone()
+                    if grant_row and self._accepted_grant_id != grant_row["grant_id"]:
+                        raise RuntimeError("positive G4-A grant required before claim")
                 row = db.execute(
                     "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,)
                 ).fetchone()
