@@ -21,10 +21,10 @@ class ProofProvider:
     """Reconstructed lab provider; unclaimed effects are disabled by default."""
     def __init__(self, db_path: str = ":memory:", *, claim_verifier=None,
                  allow_unclaimed_execution: bool = False):
-        if claim_verifier is not None and allow_unclaimed_execution:
-            raise ValueError("claim verifier and unclaimed lab mode are mutually exclusive")
+        if allow_unclaimed_execution:
+            raise RuntimeError("unclaimed provider execution is disabled")
         self.claim_verifier = claim_verifier
-        self.allow_unclaimed_execution = allow_unclaimed_execution
+        self.allow_unclaimed_execution = False
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=FULL")
