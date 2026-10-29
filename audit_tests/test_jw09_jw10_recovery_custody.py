@@ -91,7 +91,7 @@ def _crash_between_witness_and_kernel_commit(directory):
         "resource_id":"lab:budget","amount":7,"action_type":"payment",
         "agent_id":"lab-agent","metadata":{"recipient":"lab-1"},
     }
-    authority.consume_and_claim("lab:jw09","lab:jw09-idem",command)
+    authority.consume_and_claim("lab:jw09",command,"lab:jw09-idem")
     os._exit(99)
 
 
