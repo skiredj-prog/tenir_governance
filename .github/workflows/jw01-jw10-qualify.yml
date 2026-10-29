@@ -1,11 +1,17 @@
 name: JW-01 to JW-10 exact-head laboratory qualification
 on:
   push:
-    branches: [audit/jw01-jw10-exact-head-qualification]
+    branches: [audit/jw01-jw10-exact-head-qualification, fix/jw10-anti-downgrade-anchor-gate]
   pull_request:
     paths:
       - 'audit_tests/qualify_jw01_jw10.py'
       - 'audit_tests/test_jw_joint_rollback_limit.py'
+      - 'audit_tests/test_jw_external_anchor_gate.py'
+      - 'audit_tests/test_jw09_jw10_recovery_custody.py'
+      - 'w2_integration/external_cold_restart_anchor.py'
+      - 'w2_integration/independent_witness.py'
+      - 'w2_integration/native_positive_permit.py'
+      - 'docs/JW10_ANTI_DOWNGRADE_ANCHOR_GATE.md'
       - '.github/workflows/jw01-jw10-qualify.yml'
       - 'docs/JW01_JW10_EXACT_HEAD_QUALIFICATION.md'
 permissions:
@@ -49,6 +55,8 @@ jobs:
                      for v in report['jw_evidence'].values())
           assert report['missing_or_failed_mandatory_tests']==[]
           assert not topo['external_monotonic_anchor']
+          assert topo['external_anchor_validator_implemented']
+          assert not topo['external_anchor_current_reader_live_service_provisioned']
           assert not topo['topology_id_match']
           assert report['negative_limits'][
               'test_joint_kernel_and_witness_snapshot_restore_is_not_detected_locally']['pass']
