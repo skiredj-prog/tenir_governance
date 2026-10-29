@@ -7,6 +7,7 @@ on:
       - 'w2_integration/independent_witness.py'
       - 'w2_integration/native_positive_permit.py'
       - 'audit_tests/test_jw09_jw10_recovery_custody.py'
+      - 'docs/JW09_JW10_QUALIFICATION_CANDIDATE.md'
       - '.github/workflows/jw09-jw10-qualification.yml'
 permissions:
   contents: read
