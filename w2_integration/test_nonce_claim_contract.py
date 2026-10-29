@@ -49,7 +49,11 @@ def test_provider_requires_kernel_claim_when_enabled():
 def test_private_key_never_enters_authority_sqlite():
     with tempfile.TemporaryDirectory() as d:
         backend = SQLiteConsensusBackend(d)
-        auth = NativePositivePermitAuthority(backend, private_key_hex=("11" * 32))
+        os.environ["TENIR_W2_PRIVATE_KEY_HEX"] = "11" * 32
+        try:
+            auth = NativePositivePermitAuthority(backend)
+        finally:
+            os.environ.pop("TENIR_W2_PRIVATE_KEY_HEX", None)
         with backend._connection() as db:
             assert db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='w2_positive_v1_keys'"
