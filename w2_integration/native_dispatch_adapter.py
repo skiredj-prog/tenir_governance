@@ -164,6 +164,8 @@ class NativeClaimedDispatchAdapter:
         if decision == "REVIEW":
             return {"status": "HOLD", "claim": claim,
                     "reason": "manual review precedes send"}
+        if decision == "EXPIRED":
+            return {"status": "HOLD", "claim": claim, "reason": "permit expired"}
         if decision != "GRANTED":
             try:
                 self.authority.mark_dispatch_unknown(claim)

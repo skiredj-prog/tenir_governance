@@ -43,7 +43,26 @@ class IndependentWitness:
         public = self.private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
         self.key_id = hashlib.sha256(public).hexdigest()
         with self._tx() as db:
-            db.execute("CREATE TABLE IF NOT EXISTS witness_checkpoints (revision INTEGER PRIMARY KEY, record_json TEXT NOT NULL, signature BLOB NOT NULL)")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS witness_checkpoints ("
+                "revision INTEGER PRIMARY KEY, record_json TEXT NOT NULL, "
+                "signature BLOB NOT NULL, subject TEXT)"
+            )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(witness_checkpoints)")}
+            if "subject" not in columns:
+                db.execute("ALTER TABLE witness_checkpoints ADD COLUMN subject TEXT")
+            for row in db.execute(
+                "SELECT revision, record_json FROM witness_checkpoints WHERE subject IS NULL"
+            ):
+                subject = json.loads(row["record_json"]).get("subject")
+                db.execute(
+                    "UPDATE witness_checkpoints SET subject=? WHERE revision=?",
+                    (subject, row["revision"]),
+                )
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS witness_subject_unique "
+                "ON witness_checkpoints(subject)"
+            )
 
     @contextmanager
     def _tx(self):
@@ -66,7 +85,18 @@ class IndependentWitness:
         if not subject or not snapshot_fingerprint:
             raise ValueError("subject and fingerprint are required")
         with self._tx() as db:
-            previous = db.execute("SELECT revision, record_json FROM witness_checkpoints ORDER BY revision DESC LIMIT 1").fetchone()
+            existing = db.execute(
+                "SELECT revision, record_json, signature FROM witness_checkpoints WHERE subject=?",
+                (subject,),
+            ).fetchone()
+            if existing:
+                record = json.loads(existing["record_json"])
+                if record.get("snapshot_fingerprint") != snapshot_fingerprint:
+                    raise RuntimeError("witness subject already resolved")
+                return {"record": record, "signature": bytes(existing["signature"]).hex()}
+            previous = db.execute(
+                "SELECT revision, record_json FROM witness_checkpoints ORDER BY revision DESC LIMIT 1"
+            ).fetchone()
             revision = 1 if previous is None else previous["revision"] + 1
             if expected_revision is not None and expected_revision != revision:
                 raise RuntimeError("witness revision conflict")
@@ -81,13 +111,18 @@ class IndependentWitness:
                 "issued_at": datetime.now(timezone.utc).isoformat(),
             }
             signature = self.private_key.sign(_canonical(record))
-            db.execute("INSERT INTO witness_checkpoints(revision, record_json, signature) VALUES (?, ?, ?)",
-                       (revision, json.dumps(record, sort_keys=True), signature))
+            db.execute(
+                "INSERT INTO witness_checkpoints(revision, record_json, signature, subject) "
+                "VALUES (?, ?, ?, ?)",
+                (revision, json.dumps(record, sort_keys=True), signature, subject),
+            )
             return {"record": record, "signature": signature.hex()}
 
-    def verify(self, evidence: dict) -> bool:
+    def verify(self, evidence: dict, *, subject: str | None = None) -> bool:
         record = evidence.get("record") if isinstance(evidence, dict) else None
         if not isinstance(record, dict) or record.get("key_id") != self.key_id:
+            return False
+        if subject is not None and record.get("subject") != subject:
             return False
         try:
             signature = bytes.fromhex(evidence["signature"])
@@ -96,8 +131,15 @@ class IndependentWitness:
             return False
         db = sqlite3.connect(self.db_path)
         try:
-            row = db.execute("SELECT record_json, signature FROM witness_checkpoints WHERE revision=?", (record.get("revision"),)).fetchone()
+            row = db.execute(
+                "SELECT record_json, signature, subject FROM witness_checkpoints WHERE revision=?",
+                (record.get("revision"),),
+            ).fetchone()
         finally:
             db.close()
-        return bool(row and row[0] == json.dumps(record, sort_keys=True) and bytes(row[1]) == signature)
+        if not row or row[0] != json.dumps(record, sort_keys=True) or bytes(row[1]) != signature:
+            return False
+        if subject is not None and row[2] != subject:
+            return False
+        return True
 
