@@ -52,7 +52,7 @@ def test_confirmed_requires_provider_reconciliation_and_commits_i8(tmp_path):
     )
 
     assert result["status"] == "CONFIRMED"
-    assert result["receipt"]["attestation_type"] == "connector-reconciled-provider/v1"
+    assert result["receipt"]["attestation_type"] == "connector-reconciled-provider/v2"
     assert authority._verify_provider_receipt(result["receipt"])
     assert len(provider.calls) == 1
     assert len(provider.reconcile_calls) == 1
@@ -167,6 +167,7 @@ def test_failed_provider_result_is_frozen_for_manual_review(tmp_path):
     signed_receipt = attestor.attest_confirmed(
         operation_key="lab:adapter-op", idempotency_key="lab:adapter-idem",
         payload=payload, reconciliation=reconciliation,
+        binding=authority.receipt_context(first["claim"]),
     )
     with pytest.raises(RuntimeError, match="manual review latch"):
         authority.mark_dispatch_confirmed(first["claim"], signed_receipt)

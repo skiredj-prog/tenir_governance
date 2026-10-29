@@ -226,6 +226,7 @@ def test_valid_connector_signature_cannot_settle_incoherent_i8(
     receipt = attestor.attest_confirmed(
         operation_key=OPERATION, idempotency_key=IDEMPOTENCY, payload=command,
         reconciliation=provider.reconcile(IDEMPOTENCY),
+        binding=authority.receipt_context(claim),
     )
     _inject_fault(backend, fault)
     before = _snapshot(backend)
