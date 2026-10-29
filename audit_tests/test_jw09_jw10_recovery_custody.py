@@ -202,3 +202,41 @@ def test_jw10_corrupted_kernel_pin_fails_even_with_original_key(tmp_path,monkeyp
         db.execute("DELETE FROM w2_verifiable_custody")
     with pytest.raises(RuntimeError,match="custody pin missing"):
         NativePositivePermitAuthority(backend,verifiable_recovery=True)
+
+
+def test_jw10_preopened_legacy_witness_is_fenced_after_other_instance_pins(
+        tmp_path,monkeypatch):
+    _keys(monkeypatch)
+    store=str(tmp_path/"witness.sqlite")
+    stale=IndependentWitness(store,verifiable_recovery=False)
+    verified=IndependentWitness(store,verifiable_recovery=True)
+    current=verified.issue("subject:verified","ab"*32)
+    with pytest.raises(RuntimeError,match="old Witness instance fenced"):
+        stale.issue("subject:legacy","ab"*32)
+    assert stale.verify(current,subject="subject:verified") is False
+    assert verified.verify(current,subject="subject:verified") is True
+
+
+def test_jw10_preopened_legacy_kernel_writer_fenced_inside_transaction(
+        tmp_path,monkeypatch):
+    _keys(monkeypatch)
+    backend=SQLiteConsensusBackend(str(tmp_path/"kernel"))
+    assert backend.register_resource("lab:budget",20)=="REGISTERED"
+    stale=NativePositivePermitAuthority(backend,verifiable_recovery=False)
+    NativePositivePermitAuthority(backend,verifiable_recovery=True)
+    payload={
+        "schema":"tenir-dispatch-command/v1",
+        "resource_id":"lab:budget","amount":7,
+        "action_type":"payment","agent_id":"lab-agent",
+        "metadata":{"recipient":"lab"},
+    }
+    with pytest.raises(RuntimeError,match="previous Kernel instance fenced"):
+        stale.admit_reserve_issue(
+            "lab:downgrade-race","lab:eval",payload,resource_id="lab:budget")
+    with backend._connection() as db:
+        assert db.execute(
+            "SELECT count(*) FROM w2_positive_v1_permits"
+        ).fetchone()[0]==0
+        assert db.execute(
+            "SELECT count(*) FROM w2_positive_v1_outbox"
+        ).fetchone()[0]==0
