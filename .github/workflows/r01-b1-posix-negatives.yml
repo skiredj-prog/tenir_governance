@@ -39,7 +39,7 @@ jobs:
       - name: Stage byte-identical SUT sources for unprivileged actor imports
         run: |
           sudo install -d -o root -g root -m 755 /tmp/r01-audit-source
-          sudo cp -a tenir_governance w2_integration /tmp/r01-audit-source/
+          sudo cp -a tenir_governance /tmp/r01-audit-source/
           sudo install -o root -g root -m 444 tests/r01_b1_lab_actor.py /tmp/r01-audit-source/r01_b1_lab_actor.py
           sudo chown -R root:root /tmp/r01-audit-source
           sudo find /tmp/r01-audit-source -type d -exec chmod 755 {} +
