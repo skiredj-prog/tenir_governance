@@ -33,7 +33,14 @@ def system(tmp_path, monkeypatch):
     authority = NativePositivePermitAuthority(
         backend, trusted_provider_public_key=attestor.public_key_bytes,
     )
-    payload = {"amount": 7, "resource_id": "lab:budget"}
+    payload = {
+        "schema": "tenir-dispatch-command/v1",
+        "resource_id": "lab:budget",
+        "amount": 7,
+        "action_type": "payment",
+        "agent_id": "lab-agent",
+        "metadata": {"recipient": "recipient-1"},
+    }
     issued = authority.admit_reserve_issue("op-audit", "eval", payload, resource_id="lab:budget")
     provider = MockProvider()
     adapter = NativeClaimedDispatchAdapter(authority, provider, attestor)
@@ -52,7 +59,8 @@ def test_authorized_payload_must_bind_actual_provider_amount(tmp_path, monkeypat
                               metadata={"recipient": "different-recipient"})
     with backend._connection() as db:
         committed = db.execute("SELECT committed FROM resources WHERE resource_id='lab:budget'").fetchone()[0]
-    print(json.dumps({"result": result["status"], "sent_amount": provider.calls[0]["amount"],
+    sent_amount = provider.calls[0]["amount"] if provider.calls else None
+    print(json.dumps({"result": result["status"], "sent_amount": sent_amount,
                       "authorized_amount": payload["amount"], "i8_committed": committed}))
     assert provider.calls == [], "changed provider command must be rejected before execution"
 
@@ -60,6 +68,16 @@ def test_authorized_payload_must_bind_actual_provider_amount(tmp_path, monkeypat
 def test_public_release_must_prevent_subsequent_positive_dispatch(tmp_path, monkeypatch):
     backend, authority, provider, adapter, payload, issued = system(tmp_path, monkeypatch)
     released = backend.release(issued["reservation_id"])
+    assert released.status == "POSITIVE_AUTHORITY_OWNS_RESERVATION"
+    with backend._connection() as db:
+        assert db.execute(
+            "SELECT state FROM reservations WHERE reservation_id=?",
+            (issued["reservation_id"],),
+        ).fetchone()[0] == "RESERVED"
+        db.execute(
+            "UPDATE reservations SET state='RELEASED' WHERE reservation_id=?",
+            (issued["reservation_id"],),
+        )
     result = dispatch(adapter, payload)
     with backend._connection() as db:
         budget = dict(db.execute("SELECT reserved, committed FROM resources WHERE resource_id='lab:budget'").fetchone())
