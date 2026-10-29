@@ -151,7 +151,9 @@ class NativeClaimedDispatchAdapter:
             )
         except RuntimeError as exc:
             text = str(exc)
-            if "manual review precedes send" not in text and "native I8 reservation state invalid" not in text:
+            if ("manual review precedes send" not in text
+                    and "native I8 reservation state invalid" not in text
+                    and "positive G4-A grant required before claim" not in text):
                 raise
             return {"status": "HOLD", "claim": None, "reason": text}
         persisted = snapshot_command(self.authority.load_dispatch_payload(claim))
