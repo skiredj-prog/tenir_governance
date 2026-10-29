@@ -264,73 +264,90 @@ class SQLiteConsensusBackend:
         return "REGISTERED"
 
     def reserve(self, key: str, amount, resource_id: str) -> ReservationResult:
+        with self._transaction("reserve") as connection:
+            return self._reserve_in_connection(connection, key, amount, resource_id)
+
+    def _reserve_in_connection(
+        self, connection: sqlite3.Connection, key: str, amount, resource_id: str,
+        *, reservation_id: str | None = None, positive_authority_owner: bool = False,
+    ) -> ReservationResult:
+        """Apply the canonical I8 reserve transition inside a caller-owned transaction."""
+        if not connection.in_transaction:
+            raise RuntimeError("I8 reservation requires an active transaction")
         normalized = self._amount(amount)
         if normalized is None or not isinstance(key, str) or not key or not isinstance(resource_id, str) or not resource_id:
             return ReservationResult(status="INVALID_AMOUNT" if normalized is None else "INVALID_REQUEST")
-        reservation_id = str(uuid.uuid4())
-        with self._transaction("reserve") as connection:
-            existing = connection.execute(
-                "SELECT * FROM reservations WHERE idempotency_key = ?", (key,),
-            ).fetchone()
-            if existing:
-                if Decimal(existing["amount"]) == normalized and existing["resource_id"] == resource_id:
-                    return ReservationResult(existing["state"], existing["reservation_id"], normalized)
-                return ReservationResult("DUPLICATE_KEY")
-            positive_table = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='w2_positive_v1_capacity'"
-            ).fetchone()
-            if positive_table and connection.execute(
-                "SELECT 1 FROM w2_positive_v1_capacity WHERE operation_key = ?", (key,),
-            ).fetchone():
-                return ReservationResult("POSITIVE_AUTHORITY_OWNS_KEY")
-            resource = connection.execute(
-                "SELECT * FROM resources WHERE resource_id = ?", (resource_id,),
-            ).fetchone()
-            if resource is None:
-                return ReservationResult("UNKNOWN_RESOURCE")
-            capacity = Decimal(resource["capacity"])
-            reserved = Decimal(resource["reserved"])
-            committed = Decimal(resource["committed"])
-            if _decimal_add(_decimal_add(reserved, committed), normalized) > capacity:
-                return ReservationResult("INSUFFICIENT_BUDGET")
-            connection.execute(
-                "UPDATE resources SET reserved = ? WHERE resource_id = ?",
-                (str(_decimal_add(reserved, normalized)), resource_id),
-            )
-            connection.execute(
-                "INSERT INTO reservations (reservation_id,idempotency_key,resource_id,amount,state,created_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (reservation_id, key, resource_id, str(normalized), "RESERVED", time.time()),
-            )
+        reservation_id = reservation_id or str(uuid.uuid4())
+        existing = connection.execute(
+            "SELECT * FROM reservations WHERE idempotency_key = ?", (key,),
+        ).fetchone()
+        if existing:
+            if Decimal(existing["amount"]) == normalized and existing["resource_id"] == resource_id:
+                return ReservationResult(existing["state"], existing["reservation_id"], normalized)
+            return ReservationResult("DUPLICATE_KEY")
+        positive_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='w2_positive_v1_capacity'"
+        ).fetchone()
+        if not positive_authority_owner and positive_table and connection.execute(
+            "SELECT 1 FROM w2_positive_v1_capacity WHERE operation_key = ?", (key,),
+        ).fetchone():
+            return ReservationResult("POSITIVE_AUTHORITY_OWNS_KEY")
+        resource = connection.execute(
+            "SELECT * FROM resources WHERE resource_id = ?", (resource_id,),
+        ).fetchone()
+        if resource is None:
+            return ReservationResult("UNKNOWN_RESOURCE")
+        capacity = Decimal(resource["capacity"])
+        reserved = Decimal(resource["reserved"])
+        committed = Decimal(resource["committed"])
+        if _decimal_add(_decimal_add(reserved, committed), normalized) > capacity:
+            return ReservationResult("INSUFFICIENT_BUDGET")
+        connection.execute(
+            "UPDATE resources SET reserved = ? WHERE resource_id = ?",
+            (str(_decimal_add(reserved, normalized)), resource_id),
+        )
+        connection.execute(
+            "INSERT INTO reservations (reservation_id,idempotency_key,resource_id,amount,state,created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (reservation_id, key, resource_id, str(normalized), "RESERVED", time.time()),
+        )
         return ReservationResult("RESERVED", reservation_id, normalized)
 
     def commit(self, reservation_id: str) -> CommitResult:
         with self._transaction("commit") as connection:
-            record = connection.execute(
-                "SELECT * FROM reservations WHERE reservation_id = ?", (reservation_id,),
-            ).fetchone()
-            if record is None:
-                return CommitResult("NOT_FOUND")
-            if record["state"] == "COMMITTED":
-                return CommitResult("ALREADY_COMMITTED")
-            if record["state"] != "RESERVED":
-                return CommitResult("ERROR")
-            resource = connection.execute(
-                "SELECT * FROM resources WHERE resource_id = ?", (record["resource_id"],),
-            ).fetchone()
-            amount = Decimal(record["amount"])
-            reserved = Decimal(resource["reserved"])
-            if reserved < amount:
-                return CommitResult("ERROR")
-            connection.execute(
-                "UPDATE resources SET reserved = ?, committed = ? WHERE resource_id = ?",
-                (str(_decimal_subtract(reserved, amount)),
-                 str(_decimal_add(Decimal(resource["committed"]), amount)), record["resource_id"]),
-            )
-            connection.execute(
-                "UPDATE reservations SET state='COMMITTED', committed_at=? WHERE reservation_id=?",
-                (time.time(), reservation_id),
-            )
+            return self._commit_in_connection(connection, reservation_id)
+
+    def _commit_in_connection(
+        self, connection: sqlite3.Connection, reservation_id: str,
+    ) -> CommitResult:
+        """Apply I8 commit inside a caller-owned transaction."""
+        if not connection.in_transaction:
+            raise RuntimeError("I8 commit requires an active transaction")
+        record = connection.execute(
+            "SELECT * FROM reservations WHERE reservation_id = ?", (reservation_id,),
+        ).fetchone()
+        if record is None:
+            return CommitResult("NOT_FOUND")
+        if record["state"] == "COMMITTED":
+            return CommitResult("ALREADY_COMMITTED")
+        if record["state"] != "RESERVED":
+            return CommitResult("ERROR")
+        resource = connection.execute(
+            "SELECT * FROM resources WHERE resource_id = ?", (record["resource_id"],),
+        ).fetchone()
+        amount = Decimal(record["amount"])
+        reserved = Decimal(resource["reserved"])
+        if reserved < amount:
+            return CommitResult("ERROR")
+        connection.execute(
+            "UPDATE resources SET reserved = ?, committed = ? WHERE resource_id = ?",
+            (str(_decimal_subtract(reserved, amount)),
+             str(_decimal_add(Decimal(resource["committed"]), amount)), record["resource_id"]),
+        )
+        connection.execute(
+            "UPDATE reservations SET state='COMMITTED', committed_at=? WHERE reservation_id=?",
+            (time.time(), reservation_id),
+        )
         return CommitResult("COMMITTED")
 
     def release(self, reservation_id: str) -> ReleaseResult:

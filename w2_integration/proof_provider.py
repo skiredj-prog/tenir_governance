@@ -7,29 +7,41 @@ import sqlite3
 import json
 import hashlib
 import base64
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 from w2_2b_canonical import request_hash as canon_request_hash
-import json
-import hashlib
-import base64
-from datetime import datetime, timezone
-from pathlib import Path
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives import serialization
 
 class AckLost(Exception):
     pass
 
 class ProofProvider:
-    def __init__(self, db_path: str = ":memory:"):
+    """Reconstructed lab provider; unclaimed effects are disabled by default."""
+    def __init__(self, db_path: str = ":memory:", *, claim_verifier=None,
+                 allow_unclaimed_execution: bool = False):
+        if claim_verifier is not None and allow_unclaimed_execution:
+            raise ValueError("claim verifier and unclaimed lab mode are mutually exclusive")
+        self.claim_verifier = claim_verifier
+        self.allow_unclaimed_execution = allow_unclaimed_execution
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=FULL")
         self._init_schema()
-        self.private_key = Ed25519PrivateKey.generate()
+        private_key_hex = os.environ.get("TENIR_B3_PRIVATE_KEY_HEX")
+        if private_key_hex:
+            try:
+                private_key_raw = bytes.fromhex(private_key_hex.strip())
+            except ValueError as exc:
+                raise RuntimeError("TENIR_B3_PRIVATE_KEY_HEX is not hex") from exc
+            if len(private_key_raw) != 32:
+                raise RuntimeError("TENIR_B3_PRIVATE_KEY_HEX must be 32 bytes")
+            self.private_key = Ed25519PrivateKey.from_private_bytes(private_key_raw)
+            self.key_custody = "EXTERNAL_ENV"
+        else:
+            self.private_key = Ed25519PrivateKey.generate()
+            self.key_custody = "LAB_EPHEMERAL_MEMORY"
         self.public_key = self.private_key.public_key()
         self.provider_id = "lab-provider-reconstructed"
         self.sequence = 0
@@ -48,6 +60,12 @@ class ProofProvider:
             CREATE TABLE IF NOT EXISTS tombstones (
                 idempotency_key TEXT PRIMARY KEY,
                 receipt_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS authenticated_claim_uses (
+                nonce TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                request_hash TEXT NOT NULL
             );
         """)
         # Migration: enforce UNIQUE on the correct column. Fail closed on duplicates or wrong index.
@@ -79,55 +97,93 @@ class ProofProvider:
     def _sign(self, body: dict) -> bytes:
         return self.private_key.sign(self._canonical(body))
 
-    def execute(self, operation_id: str, idempotency_key: str, payload: dict, lose_ack: bool = False):
+    def execute(self, operation_id: str, idempotency_key: str, payload: dict,
+                lose_ack: bool = False, *, claim=None):
+        protected = self.claim_verifier is not None
+        if protected:
+            try:
+                valid_claim = self.claim_verifier(
+                    operation_id, idempotency_key, payload, claim
+                )
+            except Exception as exc:
+                raise RuntimeError("claim verification failed") from exc
+            if not valid_claim:
+                raise RuntimeError("authenticated kernel claim required")
+        elif not self.allow_unclaimed_execution:
+            raise RuntimeError("authenticated kernel claim required")
+        nonce = claim.get("nonce") if protected and isinstance(claim, dict) else None
+        if protected and (not isinstance(nonce, str) or not nonce):
+            raise RuntimeError("claim nonce required")
         request_hash = canon_request_hash(payload)
-        # Idempotence: same key must not produce different effect
-        cur = self.conn.execute(
-            "SELECT operation_id, request_hash, receipt_json FROM effects WHERE idempotency_key = ?",
-            (idempotency_key,)
-        )
-        existing = cur.fetchone()
-        if existing:
-            if existing[1] != request_hash:
-                raise ValueError("idempotency key conflict: different request_hash")
-            return json.loads(existing[2])
+        if protected:
+            self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.conn.execute(
+                "SELECT operation_id, idempotency_key, request_hash, receipt_json "
+                "FROM effects WHERE idempotency_key = ?", (idempotency_key,)
+            ).fetchone()
+            if existing:
+                if (existing[0] != operation_id or existing[2] != request_hash):
+                    raise ValueError("idempotency key conflict: different request")
+                if protected:
+                    use = self.conn.execute(
+                        "SELECT operation_id, idempotency_key, request_hash "
+                        "FROM authenticated_claim_uses WHERE nonce=?", (nonce,)
+                    ).fetchone()
+                    if not use or tuple(use) != (operation_id, idempotency_key, request_hash):
+                        raise RuntimeError("claim replay does not match committed effect")
+                    self.conn.commit()
+                return json.loads(existing[3])
 
-        cur = self.conn.execute(
-            "SELECT receipt_json FROM effects WHERE operation_id = ?", (operation_id,)
-        )
-        row = cur.fetchone()
-        if row:
-            return json.loads(row[0])
+            row = self.conn.execute(
+                "SELECT operation_id, idempotency_key, request_hash, receipt_json "
+                "FROM effects WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            if row:
+                if protected:
+                    raise RuntimeError("operation already has a different provider effect")
+                return json.loads(row[3])
 
-        self.sequence += 1
-        body = {
-            "schema": "proof-provider-receipt/candidate-v0.1",
-            "provider_id": self.provider_id,
-            "key_id": hashlib.sha256(self.public_key.public_bytes(
-                serialization.Encoding.Raw, serialization.PublicFormat.Raw
-            )).hexdigest(),
-            "sequence": self.sequence,
-            "operation_id": operation_id,
-            "idempotency_key": idempotency_key,
-            "request_hash": request_hash,
-            "scope": payload.get("scope", {"account": "test", "amount_minor": 100, "currency": "EUR"}),
-            "action_type": payload.get("action_type", "transfer"),
-            "effect_status": "EXECUTED",
-            "effect_digest": hashlib.sha256(b"effect").hexdigest(),
-            "finality": "PROVIDER_LEDGER_TERMINAL",
-            "issued_at": datetime.now(timezone.utc).isoformat(),
-            "reason": "executed"
-        }
-        sig = self._sign(body)
-        self.conn.execute(
-            "INSERT INTO effects VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (operation_id, idempotency_key, request_hash, "EXECUTED",
-             json.dumps(body), sig, body["issued_at"])
-        )
-        self.conn.commit()
-        if lose_ack:
-            raise AckLost("ACK lost after durable commit")
-        return body
+            if protected:
+                self.conn.execute(
+                    "INSERT INTO authenticated_claim_uses "
+                    "(nonce, operation_id, idempotency_key, request_hash) VALUES (?, ?, ?, ?)",
+                    (nonce, operation_id, idempotency_key, request_hash),
+                )
+            self.sequence += 1
+            body = {
+                "schema": "proof-provider-receipt/candidate-v0.1",
+                "provider_id": self.provider_id,
+                "key_id": hashlib.sha256(self.public_key.public_bytes(
+                    serialization.Encoding.Raw, serialization.PublicFormat.Raw
+                )).hexdigest(),
+                "sequence": self.sequence,
+                "operation_id": operation_id,
+                "idempotency_key": idempotency_key,
+                "request_hash": request_hash,
+                "scope": payload.get("scope", {"account": "test", "amount_minor": 100, "currency": "EUR"}),
+                "action_type": payload.get("action_type", "transfer"),
+                "effect_status": "EXECUTED",
+                "effect_digest": hashlib.sha256(b"effect").hexdigest(),
+                "finality": "PROVIDER_LEDGER_TERMINAL",
+                "issued_at": datetime.now(timezone.utc).isoformat(),
+                "reason": "executed"
+            }
+            sig = self._sign(body)
+            body["provider_signature"] = base64.b64encode(sig).decode("ascii")
+            self.conn.execute(
+                "INSERT INTO effects VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (operation_id, idempotency_key, request_hash, "EXECUTED",
+                 json.dumps(body), sig, body["issued_at"])
+            )
+            self.conn.commit()
+            if lose_ack:
+                raise AckLost("ACK lost after durable commit")
+            return body
+        except BaseException:
+            if self.conn.in_transaction:
+                self.conn.rollback()
+            raise
 
     def reconcile(self, operation_id: str):
         cur = self.conn.execute(
@@ -141,3 +197,25 @@ class ProofProvider:
             "SELECT COUNT(*) FROM effects WHERE operation_id = ?", (operation_id,)
         )
         return cur.fetchone()[0]
+
+    def verify_receipt(self, receipt: dict) -> bool:
+        """Verify a receipt against the provider's durable row and signing key."""
+        if not isinstance(receipt, dict):
+            return False
+        row = self.conn.execute(
+            "SELECT receipt_json, signature FROM effects "
+            "WHERE operation_id=? AND idempotency_key=?",
+            (receipt.get("operation_id"), receipt.get("idempotency_key")),
+        ).fetchone()
+        if not row or json.loads(row[0]) != receipt:
+            return False
+        try:
+            signature = base64.b64decode(receipt["provider_signature"], validate=True)
+            unsigned = {key: value for key, value in receipt.items()
+                        if key != "provider_signature"}
+            if signature != row[1]:
+                return False
+            self.public_key.verify(signature, self._canonical(unsigned))
+            return True
+        except Exception:
+            return False

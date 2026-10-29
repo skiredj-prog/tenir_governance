@@ -2,11 +2,15 @@
 
 Uses consensus.sqlite3. Does not rename PositiveG4A into native authority.
 Does not change ExperimentalG4AAuthority: HOLD and execution_authorized=false stay.
-B3 remains outside the SQLite transaction.
+B3 remains outside the SQLite transaction. The independent Witness uses a
+separate database; its checkpoint is verified before the native claim commits.
+A failed native commit can therefore leave an unused Witness checkpoint, but
+cannot create a dispatchable outbox claim.
 """
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import os
 import sqlite3
@@ -15,10 +19,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
+from independent_witness import IndependentWitness
 from w2_2b_canonical import request_hash as canon_request_hash
 
 PERMIT_SCHEMA = "w2-positive-permit/v1"
@@ -30,13 +35,30 @@ def _canonical(obj: dict) -> bytes:
 
 
 class NativePositivePermitAuthority:
-    def __init__(self, backend: SQLiteConsensusBackend):
+    def __init__(self, backend: SQLiteConsensusBackend, *, witness=None,
+                 trusted_provider_public_key: bytes | None = None):
         if not isinstance(backend, SQLiteConsensusBackend):
             raise TypeError("SQLiteConsensusBackend required")
         self.backend = backend
         self.db_path = backend._database_path
         self.topology_id = TOPOLOGY_ID
         self.productive = False
+        self.witness = (
+            witness if witness is not None
+            else IndependentWitness(self.db_path + ".witness.sqlite3")
+        )
+        if trusted_provider_public_key is None:
+            self.trusted_provider_public_key = None
+            self.trusted_provider_key_id = None
+        else:
+            if not isinstance(trusted_provider_public_key, bytes) or len(trusted_provider_public_key) != 32:
+                raise ValueError("trusted provider public key must be 32 raw Ed25519 bytes")
+            self.trusted_provider_public_key = Ed25519PublicKey.from_public_bytes(
+                trusted_provider_public_key
+            )
+            self.trusted_provider_key_id = hashlib.sha256(
+                trusted_provider_public_key
+            ).hexdigest()
         with self._tx() as db:
             if db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='w2_positive_v1_keys'"
@@ -47,7 +69,9 @@ class NativePositivePermitAuthority:
                   operation_key TEXT PRIMARY KEY,
                   amount INTEGER NOT NULL,
                   reserved INTEGER NOT NULL DEFAULT 1,
-                  settled INTEGER NOT NULL DEFAULT 0
+                  settled INTEGER NOT NULL DEFAULT 0,
+                  reservation_id TEXT,
+                  resource_id TEXT
                 );
                 CREATE TABLE IF NOT EXISTS w2_positive_v1_permits (
                   permit_id TEXT PRIMARY KEY,
@@ -72,24 +96,6 @@ class NativePositivePermitAuthority:
                   at TEXT NOT NULL,
                   detail TEXT NOT NULL
                 );
-                CREATE TRIGGER IF NOT EXISTS w2_block_historical_after_positive
-                BEFORE INSERT ON reservations
-                WHEN EXISTS (
-                  SELECT 1 FROM w2_positive_v1_capacity
-                  WHERE operation_key = NEW.idempotency_key
-                )
-                BEGIN
-                  SELECT RAISE(ABORT, 'positive capacity owns this key');
-                END;
-                CREATE TRIGGER IF NOT EXISTS w2_block_positive_after_historical
-                BEFORE INSERT ON w2_positive_v1_capacity
-                WHEN EXISTS (
-                  SELECT 1 FROM reservations
-                  WHERE idempotency_key = NEW.operation_key
-                )
-                BEGIN
-                  SELECT RAISE(ABORT, 'historical reservation owns this key');
-                END;
                 CREATE TABLE IF NOT EXISTS w2_positive_v1_outbox (
                   execution_id TEXT PRIMARY KEY,
                   operation_key TEXT NOT NULL UNIQUE,
@@ -98,13 +104,54 @@ class NativePositivePermitAuthority:
                   payload_json TEXT NOT NULL,
                   claim_token TEXT NOT NULL UNIQUE,
                   status TEXT NOT NULL CHECK(status IN ('PENDING','UNKNOWN','CONFIRMED','FAILED')),
-                  created_at TEXT NOT NULL
+                  created_at TEXT NOT NULL,
+                  witness_evidence_json TEXT,
+                  witness_hash TEXT,
+                  provider_receipt_json TEXT
                 );
             """)
+            self._add_column(db, "w2_positive_v1_capacity", "reservation_id", "TEXT")
+            self._add_column(db, "w2_positive_v1_capacity", "resource_id", "TEXT")
             self._add_column(db, "w2_positive_v1_permits", "nonce_hash", "TEXT")
             self._add_column(db, "w2_positive_v1_permits", "nonce_status", "TEXT NOT NULL DEFAULT 'ISSUED'")
             self._add_column(db, "w2_positive_v1_permits", "execution_id", "TEXT")
             self._add_column(db, "w2_positive_v1_permits", "audience", "TEXT NOT NULL DEFAULT 'kernel-dispatch'")
+            self._add_column(db, "w2_positive_v1_outbox", "witness_evidence_json", "TEXT")
+            self._add_column(db, "w2_positive_v1_outbox", "witness_hash", "TEXT")
+            self._add_column(db, "w2_positive_v1_outbox", "provider_receipt_json", "TEXT")
+            db.executescript("""
+                DROP TRIGGER IF EXISTS w2_block_historical_after_positive;
+                CREATE TRIGGER w2_block_historical_after_positive
+                BEFORE INSERT ON reservations
+                WHEN EXISTS (
+                  SELECT 1 FROM w2_positive_v1_capacity
+                  WHERE operation_key = NEW.idempotency_key
+                    AND (reservation_id IS NULL OR reservation_id != NEW.reservation_id)
+                )
+                BEGIN
+                  SELECT RAISE(ABORT, 'positive capacity owns this key');
+                END;
+                DROP TRIGGER IF EXISTS w2_block_positive_after_historical;
+                CREATE TRIGGER w2_block_positive_after_historical
+                BEFORE INSERT ON w2_positive_v1_capacity
+                WHEN EXISTS (
+                  SELECT 1 FROM reservations
+                  WHERE idempotency_key = NEW.operation_key
+                )
+                BEGIN
+                  SELECT RAISE(ABORT, 'historical reservation owns this key');
+                END;
+                CREATE TRIGGER IF NOT EXISTS w2_positive_v1_events_no_update
+                BEFORE UPDATE ON w2_positive_v1_events
+                BEGIN
+                  SELECT RAISE(ABORT, 'positive authority events are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS w2_positive_v1_events_no_delete
+                BEFORE DELETE ON w2_positive_v1_events
+                BEGIN
+                  SELECT RAISE(ABORT, 'positive authority events are append-only');
+                END;
+            """)
         self._load_key()
 
     def _tx(self):
@@ -157,7 +204,27 @@ class NativePositivePermitAuthority:
             "scope": "experimental-positive-v1",
         }
 
-    def admit_reserve_issue(self, operation_key: str, evaluation_id: str, payload: dict, amount: int = 100) -> dict:
+    def admit_reserve_issue(
+        self, operation_key: str, evaluation_id: str, payload: dict,
+        amount=None, *, resource_id: str,
+    ) -> dict:
+        """Atomically reserve native I8 capacity and issue its bound positive permit.
+
+        The amount defaults to the canonical payload's ``amount`` field. The I8
+        resource must already exist in SQLiteConsensusBackend.
+        """
+        if amount is None:
+            if not isinstance(payload, dict) or "amount" not in payload:
+                raise RuntimeError("native I8 amount must be explicit or present in payload")
+            amount = payload["amount"]
+        normalized_amount = self.backend._amount(amount)
+        if normalized_amount is None:
+            raise RuntimeError("invalid native I8 amount")
+        if not isinstance(resource_id, str) or not resource_id:
+            raise RuntimeError("native I8 resource_id required")
+        if (isinstance(payload, dict) and payload.get("resource_id") is not None
+                and payload.get("resource_id") != resource_id):
+            raise RuntimeError("payload resource_id does not match native I8 resource")
         request_hash = canon_request_hash(payload)
         issued_at = datetime.now(timezone.utc).isoformat()
         expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
@@ -169,6 +236,30 @@ class NativePositivePermitAuthority:
         signature = self.private_key.sign(_canonical(body))
         try:
             with self._write("positive_admit") as db:
+                existing = db.execute(
+                    "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,)
+                ).fetchone()
+                if existing:
+                    capacity_row = db.execute(
+                        "SELECT amount, reservation_id, resource_id FROM w2_positive_v1_capacity "
+                        "WHERE operation_key=?", (operation_key,),
+                    ).fetchone()
+                    reservation = db.execute(
+                        "SELECT reservation_id, resource_id, amount, state FROM reservations "
+                        "WHERE reservation_id=? AND idempotency_key=?",
+                        (existing["reservation_id"], operation_key),
+                    ).fetchone()
+                    if (existing["request_hash"] != request_hash
+                            or existing["evaluation_id"] != evaluation_id
+                            or not capacity_row or not reservation
+                            or capacity_row["reservation_id"] != reservation["reservation_id"]
+                            or capacity_row["resource_id"] != resource_id
+                            or self.backend._amount(capacity_row["amount"]) != normalized_amount
+                            or reservation["resource_id"] != resource_id
+                            or self.backend._amount(reservation["amount"]) != normalized_amount
+                            or reservation["state"] not in ("RESERVED", "COMMITTED")):
+                        raise RuntimeError("contradictory or incomplete native I8 permit")
+                    return dict(existing)
                 historical = db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('reservations','experimental_native_operations')"
                 ).fetchall()
@@ -187,19 +278,21 @@ class NativePositivePermitAuthority:
                     ).fetchone()
                     if prior:
                         raise RuntimeError("historical native operation exists; positive authority refused")
-                existing = db.execute(
-                    "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,)
-                ).fetchone()
-                if existing:
-                    if existing["request_hash"] != request_hash or existing["evaluation_id"] != evaluation_id:
-                        raise RuntimeError("contradictory permit")
-                    return dict(existing)
                 db.execute(
-                    "INSERT INTO w2_positive_v1_capacity (operation_key, amount) VALUES (?, ?)",
-                    (operation_key, amount),
+                    "INSERT INTO w2_positive_v1_capacity "
+                    "(operation_key, amount, reservation_id, resource_id) VALUES (?, ?, ?, ?)",
+                    (operation_key, str(normalized_amount), reservation_id, resource_id),
                 )
                 if os.environ.get("W2_FAIL_AFTER_CAPACITY") == "1":
                     raise RuntimeError("injected failure after capacity")
+                reservation_result = self.backend._reserve_in_connection(
+                    db, operation_key, normalized_amount, resource_id,
+                    reservation_id=reservation_id, positive_authority_owner=True,
+                )
+                if reservation_result.status != "RESERVED":
+                    raise RuntimeError(
+                        f"native I8 reservation refused: {reservation_result.status}"
+                    )
                 db.execute(
                     """INSERT INTO w2_positive_v1_permits
                        (permit_id, operation_key, evaluation_id, request_hash, reservation_id,
@@ -216,7 +309,9 @@ class NativePositivePermitAuthority:
         except sqlite3.IntegrityError as exc:
             raise RuntimeError("exclusive authority refused") from exc
         return {"permit_id": permit_id, "operation_key": operation_key, "request_hash": request_hash,
-                "reservation_id": reservation_id, "schema": PERMIT_SCHEMA, "execution_authorized_historical": False}
+                "reservation_id": reservation_id, "resource_id": resource_id,
+                "amount": str(normalized_amount), "schema": PERMIT_SCHEMA,
+                "execution_authorized_historical": False}
 
     def consume_and_claim(self, operation_key: str, payload: dict, idempotency_key: str) -> dict:
         request_hash = canon_request_hash(payload)
@@ -225,17 +320,32 @@ class NativePositivePermitAuthority:
         try:
             with self._write("positive_claim") as db:
                 replay = db.execute(
-                    "SELECT execution_id, operation_key, idempotency_key, request_hash, claim_token, status "
+                    "SELECT execution_id, operation_key, idempotency_key, request_hash, claim_token, status, "
+                    "witness_evidence_json, witness_hash, provider_receipt_json "
                     "FROM w2_positive_v1_outbox WHERE operation_key=? OR idempotency_key=?",
                     (operation_key, idempotency_key),
                 ).fetchone()
                 if replay:
                     if replay["operation_key"] != operation_key or replay["idempotency_key"] != idempotency_key or replay["request_hash"] != request_hash:
                         raise RuntimeError("idempotency key conflict")
+                    evidence_json = replay["witness_evidence_json"]
+                    witness_hash = replay["witness_hash"]
+                    if not evidence_json or not witness_hash:
+                        raise RuntimeError("claim witness evidence missing")
+                    evidence = json.loads(evidence_json)
+                    expected_witness_hash = hashlib.sha256(
+                        b"TENIR-W2-CLAIM-WITNESS-v1\0" + _canonical(evidence)
+                    ).hexdigest()
+                    if expected_witness_hash != witness_hash or not self.witness.verify(evidence):
+                        raise RuntimeError("claim witness evidence invalid")
                     return {"operation_key": operation_key, "idempotency_key": idempotency_key,
                             "execution_id": replay["execution_id"], "claim_token": replay["claim_token"],
+                            "token": replay["claim_token"], "nonce": replay["claim_token"],
                             "operation": operation_key, "audience": "kernel-dispatch",
-                            "status": replay["status"], "claimed": True, "replayed": True}
+                            "status": replay["status"], "claimed": True, "replayed": True,
+                            "witness": evidence, "witness_hash": witness_hash,
+                            "receipt": json.loads(replay["provider_receipt_json"])
+                            if replay["provider_receipt_json"] else None}
                 row = db.execute(
                     "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,)
                 ).fetchone()
@@ -262,6 +372,29 @@ class NativePositivePermitAuthority:
                 ).fetchone()
                 if not cap or not cap["reserved"]:
                     raise RuntimeError("no native reservation")
+                witness_subject = f"{operation_key}:{idempotency_key}"
+                witness_fingerprint = hashlib.sha256(
+                    b"TENIR-W2-CLAIM-FINGERPRINT-v1\0" + _canonical({
+                        "operation_key": operation_key,
+                        "idempotency_key": idempotency_key,
+                        "request_hash": request_hash,
+                        "permit_id": row["permit_id"],
+                        "reservation_id": row["reservation_id"],
+                        "audience": row["audience"],
+                    })
+                ).hexdigest()
+                try:
+                    witness_evidence = self.witness.issue(witness_subject, witness_fingerprint)
+                    if not self.witness.verify(witness_evidence):
+                        raise RuntimeError("witness signature or checkpoint invalid")
+                except Exception as exc:
+                    raise RuntimeError("independent witness refused claim") from exc
+                witness_evidence_json = json.dumps(
+                    witness_evidence, sort_keys=True, separators=(",", ":")
+                )
+                witness_hash = hashlib.sha256(
+                    b"TENIR-W2-CLAIM-WITNESS-v1\0" + _canonical(witness_evidence)
+                ).hexdigest()
                 execution_id = f"exec-{uuid.uuid4().hex}"
                 claim_token = secrets.token_urlsafe(32)
                 updated = db.execute(
@@ -275,14 +408,17 @@ class NativePositivePermitAuthority:
                     raise RuntimeError("atomic claim failed")
                 db.execute(
                     "INSERT INTO w2_positive_v1_outbox "
-                    "(execution_id, operation_key, idempotency_key, request_hash, payload_json, claim_token, status, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?)",
-                    (execution_id, operation_key, idempotency_key, request_hash, payload_json, claim_token, now),
+                    "(execution_id, operation_key, idempotency_key, request_hash, payload_json, claim_token, status, created_at, witness_evidence_json, witness_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)",
+                    (execution_id, operation_key, idempotency_key, request_hash, payload_json, claim_token,
+                     now, witness_evidence_json, witness_hash),
                 )
                 db.execute(
                     "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) VALUES (?, ?, ?, ?)",
                     (operation_key, "dispatch_claimed", now, idempotency_key),
                 )
+                if os.environ.get("W2_CRASH_BEFORE_NATIVE_CLAIM_COMMIT") == "1":
+                    os.kill(os.getpid(), __import__("signal").SIGKILL)
         except sqlite3.IntegrityError as exc:
             raise RuntimeError("exclusive authority refused") from exc
         if os.environ.get("W2_CRASH_AFTER_NATIVE_CLAIM") == "1":
@@ -291,14 +427,259 @@ class NativePositivePermitAuthority:
                 "operation": operation_key, "audience": "kernel-dispatch",
                 "execution_id": execution_id, "claim_token": claim_token,
                 "token": claim_token, "nonce": claim_token,
-                "status": "PENDING", "claimed": True}
+                "status": "PENDING", "claimed": True,
+                "witness": witness_evidence, "witness_hash": witness_hash}
+
+    def mark_dispatch_unknown(self, claim: dict) -> str:
+        """Retain a possibly executed dispatch for reconciliation; never clear its key."""
+        if not isinstance(claim, dict):
+            raise RuntimeError("dispatch claim required")
+        execution_id = claim.get("execution_id")
+        token = claim.get("claim_token")
+        if not execution_id or not token:
+            raise RuntimeError("dispatch claim identity missing")
+        with self._write("mark_dispatch_unknown") as db:
+            row = db.execute(
+                "SELECT status, claim_token FROM w2_positive_v1_outbox WHERE execution_id=?",
+                (execution_id,),
+            ).fetchone()
+            if not row or row["claim_token"] != token:
+                raise RuntimeError("dispatch claim does not own outbox row")
+            if row["status"] == "CONFIRMED":
+                return "CONFIRMED"
+            if row["status"] == "UNKNOWN":
+                return "UNKNOWN"
+            if row["status"] != "PENDING":
+                raise RuntimeError("dispatch is not eligible for UNKNOWN")
+            updated = db.execute(
+                "UPDATE w2_positive_v1_outbox SET status='UNKNOWN' "
+                "WHERE execution_id=? AND claim_token=? AND status='PENDING'",
+                (execution_id, token),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("dispatch status race")
+            db.execute(
+                "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) "
+                "VALUES (?, 'dispatch_unknown', ?, ?)",
+                (claim["operation_key"], datetime.now(timezone.utc).isoformat(), execution_id),
+            )
+            return "UNKNOWN"
+
+    def mark_dispatch_review(self, claim: dict, reason: str) -> str:
+        """Durably freeze an ambiguous/contradictory provider result for humans."""
+        if not isinstance(claim, dict) or not claim.get("execution_id"):
+            raise RuntimeError("dispatch claim identity missing")
+        if not isinstance(reason, str) or not reason.strip():
+            raise RuntimeError("manual review reason required")
+        execution_id = claim["execution_id"]
+        token = claim.get("claim_token")
+        with self._write("mark_dispatch_review") as db:
+            row = db.execute(
+                "SELECT operation_key, status, claim_token FROM w2_positive_v1_outbox "
+                "WHERE execution_id=?", (execution_id,),
+            ).fetchone()
+            if not row or row["claim_token"] != token:
+                raise RuntimeError("dispatch claim does not own outbox row")
+            if row["status"] not in ("PENDING", "UNKNOWN", "CONFIRMED"):
+                raise RuntimeError("dispatch cannot enter manual review")
+            if row["status"] == "PENDING":
+                updated = db.execute(
+                    "UPDATE w2_positive_v1_outbox SET status='UNKNOWN' "
+                    "WHERE execution_id=? AND claim_token=? AND status='PENDING'",
+                    (execution_id, token),
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeError("dispatch review status race")
+            prior = db.execute(
+                "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? "
+                "AND event='dispatch_review' LIMIT 1", (row["operation_key"],),
+            ).fetchone()
+            if not prior:
+                detail = json.dumps(
+                    {"execution_id": execution_id, "reason": reason.strip()},
+                    sort_keys=True, separators=(",", ":"),
+                )
+                db.execute(
+                    "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) "
+                    "VALUES (?, 'dispatch_review', ?, ?)",
+                    (row["operation_key"], datetime.now(timezone.utc).isoformat(), detail),
+                )
+            return "CONFIRMED_REVIEW" if row["status"] == "CONFIRMED" else "UNKNOWN"
+
+    def requires_manual_review(self, operation_key: str) -> bool:
+        with self._tx() as db:
+            return db.execute(
+                "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? "
+                "AND event='dispatch_review' LIMIT 1", (operation_key,),
+            ).fetchone() is not None
+
+    def _verify_provider_receipt(self, receipt: dict) -> bool:
+        if not isinstance(receipt, dict) or self.trusted_provider_public_key is None:
+            return False
+        try:
+            if receipt.get("key_id") != self.trusted_provider_key_id:
+                return False
+            signature = base64.b64decode(receipt["provider_signature"], validate=True)
+            unsigned = {key: value for key, value in receipt.items()
+                        if key != "provider_signature"}
+            self.trusted_provider_public_key.verify(signature, _canonical(unsigned))
+            return True
+        except Exception:
+            return False
+
+    def mark_dispatch_confirmed(self, claim: dict, receipt: dict) -> str:
+        """Persist only a receipt matching the exact pending/unknown native claim."""
+        if not isinstance(claim, dict) or not isinstance(receipt, dict):
+            raise RuntimeError("claim and provider receipt required")
+        if not self._verify_provider_receipt(receipt):
+            raise RuntimeError("provider receipt signature invalid")
+        execution_id = claim.get("execution_id")
+        token = claim.get("claim_token")
+        if not execution_id or not token:
+            raise RuntimeError("dispatch claim identity missing")
+        receipt_json = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+        with self._write("mark_dispatch_confirmed") as db:
+            row = db.execute(
+                "SELECT operation_key, idempotency_key, request_hash, claim_token, status, "
+                "provider_receipt_json, witness_evidence_json, witness_hash "
+                "FROM w2_positive_v1_outbox WHERE execution_id=?",
+                (execution_id,),
+            ).fetchone()
+            if not row or row["claim_token"] != token:
+                raise RuntimeError("dispatch claim does not own outbox row")
+            if (claim.get("operation") != row["operation_key"]
+                    or claim.get("operation_key") != row["operation_key"]
+                    or claim.get("idempotency_key") != row["idempotency_key"]
+                    or claim.get("audience") != "kernel-dispatch"):
+                raise RuntimeError("dispatch claim scope mismatch")
+            if (receipt.get("operation_id") != row["operation_key"]
+                    or receipt.get("idempotency_key") != row["idempotency_key"]
+                    or receipt.get("request_hash") != row["request_hash"]
+                    or receipt.get("effect_status") != "EXECUTED"):
+                raise RuntimeError("provider receipt does not match claim")
+            evidence_json = row["witness_evidence_json"]
+            evidence = json.loads(evidence_json) if evidence_json else None
+            if (not evidence or not row["witness_hash"]
+                    or claim.get("witness_hash") != row["witness_hash"]
+                    or claim.get("witness") != evidence
+                    or not self.witness.verify(evidence)):
+                raise RuntimeError("claim witness is invalid")
+            if db.execute(
+                "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? "
+                "AND event='dispatch_review' LIMIT 1", (row["operation_key"],),
+            ).fetchone():
+                raise RuntimeError("manual review latch blocks automatic confirmation")
+            if row["status"] == "CONFIRMED":
+                if row["provider_receipt_json"] != receipt_json:
+                    raise RuntimeError("conflicting confirmed receipt")
+                reservation = db.execute(
+                    "SELECT p.reservation_id, r.state FROM w2_positive_v1_permits p "
+                    "JOIN reservations r ON r.reservation_id=p.reservation_id "
+                    "WHERE p.operation_key=?", (row["operation_key"],),
+                ).fetchone()
+                cap = db.execute(
+                    "SELECT reserved, settled FROM w2_positive_v1_capacity WHERE operation_key=?",
+                    (row["operation_key"],),
+                ).fetchone()
+                if not reservation or reservation["state"] != "COMMITTED" or not cap or cap["settled"] != 1:
+                    raise RuntimeError("confirmed outbox lacks committed native I8 reservation")
+                return "CONFIRMED"
+            if row["status"] not in ("PENDING", "UNKNOWN"):
+                raise RuntimeError("dispatch is not eligible for confirmation")
+            permit = db.execute(
+                "SELECT reservation_id FROM w2_positive_v1_permits WHERE operation_key=?",
+                (row["operation_key"],),
+            ).fetchone()
+            if not permit:
+                raise RuntimeError("native permit missing for I8 settlement")
+            commit_result = self.backend._commit_in_connection(db, permit["reservation_id"])
+            if commit_result.status not in ("COMMITTED", "ALREADY_COMMITTED"):
+                raise RuntimeError(f"native I8 commit refused: {commit_result.status}")
+            settled = db.execute(
+                "UPDATE w2_positive_v1_capacity SET reserved=0, settled=1 "
+                "WHERE operation_key=? AND reservation_id=? AND reserved=1 AND settled=0",
+                (row["operation_key"], permit["reservation_id"]),
+            )
+            if settled.rowcount != 1:
+                raise RuntimeError("positive I8 settlement metadata conflict")
+            updated = db.execute(
+                "UPDATE w2_positive_v1_outbox SET status='CONFIRMED', provider_receipt_json=? "
+                "WHERE execution_id=? AND claim_token=? AND status IN ('PENDING','UNKNOWN')",
+                (receipt_json, execution_id, token),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("dispatch confirmation race")
+            db.execute(
+                "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) "
+                "VALUES (?, 'dispatch_confirmed', ?, ?)",
+                (row["operation_key"], datetime.now(timezone.utc).isoformat(), execution_id),
+            )
+            return "CONFIRMED"
 
     def writers(self) -> list[dict]:
         return [{
             "component": "NativePositivePermitAuthority",
             "database": self.db_path,
-            "tables": ["w2_positive_v1_capacity", "w2_positive_v1_permits", "w2_positive_v1_events"],
+            "tables": [
+                "w2_positive_v1_capacity", "w2_positive_v1_permits",
+                "w2_positive_v1_outbox", "w2_positive_v1_events",
+                "resources", "reservations",
+            ],
+            "i8_backend": "SQLiteConsensusBackend",
+            "i8_reserve_in_transaction": "_reserve_in_connection",
+            "i8_commit_in_transaction": "_commit_in_connection",
+            "witness_database": getattr(self.witness, "db_path", None),
+            "witness_key_custody": getattr(self.witness, "key_custody", "INJECTED"),
             "historical_g4a_modified": False,
             "key_custody": self.key_custody,
             "productive": False,
         }]
+
+    def verify_dispatch_claim(
+        self, operation_key: str, idempotency_key: str, payload: dict, claim
+    ) -> bool:
+        """Verify a presented dispatch claim against native outbox custody."""
+        if not isinstance(claim, dict):
+            return False
+        try:
+            if (claim.get("operation") != operation_key
+                    or claim.get("idempotency_key") != idempotency_key
+                    or claim.get("audience") != "kernel-dispatch"):
+                return False
+            with self._tx() as db:
+                row = db.execute(
+                    "SELECT execution_id, request_hash, claim_token, status, "
+                    "witness_evidence_json, witness_hash FROM w2_positive_v1_outbox "
+                    "WHERE operation_key=? AND idempotency_key=?",
+                    (operation_key, idempotency_key),
+                ).fetchone()
+                review = db.execute(
+                    "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? "
+                    "AND event='dispatch_review' LIMIT 1", (operation_key,),
+                ).fetchone()
+            if review:
+                return False
+            if not row or row["status"] not in ("PENDING", "UNKNOWN"):
+                return False
+            if row["request_hash"] != canon_request_hash(payload):
+                return False
+            token = row["claim_token"]
+            if (claim.get("token") != token or claim.get("nonce") != token
+                    or claim.get("claim_token") != token
+                    or claim.get("execution_id") != row["execution_id"]):
+                return False
+            evidence_json = row["witness_evidence_json"]
+            witness_hash = row["witness_hash"]
+            if not evidence_json or not witness_hash:
+                return False
+            evidence = json.loads(evidence_json)
+            expected_hash = hashlib.sha256(
+                b"TENIR-W2-CLAIM-WITNESS-v1\0" + _canonical(evidence)
+            ).hexdigest()
+            if (expected_hash != witness_hash
+                    or claim.get("witness_hash") != witness_hash
+                    or claim.get("witness") != evidence):
+                return False
+            return bool(self.witness.verify(evidence))
+        except Exception:
+            return False
