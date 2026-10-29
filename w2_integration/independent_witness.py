@@ -28,6 +28,7 @@ class IndependentWitness:
     def __init__(self, db_path: str, *, key_env: str = "TENIR_WITNESS_PRIVATE_KEY_HEX",
                  verifiable_recovery: bool = False):
         self.db_path = os.path.abspath(db_path)
+        self.verifiable_recovery = verifiable_recovery
         secret = os.environ.get(key_env)
         if verifiable_recovery and not secret:
             raise RuntimeError("JW-10 verifiable recovery requires injected witness key")
@@ -46,15 +47,33 @@ class IndependentWitness:
         public = self.private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
         self.key_id = hashlib.sha256(public).hexdigest()
         with self._tx() as db:
+            # JW-10: determine persisted mode before any schema mutation.
+            # The default legacy constructor must never downgrade a store
+            # already pinned for verifiable recovery, even with the SAME key.
+            pin_table = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='witness_custody_pin'"
+            ).fetchone()
+            prior_pin = (db.execute(
+                "SELECT key_id FROM witness_custody_pin WHERE singleton=1"
+            ).fetchone() if pin_table else None)
+            if prior_pin is not None and not verifiable_recovery:
+                raise RuntimeError("JW-10 witness verifiable custody downgrade prohibited")
+            if pin_table and prior_pin is not None and prior_pin["key_id"] != self.key_id:
+                raise RuntimeError("JW-10 witness custody key changed on restart")
+            # Preexisting unsigned/ephemeral witness checkpoints cannot be
+            # silently relabelled as verifiably recoverable on a later boot.
+            existing_checkpoints = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='witness_checkpoints'"
+            ).fetchone()
+            if verifiable_recovery and prior_pin is None and existing_checkpoints:
+                if db.execute("SELECT 1 FROM witness_checkpoints LIMIT 1").fetchone():
+                    raise RuntimeError("JW-10 cannot upgrade legacy witness checkpoints")
             db.execute("CREATE TABLE IF NOT EXISTS witness_custody_pin "
                        "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
                        "key_id TEXT NOT NULL)")
-            pinned = db.execute(
-                "SELECT key_id FROM witness_custody_pin WHERE singleton=1"
-            ).fetchone()
-            if pinned is not None and pinned["key_id"] != self.key_id:
-                raise RuntimeError("JW-10 witness custody key changed on restart")
-            if verifiable_recovery and pinned is None:
+            if verifiable_recovery and prior_pin is None:
                 db.execute("INSERT INTO witness_custody_pin VALUES(1,?)",
                            (self.key_id,))
             db.execute(
@@ -102,6 +121,13 @@ class IndependentWitness:
         if identity is not None and set(identity) != {"execution_id", "claim_token"}:
             raise ValueError("witness identity must bind execution_id and claim_token")
         with self._tx() as db:
+            current_pin=db.execute(
+                "SELECT key_id FROM witness_custody_pin WHERE singleton=1"
+            ).fetchone()
+            if current_pin is not None and (
+                not self.verifiable_recovery or current_pin["key_id"]!=self.key_id
+            ):
+                raise RuntimeError("JW-10 old Witness instance fenced by verifiable custody")
             existing = db.execute(
                 "SELECT revision, record_json, signature FROM witness_checkpoints WHERE subject=?",
                 (subject,),
@@ -158,6 +184,11 @@ class IndependentWitness:
             return False
         db = sqlite3.connect(self.db_path)
         try:
+            pin=db.execute("SELECT key_id FROM witness_custody_pin WHERE singleton=1").fetchone()
+            if pin is not None and (
+                not self.verifiable_recovery or pin[0]!=self.key_id
+            ):
+                return False
             row = db.execute(
                 "SELECT record_json, signature, subject FROM witness_checkpoints WHERE revision=?",
                 (record.get("revision"),),

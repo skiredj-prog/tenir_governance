@@ -51,7 +51,7 @@ def test_integrated_crash_reuses_orphan_witness_identity():
             worker = multiprocessing.get_context("spawn").Process(
                 target=_crash_claim_worker,
                 args=(directory, payload, "W2_CRASH_BEFORE_NATIVE_CLAIM_COMMIT",
-                      "op-precommit-crash", "idem-crash"),
+                      "op-precommit-crash", "idem-crash", True),
             )
             worker.start()
             worker.join(30)
