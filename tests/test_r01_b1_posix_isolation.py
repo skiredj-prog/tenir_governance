@@ -10,7 +10,7 @@ import pytest
 
 WRITER=61021
 AGENT=61022
-ACTOR=Path(__file__).with_name("r01_b1_lab_actor.py")
+ACTOR=Path(os.environ.get("R01_STAGED_ACTOR",str(Path(__file__).with_name("r01_b1_lab_actor.py"))))
 SOURCE_SHA="9d8bf1c462589ac497e3e03ece48d1d9ab0b9db3"
 
 
@@ -25,8 +25,8 @@ def _set_credentials(uid):
 def _run(action, root, uid):
     env=dict(os.environ)
     env.update(TENIR_ENV="test",HOST_SCOPE="single-host")
-    repo=str(Path(__file__).resolve().parent.parent)
-    env["PYTHONPATH"]=os.pathsep.join([repo,env.get("PYTHONPATH","")])
+    repo=os.environ.get("R01_STAGED_SOURCE",str(Path(__file__).resolve().parent.parent))
+    env["PYTHONPATH"]=os.pathsep.join([repo,os.path.join(repo,"w2_integration"),env.get("PYTHONPATH","")])
     p=subprocess.run(
         [sys.executable,str(ACTOR),action,str(root)],
         preexec_fn=_set_credentials(uid), cwd=repo, env=env,
