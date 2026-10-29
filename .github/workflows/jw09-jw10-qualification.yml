@@ -1,0 +1,38 @@
+name: JW-09 JW-10 native witness custody qualification
+on:
+  push:
+    branches: [fix/jw09-jw10-witness-custody-recovery]
+  pull_request:
+    paths:
+      - 'w2_integration/independent_witness.py'
+      - 'w2_integration/native_positive_permit.py'
+      - 'audit_tests/test_jw09_jw10_recovery_custody.py'
+      - 'docs/JW09_JW10_QUALIFICATION_CANDIDATE.md'
+      - '.github/workflows/jw09-jw10-qualification.yml'
+permissions:
+  contents: read
+jobs:
+  scoped-lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: |
+          for attempt in 1 2 3; do
+            if python -m pip install --retries 4 --timeout 60 -e '.[test,ep02]'; then break; fi
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep $((attempt * 5))
+          done
+      - name: Verify pinned baseline parent and syntax
+        run: |
+          git merge-base --is-ancestor c23f9d61c3fa03e81432d766c05fc747b904fa61 HEAD
+          python -m py_compile w2_integration/independent_witness.py w2_integration/native_positive_permit.py audit_tests/test_jw09_jw10_recovery_custody.py
+      - name: JW-09 JW-10 and established JW-08 regression
+        run: |
+          PYTHONPATH=.:w2_integration python -m pytest -q -ra --strict-markers audit_tests/test_jw09_jw10_recovery_custody.py w2_integration/test_native_command_binding.py audit_tests/test_jolt_safety_contract.py

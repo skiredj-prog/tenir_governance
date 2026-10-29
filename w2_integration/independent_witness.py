@@ -25,9 +25,12 @@ def _canonical(value: dict) -> bytes:
 class IndependentWitness:
     """Separate monotone checkpoint authority; laboratory mode is not multi-host."""
 
-    def __init__(self, db_path: str, *, key_env: str = "TENIR_WITNESS_PRIVATE_KEY_HEX"):
+    def __init__(self, db_path: str, *, key_env: str = "TENIR_WITNESS_PRIVATE_KEY_HEX",
+                 verifiable_recovery: bool = False):
         self.db_path = os.path.abspath(db_path)
         secret = os.environ.get(key_env)
+        if verifiable_recovery and not secret:
+            raise RuntimeError("JW-10 verifiable recovery requires injected witness key")
         if secret:
             try:
                 raw = bytes.fromhex(secret)
@@ -43,6 +46,17 @@ class IndependentWitness:
         public = self.private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
         self.key_id = hashlib.sha256(public).hexdigest()
         with self._tx() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS witness_custody_pin "
+                       "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+                       "key_id TEXT NOT NULL)")
+            pinned = db.execute(
+                "SELECT key_id FROM witness_custody_pin WHERE singleton=1"
+            ).fetchone()
+            if pinned is not None and pinned["key_id"] != self.key_id:
+                raise RuntimeError("JW-10 witness custody key changed on restart")
+            if verifiable_recovery and pinned is None:
+                db.execute("INSERT INTO witness_custody_pin VALUES(1,?)",
+                           (self.key_id,))
             db.execute(
                 "CREATE TABLE IF NOT EXISTS witness_checkpoints ("
                 "revision INTEGER PRIMARY KEY, record_json TEXT NOT NULL, "
@@ -95,7 +109,14 @@ class IndependentWitness:
             if existing:
                 record = json.loads(existing["record_json"])
                 if record.get("snapshot_fingerprint") != snapshot_fingerprint:
-                    raise RuntimeError("witness subject already resolved")
+                    raise RuntimeError("JW-09 witness subject already resolved")
+                if identity is not None and (
+                    record.get("execution_id") is None
+                    or record.get("claim_token") is None
+                ):
+                    raise RuntimeError("JW-09 witness checkpoint missing immutable identity")
+                if record.get("key_id") != self.key_id:
+                    raise RuntimeError("JW-10 witness checkpoint custody mismatch")
                 return {"record": record, "signature": bytes(existing["signature"]).hex()}
             previous = db.execute(
                 "SELECT revision, record_json FROM witness_checkpoints ORDER BY revision DESC LIMIT 1"
