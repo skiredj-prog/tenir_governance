@@ -68,7 +68,7 @@ def test_joint_kernel_and_witness_snapshot_restore_is_not_detected_locally(
         "lab:rollback","lab:rollback-idem",payload,claim)
     replay=restarted.consume_and_claim(
         "lab:rollback",payload,"lab:rollback-idem")
-    assert replay["claimed"] and not replay["replayed"]
+    assert replay["claimed"] and not replay.get("replayed", False)
     assert replay["execution_id"]!=claim["execution_id"]
     assert replay["claim_token"]!=claim["claim_token"]
     # No provider execution is attempted in this test.
