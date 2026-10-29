@@ -18,6 +18,7 @@ class KernelClaimProofProvider(ProofProvider):
             raise ValueError("native claim verifier required")
         self.audience = audience
         self._native_claim_verifier = claim_verifier
+        self._verify_native_claim.__func__._native_bound = True
         super().__init__(db_path, claim_verifier=self._verify_native_claim)
 
     def _verify_native_claim(self, operation_id, idempotency_key, payload, claim) -> bool:
