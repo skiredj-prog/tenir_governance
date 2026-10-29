@@ -54,7 +54,7 @@ class Ed25519ConnectorAttestor:
 
     def attest_confirmed(
         self, *, operation_key: str, idempotency_key: str, payload: dict,
-        reconciliation: Any,
+        reconciliation: Any, binding: dict,
     ) -> dict:
         if (not getattr(reconciliation, "resolved", False)
                 or getattr(reconciliation, "outcome", None) != ProviderOutcome.CONFIRMED):
@@ -65,14 +65,26 @@ class Ed25519ConnectorAttestor:
             raise RuntimeError("reconciled provider reference required")
         if not isinstance(evidence, dict):
             raise RuntimeError("reconciled provider evidence object required")
+        if not isinstance(binding, dict):
+            raise RuntimeError("receipt binding required")
+        required = ("execution_id", "reservation_id", "permit_id", "witness_hash", "witness_epoch")
+        if any(not binding.get(name) and binding.get(name) != 0 for name in required):
+            raise RuntimeError("receipt binding incomplete")
+        if not isinstance(binding["witness_epoch"], int) or binding["witness_epoch"] < 1:
+            raise RuntimeError("witness epoch required")
         body = {
-            "attestation_type": "connector-reconciled-provider/v1",
+            "attestation_type": "connector-reconciled-provider/v2",
             "operation_id": operation_key,
             "idempotency_key": idempotency_key,
             "request_hash": canon_request_hash(payload),
             "effect_status": "EXECUTED",
             "provider_reference": provider_reference,
             "evidence_digest": hashlib.sha256(_canonical(evidence)).hexdigest(),
+            "execution_id": binding["execution_id"],
+            "reservation_id": binding["reservation_id"],
+            "permit_id": binding["permit_id"],
+            "witness_hash": binding["witness_hash"],
+            "witness_epoch": binding["witness_epoch"],
             "key_id": self.key_id,
             "issued_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -249,6 +261,7 @@ class NativeClaimedDispatchAdapter:
                 idempotency_key=idempotency_key,
                 payload=payload,
                 reconciliation=reconciliation,
+                binding=self.authority.receipt_context(claim),
             )
             self.authority.mark_dispatch_confirmed(claim, receipt)
         except Exception as exc:

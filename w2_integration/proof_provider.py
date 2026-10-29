@@ -98,7 +98,7 @@ class ProofProvider:
         return self.private_key.sign(self._canonical(body))
 
     def execute(self, operation_id: str, idempotency_key: str, payload: dict,
-                lose_ack: bool = False, *, claim=None):
+                lose_ack: bool = False, *, claim=None, binding=None):
         protected = self.claim_verifier is not None
         if protected:
             try:
@@ -169,6 +169,11 @@ class ProofProvider:
                 "issued_at": datetime.now(timezone.utc).isoformat(),
                 "reason": "executed"
             }
+            if binding is not None:
+                for name in ("execution_id", "reservation_id", "permit_id", "witness_hash", "witness_epoch"):
+                    if name not in binding:
+                        raise RuntimeError("receipt binding incomplete")
+                    body[name] = binding[name]
             sig = self._sign(body)
             body["provider_signature"] = base64.b64encode(sig).decode("ascii")
             self.conn.execute(

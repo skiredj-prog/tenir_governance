@@ -714,7 +714,7 @@ class NativePositivePermitAuthority:
         receipt_json = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
         with self._write("mark_dispatch_confirmed") as db:
             row = db.execute(
-                "SELECT operation_key, idempotency_key, request_hash, claim_token, status, "
+                "SELECT execution_id, operation_key, idempotency_key, request_hash, claim_token, status, "
                 "provider_receipt_json, witness_evidence_json, witness_hash "
                 "FROM w2_positive_v1_outbox WHERE execution_id=?",
                 (execution_id,),
@@ -733,6 +733,18 @@ class NativePositivePermitAuthority:
                 raise RuntimeError("provider receipt does not match claim")
             evidence_json = row["witness_evidence_json"]
             evidence = json.loads(evidence_json) if evidence_json else None
+            permit = db.execute(
+                "SELECT permit_id, reservation_id FROM w2_positive_v1_permits WHERE operation_key=?",
+                (row["operation_key"],),
+            ).fetchone()
+            witness_epoch = evidence.get("record", {}).get("revision") if isinstance(evidence, dict) else None
+            if (not permit
+                    or receipt.get("execution_id") != row["execution_id"]
+                    or receipt.get("reservation_id") != permit["reservation_id"]
+                    or receipt.get("permit_id") != permit["permit_id"]
+                    or receipt.get("witness_hash") != row["witness_hash"]
+                    or receipt.get("witness_epoch") != witness_epoch):
+                raise RuntimeError("provider receipt binding mismatch")
             if (not evidence or not row["witness_hash"]
                     or claim.get("witness_hash") != row["witness_hash"]
                     or claim.get("witness") != evidence
@@ -797,6 +809,37 @@ class NativePositivePermitAuthority:
                 (row["operation_key"], datetime.now(timezone.utc).isoformat(), execution_id),
             )
             return "CONFIRMED"
+
+    def receipt_context(self, claim: dict) -> dict:
+        """Durable identities a connector receipt must sign. Not a send right."""
+        if not isinstance(claim, dict):
+            raise RuntimeError("dispatch claim required")
+        execution_id = claim.get("execution_id")
+        token = claim.get("claim_token")
+        if not execution_id or not token:
+            raise RuntimeError("dispatch claim identity missing")
+        with self._tx() as db:
+            row = db.execute(
+                "SELECT o.execution_id, o.operation_key, o.witness_hash, o.witness_evidence_json, "
+                "p.permit_id, p.reservation_id "
+                "FROM w2_positive_v1_outbox o "
+                "JOIN w2_positive_v1_permits p ON p.operation_key=o.operation_key "
+                "WHERE o.execution_id=? AND o.claim_token=?",
+                (execution_id, token),
+            ).fetchone()
+        if not row or not row["witness_hash"] or not row["witness_evidence_json"]:
+            raise RuntimeError("receipt context unavailable")
+        evidence = json.loads(row["witness_evidence_json"])
+        epoch = evidence.get("record", {}).get("revision")
+        if not isinstance(epoch, int):
+            raise RuntimeError("witness epoch unavailable")
+        return {
+            "execution_id": row["execution_id"],
+            "reservation_id": row["reservation_id"],
+            "permit_id": row["permit_id"],
+            "witness_hash": row["witness_hash"],
+            "witness_epoch": epoch,
+        }
 
     def writers(self) -> list[dict]:
         return [{

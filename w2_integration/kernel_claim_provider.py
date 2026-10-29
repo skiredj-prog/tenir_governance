@@ -37,9 +37,10 @@ class KernelClaimProofProvider(ProofProvider):
         ))
 
     def execute(self, operation_id: str, idempotency_key: str, payload: dict,
-                lose_ack: bool = False, *, claim=None):
+                lose_ack: bool = False, *, claim=None, binding=None):
         return super().execute(
-            operation_id, idempotency_key, payload, lose_ack=lose_ack, claim=claim
+            operation_id, idempotency_key, payload, lose_ack=lose_ack, claim=claim,
+            binding=binding,
         )
 
     def dispatch_authorized(self, authority, operation_id: str, idempotency_key: str,
@@ -58,7 +59,8 @@ class KernelClaimProofProvider(ProofProvider):
                     "replayed": True}
         try:
             receipt = self.execute(
-                operation_id, idempotency_key, payload, lose_ack=lose_ack, claim=claim
+                operation_id, idempotency_key, payload, lose_ack=lose_ack, claim=claim,
+                binding=authority.receipt_context(claim),
             )
         except AckLost:
             status = authority.mark_dispatch_unknown(claim)
