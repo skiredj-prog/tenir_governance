@@ -7,6 +7,7 @@ Branche empilée sur PR #101 → #98, qui conserve les preuves JW-09/JW-10 basé
 
 - Lors de toute initialisation, `IndependentWitness` inspecte sa custody persistée avant les migrations de schéma. Une clé déjà épinglée en mode `verifiable_recovery` interdit toute ouverture `verifiable_recovery=False`, **même avec la même clé injectée**. Le redémarrage avec une clé différente continue d'être refusé.
 - `NativePositivePermitAuthority` examine l'empreinte Kernel persistée **avant** les mutations de schéma ou l'initialisation du Witness. Une custody épinglée ne peut être ouverte en mode legacy, avec ou sans clé.
+- Les instances **legacy déjà ouvertes** avant l'épinglage ne peuvent pas conserver des pouvoirs d'écriture : le Witness vérifie son pin à chaque `issue()` et `verify()`, et chaque écriture Kernel repasse par `_write()` qui contrôle la custody **dans la transaction SQLite**. Les tests adversariaux ouvrent un ancien objet, épinglent la custody via un second objet, puis exigent le refus du premier.
 - Une ancienne base comportant des preuves/checkpoints non qualifiés ne peut être « promue » rétroactivement au mode vérifiable par un simple premier pin. Un pin Kernel présent mais vide exige `HOLD`.
 - Ces vérifications sont **locales**. Un adversaire capable de restaurer les deux bases et leurs marqueurs vers un état antérieur peut encore contourner la mémoire de la custody; l'ancrage indépendant reste nécessaire.
 
