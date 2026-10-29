@@ -40,7 +40,7 @@ def _signed(priv,backend,witness,*,generation=1,subject="lab:checkpoint",topolog
         "schema":SCHEMA,"subject":subject,"topology_id":topology,
         "generation":generation,
         "kernel_sha256":sqlite_logical_fingerprint(backend._database_path),
-        "witness_sha256":sqlite_logical_fingerprint(witness.db_path),
+        "witness_sha256":sqlite_logical_fingerprint(witness.witness.db_path),
     }
     return {"payload":payload,"signature_hex":priv.sign(_canonical(payload)).hex()}
 
