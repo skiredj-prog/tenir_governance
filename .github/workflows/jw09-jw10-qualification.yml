@@ -34,4 +34,4 @@ jobs:
           python -m py_compile w2_integration/independent_witness.py w2_integration/native_positive_permit.py audit_tests/test_jw09_jw10_recovery_custody.py
       - name: JW-09 JW-10 and established JW-08 regression
         run: |
-          python -m pytest -q -ra --strict-markers audit_tests/test_jw09_jw10_recovery_custody.py w2_integration/test_native_command_binding.py audit_tests/test_jolt_safety_contract.py
+          PYTHONPATH=.:w2_integration python -m pytest -q -ra --strict-markers audit_tests/test_jw09_jw10_recovery_custody.py w2_integration/test_native_command_binding.py audit_tests/test_jolt_safety_contract.py
