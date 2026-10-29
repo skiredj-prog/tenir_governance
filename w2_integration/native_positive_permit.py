@@ -169,6 +169,52 @@ class NativePositivePermitAuthority:
         """BEGIN IMMEDIATE … COMMIT, or ROLLBACK if the body raises."""
         return self.backend._transaction(operation)
 
+    def _require_native_i8(self, db, operation_key: str, payload: dict, *, allow_committed: bool = False) -> None:
+        """Refuse a claim or settlement when the durable I8 row no longer matches."""
+        cap = db.execute(
+            "SELECT amount, reserved, settled, reservation_id, resource_id "
+            "FROM w2_positive_v1_capacity WHERE operation_key=?",
+            (operation_key,),
+        ).fetchone()
+        if not cap or not cap["reservation_id"] or not cap["resource_id"]:
+            raise RuntimeError("native I8 reservation missing")
+        reservation = db.execute(
+            "SELECT * FROM reservations WHERE reservation_id=?",
+            (cap["reservation_id"],),
+        ).fetchone()
+        if not reservation:
+            raise RuntimeError("native I8 reservation missing")
+        if reservation["idempotency_key"] != operation_key:
+            raise RuntimeError("native I8 reservation key mismatch")
+        if reservation["resource_id"] != cap["resource_id"]:
+            raise RuntimeError("native I8 resource mismatch")
+        cap_amount = self.backend._amount(cap["amount"])
+        res_amount = self.backend._amount(reservation["amount"])
+        payload_amount = self.backend._amount(payload.get("amount")) if isinstance(payload, dict) else None
+        if cap_amount is None or res_amount is None or cap_amount != res_amount:
+            raise RuntimeError("native I8 amount mismatch")
+        if payload_amount is not None and payload_amount != res_amount:
+            raise RuntimeError("native I8 amount mismatch")
+        if isinstance(payload, dict) and payload.get("resource_id") not in (None, reservation["resource_id"]):
+            raise RuntimeError("native I8 resource mismatch")
+        allowed = ("RESERVED", "COMMITTED") if allow_committed else ("RESERVED",)
+        if reservation["state"] not in allowed:
+            raise RuntimeError("native I8 reservation state invalid")
+        resource = db.execute(
+            "SELECT reserved, committed FROM resources WHERE resource_id=?",
+            (reservation["resource_id"],),
+        ).fetchone()
+        if not resource:
+            raise RuntimeError("native I8 budget missing")
+        if reservation["state"] == "RESERVED":
+            reserved = self.backend._amount(resource["reserved"])
+            if reserved is None or reserved < res_amount or not cap["reserved"] or cap["settled"]:
+                raise RuntimeError("native I8 budget invariant broken")
+        else:
+            committed = self.backend._amount(resource["committed"])
+            if committed is None or committed < res_amount or cap["reserved"] or not cap["settled"]:
+                raise RuntimeError("native I8 budget invariant broken")
+
     def _load_key(self):
         raw_hex = os.environ.get("TENIR_W2_PRIVATE_KEY_HEX")
         if raw_hex:
@@ -335,6 +381,9 @@ class NativePositivePermitAuthority:
                 if replay:
                     if replay["operation_key"] != operation_key or replay["idempotency_key"] != idempotency_key or replay["request_hash"] != request_hash:
                         raise RuntimeError("idempotency key conflict")
+                    self._require_native_i8(
+                        db, operation_key, payload, allow_committed=replay["status"] == "CONFIRMED",
+                    )
                     evidence_json = replay["witness_evidence_json"]
                     witness_hash = replay["witness_hash"]
                     if not evidence_json or not witness_hash:
@@ -379,6 +428,7 @@ class NativePositivePermitAuthority:
                 ).fetchone()
                 if not cap or not cap["reserved"]:
                     raise RuntimeError("no native reservation")
+                self._require_native_i8(db, operation_key, payload, allow_committed=False)
                 witness_subject = f"{operation_key}:{idempotency_key}"
                 witness_fingerprint = hashlib.sha256(
                     b"TENIR-W2-CLAIM-FINGERPRINT-v1\0" + _canonical({
@@ -465,6 +515,7 @@ class NativePositivePermitAuthority:
                 raise RuntimeError("persisted command payload invalid") from exc
             if actual_hash != row["request_hash"] or actual_hash != row["permit_hash"]:
                 raise RuntimeError("persisted command payload hash mismatch")
+            self._require_native_i8(db, row["operation_key"], payload, allow_committed=True)
             return payload
 
     def mark_dispatch_unknown(self, claim: dict) -> str:
@@ -623,6 +674,11 @@ class NativePositivePermitAuthority:
                 return "CONFIRMED"
             if row["status"] not in ("PENDING", "UNKNOWN"):
                 raise RuntimeError("dispatch is not eligible for confirmation")
+            stored_payload = json.loads(db.execute(
+                "SELECT payload_json FROM w2_positive_v1_outbox WHERE execution_id=?",
+                (execution_id,),
+            ).fetchone()["payload_json"])
+            self._require_native_i8(db, row["operation_key"], stored_payload, allow_committed=False)
             permit = db.execute(
                 "SELECT reservation_id FROM w2_positive_v1_permits WHERE operation_key=?",
                 (row["operation_key"],),
@@ -694,12 +750,11 @@ class NativePositivePermitAuthority:
                     "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? "
                     "AND event='dispatch_review' LIMIT 1", (operation_key,),
                 ).fetchone()
-            if review:
-                return False
-            if not row or row["status"] not in ("PENDING", "UNKNOWN"):
-                return False
-            if row["request_hash"] != canon_request_hash(payload):
-                return False
+                if review or not row or row["status"] not in ("PENDING", "UNKNOWN"):
+                    return False
+                if row["request_hash"] != canon_request_hash(payload):
+                    return False
+                self._require_native_i8(db, operation_key, payload, allow_committed=False)
             token = row["claim_token"]
             if (claim.get("token") != token or claim.get("nonce") != token
                     or claim.get("claim_token") != token
