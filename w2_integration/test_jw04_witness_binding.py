@@ -3,6 +3,7 @@ import sqlite3
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from tenir_governance.operations.provider import MockProvider
 from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
@@ -104,11 +105,12 @@ def test_kernel_retry_reuses_the_orphan_witness_resolution(tmp_path, monkeypatch
 
 
 def test_replay_refuses_a_witness_bound_to_another_subject(tmp_path, monkeypatch):
+    import hashlib
+    import json
     backend, authority, _, adapter, command = _system(tmp_path, monkeypatch)
     claim = authority.consume_and_claim(OPERATION, command, IDEMPOTENCY)
     other = authority.witness.issue("other:subject", "other-fingerprint")
-    import json
-    witness_hash = __import__("hashlib").sha256(
+    witness_hash = hashlib.sha256(
         b"TENIR-W2-CLAIM-WITNESS-v1\0"
         + json.dumps(other, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -161,3 +163,39 @@ def test_expired_permit_does_not_receive_a_send_right(tmp_path, monkeypatch):
             "SELECT 1 FROM w2_positive_v1_events WHERE event='dispatch_send_granted'"
         ).fetchone() is None
         assert db.execute("SELECT status FROM w2_positive_v1_outbox").fetchone()[0] == "PENDING"
+
+
+def test_kernel_restore_reuses_the_witness_execution_identity(tmp_path, monkeypatch):
+    backend, authority, _, _, command = _system(tmp_path, monkeypatch)
+    snapshot = sqlite3.connect(str(tmp_path / "kernel-before.sqlite3"))
+    try:
+        with backend._connection() as db:
+            db.backup(snapshot)
+        first = authority.consume_and_claim(OPERATION, command, IDEMPOTENCY)
+        with backend._connection() as db:
+            snapshot.backup(db)
+    finally:
+        snapshot.close()
+    restored = NativePositivePermitAuthority(
+        backend,
+        trusted_provider_public_key=Ed25519PrivateKey.from_private_bytes(
+            bytes(range(96, 128))
+        ).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw),
+    )
+    second = restored.consume_and_claim(OPERATION, command, IDEMPOTENCY)
+    assert second["execution_id"] == first["execution_id"]
+    assert second["claim_token"] == first["claim_token"]
+    assert second["witness"]["record"]["revision"] == first["witness"]["record"]["revision"]
+    assert second["witness"]["signature"] == first["witness"]["signature"]
+    with backend._connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_outbox").fetchone()[0] == 1
+
+
+def test_witness_for_another_subject_does_not_authorize_the_claim(tmp_path, monkeypatch):
+    _, authority, _, _, command = _system(tmp_path, monkeypatch)
+    unrelated = authority.witness.issue("other:subject", "f" * 64)
+    monkeypatch.setattr(authority.witness, "issue", lambda *_args, **_kwargs: unrelated)
+    claim = authority.consume_and_claim(OPERATION, command, IDEMPOTENCY)
+    assert claim["claimed"] is False
+    assert authority.verify_dispatch_claim(OPERATION, IDEMPOTENCY, command, claim) is False
+    assert authority.witness.verify(unrelated, subject=f"{OPERATION}:{IDEMPOTENCY}") is False

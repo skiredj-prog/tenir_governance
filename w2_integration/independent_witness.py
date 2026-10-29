@@ -81,9 +81,12 @@ class IndependentWitness:
         finally:
             db.close()
 
-    def issue(self, subject: str, snapshot_fingerprint: str, *, expected_revision: int | None = None) -> dict:
+    def issue(self, subject: str, snapshot_fingerprint: str, *, expected_revision: int | None = None,
+              identity: dict | None = None) -> dict:
         if not subject or not snapshot_fingerprint:
             raise ValueError("subject and fingerprint are required")
+        if identity is not None and set(identity) != {"execution_id", "claim_token"}:
+            raise ValueError("witness identity must bind execution_id and claim_token")
         with self._tx() as db:
             existing = db.execute(
                 "SELECT revision, record_json, signature FROM witness_checkpoints WHERE subject=?",
@@ -110,6 +113,9 @@ class IndependentWitness:
                 "key_id": self.key_id,
                 "issued_at": datetime.now(timezone.utc).isoformat(),
             }
+            if identity is not None:
+                record["execution_id"] = identity["execution_id"]
+                record["claim_token"] = identity["claim_token"]
             signature = self.private_key.sign(_canonical(record))
             db.execute(
                 "INSERT INTO witness_checkpoints(revision, record_json, signature, subject) "
