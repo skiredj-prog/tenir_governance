@@ -47,6 +47,7 @@ class NativePositivePermitAuthority:
         self.productive = False
         self._accepted_grant_id = None
         self.verifiable_recovery = verifiable_recovery
+        self.external_anchor = None
         self.witness = (
             witness if witness is not None
             else IndependentWitness(self.db_path + ".witness.sqlite3", verifiable_recovery=verifiable_recovery)
@@ -171,6 +172,19 @@ class NativePositivePermitAuthority:
                     raise RuntimeError("JW-10 kernel/witness key changed on restart")
                 if row is None:
                     db.execute("INSERT INTO w2_verifiable_custody VALUES(1,?,?)",expected)
+
+    def local_witness_revision(self, subject: str) -> int:
+        with sqlite3.connect(self.witness.db_path) as db:
+            row = db.execute(
+                "SELECT record_json FROM witness_checkpoints WHERE subject=?",
+                (subject,),
+            ).fetchone()
+        if not row:
+            return 0
+        return int(json.loads(row[0])["revision"])
+
+    def check_anchor(self, anchor, subject: str) -> None:
+        anchor.require_not_behind(subject, self.local_witness_revision(subject))
 
     def _tx(self):
         """Autocommit connection for schema and reads. Not a write transaction."""
@@ -532,6 +546,10 @@ class NativePositivePermitAuthority:
                 )
                 if os.environ.get("W2_CRASH_BEFORE_NATIVE_CLAIM_COMMIT") == "1":
                     os.kill(os.getpid(), __import__("signal").SIGKILL)
+                if self.external_anchor is not None:
+                    self.external_anchor.note(
+                        witness_subject, record["revision"], execution_id, claim_token,
+                    )
         except sqlite3.IntegrityError as exc:
             raise RuntimeError("exclusive authority refused") from exc
         if os.environ.get("W2_CRASH_AFTER_NATIVE_CLAIM") == "1":
