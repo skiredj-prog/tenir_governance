@@ -14,6 +14,7 @@ from w2_integration.native_dispatch_adapter import (
     NativeClaimedDispatchAdapter,
 )
 from w2_integration.native_positive_permit import NativePositivePermitAuthority
+from w2_integration.native_dispatch_command import COMMAND_SCHEMA
 
 
 def _system(tmp_path, *, behavior="confirmed", reconcile=ProviderOutcome.CONFIRMED,
@@ -27,7 +28,9 @@ def _system(tmp_path, *, behavior="confirmed", reconcile=ProviderOutcome.CONFIRM
         trusted_provider_public_key=(attestor.public_key_bytes if anchored else None),
     )
     provider = MockProvider(behavior=behavior, reconcile_outcome=reconcile)
-    payload = {"amount": 7, "resource_id": "lab:budget"}
+    payload = {"schema": COMMAND_SCHEMA, "amount": 7, "resource_id": "lab:budget",
+               "action_type": "payment", "agent_id": "lab-agent",
+               "metadata": {"currency": "EUR", "recipient": "lab-recipient"}}
     authority.admit_reserve_issue(
         "lab:adapter-op", "eval-adapter", payload,
         resource_id="lab:budget",

@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
 from independent_witness import IndependentWitness
 from w2_2b_canonical import request_hash as canon_request_hash
+from w2_integration.native_dispatch_command import COMMAND_SCHEMA, snapshot_command, snapshot_payload
 
 PERMIT_SCHEMA = "w2-positive-permit/v1"
 TOPOLOGY_ID = "lab-s1-native-sqlite-single-host-2026-10-28"
@@ -213,6 +214,9 @@ class NativePositivePermitAuthority:
         The amount defaults to the canonical payload's ``amount`` field. The I8
         resource must already exist in SQLiteConsensusBackend.
         """
+        payload = snapshot_payload(payload)
+        if payload.get("schema") == COMMAND_SCHEMA:
+            payload = snapshot_command(payload)
         if amount is None:
             if not isinstance(payload, dict) or "amount" not in payload:
                 raise RuntimeError("native I8 amount must be explicit or present in payload")
@@ -220,6 +224,9 @@ class NativePositivePermitAuthority:
         normalized_amount = self.backend._amount(amount)
         if normalized_amount is None:
             raise RuntimeError("invalid native I8 amount")
+        if (isinstance(payload, dict) and "amount" in payload
+                and self.backend._amount(payload["amount"]) != normalized_amount):
+            raise RuntimeError("native I8 amount does not match payload amount")
         if not isinstance(resource_id, str) or not resource_id:
             raise RuntimeError("native I8 resource_id required")
         if (isinstance(payload, dict) and payload.get("resource_id") is not None
@@ -429,6 +436,36 @@ class NativePositivePermitAuthority:
                 "token": claim_token, "nonce": claim_token,
                 "status": "PENDING", "claimed": True,
                 "witness": witness_evidence, "witness_hash": witness_hash}
+
+    def load_dispatch_payload(self, claim: dict) -> dict:
+        """Read the committed outbox command for this exact native capability.
+
+        This authenticates the payload, not a right to send repeatedly. Dispatch
+        election, review interleaving and public settlement fencing are separate
+        gates and are not supplied by this read.
+        """
+        if not isinstance(claim, dict):
+            raise RuntimeError("native dispatch claim required")
+        with self._tx() as db:
+            row = db.execute(
+                "SELECT o.payload_json, o.request_hash, o.operation_key, o.idempotency_key, "
+                "p.request_hash AS permit_hash FROM w2_positive_v1_outbox o "
+                "JOIN w2_positive_v1_permits p ON p.operation_key=o.operation_key "
+                "AND p.execution_id=o.execution_id "
+                "WHERE o.execution_id=? AND o.claim_token=?",
+                (claim.get("execution_id"), claim.get("claim_token")),
+            ).fetchone()
+            if (not row or claim.get("operation_key") != row["operation_key"]
+                    or claim.get("idempotency_key") != row["idempotency_key"]):
+                raise RuntimeError("native outbox claim identity mismatch")
+            try:
+                payload = json.loads(row["payload_json"])
+                actual_hash = canon_request_hash(payload)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("persisted command payload invalid") from exc
+            if actual_hash != row["request_hash"] or actual_hash != row["permit_hash"]:
+                raise RuntimeError("persisted command payload hash mismatch")
+            return payload
 
     def mark_dispatch_unknown(self, claim: dict) -> str:
         """Retain a possibly executed dispatch for reconciliation; never clear its key."""
