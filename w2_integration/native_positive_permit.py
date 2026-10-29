@@ -16,6 +16,7 @@ import os
 import sqlite3
 import secrets
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from cryptography.exceptions import InvalidSignature
@@ -208,9 +209,28 @@ class NativePositivePermitAuthority:
         if column not in cols:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
+    @contextmanager
     def _write(self, operation: str):
-        """BEGIN IMMEDIATE … COMMIT, or ROLLBACK if the body raises."""
-        return self.backend._transaction(operation)
+        """BEGIN IMMEDIATE with mandatory JW-10 custody enforcement.
+
+        Also fences objects opened BEFORE a different object pins this store.
+        Caller discipline and opt-in constructor checks alone are inadequate.
+        """
+        with self.backend._transaction(operation) as db:
+            has_pin=db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='w2_verifiable_custody'"
+            ).fetchone()
+            if has_pin:
+                pinned=db.execute(
+                    "SELECT kernel_key_id,witness_key_id "
+                    "FROM w2_verifiable_custody WHERE singleton=1"
+                ).fetchone()
+                if (pinned is None or not self.verifiable_recovery
+                        or pinned["kernel_key_id"]!=self.key_id
+                        or pinned["witness_key_id"]!=self.witness.key_id):
+                    raise RuntimeError("JW-10 previous Kernel instance fenced by custody pin")
+            yield db
 
     def _require_native_i8(self, db, operation_key: str, payload: dict, *, allow_committed: bool = False) -> None:
         """Refuse a claim or settlement when the durable I8 row no longer matches."""
