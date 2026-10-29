@@ -50,10 +50,30 @@ class NativePositiveG4A:
                      schema_id TEXT NOT NULL
                    )"""
             )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS w2_positive_g4a_v1_custody (
+                     key_id TEXT PRIMARY KEY,
+                     public_key_hex TEXT NOT NULL,
+                     noted_at TEXT NOT NULL
+                   )"""
+            )
+            self._require_same_key(db)
+
+    def _require_external_key(self) -> None:
+        if self.authority.key_custody != "EXTERNAL_HEX":
+            raise RuntimeError("positive G4-A grant requires an injected key")
+
+    def _require_same_key(self, db) -> None:
+        row = db.execute(
+            "SELECT key_id FROM w2_positive_g4a_v1_custody LIMIT 1"
+        ).fetchone()
+        if row and row["key_id"] != self.authority.key_id:
+            raise RuntimeError("positive G4-A key changed since grant")
 
     def evaluate_and_grant(
         self, operation_key: str, evaluation_id: str, payload: dict, *, resource_id: str,
     ) -> dict:
+        self._require_external_key()
         command = snapshot_command(payload)
         issued = self.authority.admit_reserve_issue(
             operation_key, evaluation_id, command, resource_id=resource_id,
@@ -86,7 +106,18 @@ class NativePositiveG4A:
             "historical_execution_authorized": False,
         }
         signature = self.authority.private_key.sign(_canonical(body))
+        public_hex = self.public_key_bytes().hex()
         with self.authority._write("positive_g4a_grant") as db:
+            self._require_same_key(db)
+            prior = db.execute(
+                "SELECT key_id FROM w2_positive_g4a_v1_custody LIMIT 1"
+            ).fetchone()
+            if not prior:
+                db.execute(
+                    "INSERT INTO w2_positive_g4a_v1_custody (key_id, public_key_hex, noted_at) "
+                    "VALUES (?, ?, ?)",
+                    (self.authority.key_id, public_hex, issued_at),
+                )
             db.execute(
                 """INSERT INTO w2_positive_g4a_v1_grants
                    (grant_id, operation_key, evaluation_id, permit_id, reservation_id,
