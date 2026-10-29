@@ -450,19 +450,31 @@ class NativePositivePermitAuthority:
                     })
                 ).hexdigest()
                 try:
-                    witness_evidence = self.witness.issue(witness_subject, witness_fingerprint)
+                    proposed_execution = f"exec-{uuid.uuid4().hex}"
+                    proposed_token = secrets.token_urlsafe(32)
+                    witness_evidence = self.witness.issue(
+                        witness_subject, witness_fingerprint,
+                        identity={"execution_id": proposed_execution, "claim_token": proposed_token},
+                    )
                     if not self.witness.verify(witness_evidence, subject=witness_subject):
-                        raise RuntimeError("witness signature or checkpoint invalid")
+                        return {
+                            "operation_key": operation_key, "idempotency_key": idempotency_key,
+                            "operation": operation_key, "audience": "kernel-dispatch",
+                            "execution_id": None, "claim_token": None, "token": None, "nonce": None,
+                            "status": "REFUSED", "claimed": False, "witness": witness_evidence,
+                            "witness_hash": None,
+                        }
                 except Exception as exc:
                     raise RuntimeError("independent witness refused claim") from exc
+                record = witness_evidence["record"]
+                execution_id = record.get("execution_id") or proposed_execution
+                claim_token = record.get("claim_token") or proposed_token
                 witness_evidence_json = json.dumps(
                     witness_evidence, sort_keys=True, separators=(",", ":")
                 )
                 witness_hash = hashlib.sha256(
                     b"TENIR-W2-CLAIM-WITNESS-v1\0" + _canonical(witness_evidence)
                 ).hexdigest()
-                execution_id = f"exec-{uuid.uuid4().hex}"
-                claim_token = secrets.token_urlsafe(32)
                 updated = db.execute(
                     """UPDATE w2_positive_v1_permits
                        SET consumed=1, dispatch_claim=1, idempotency_key=?, payload_json=?,
