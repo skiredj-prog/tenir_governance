@@ -1,0 +1,64 @@
+name: JW-01 to JW-10 exact-head laboratory qualification
+on:
+  push:
+    branches: [audit/jw01-jw10-exact-head-qualification]
+  pull_request:
+    paths:
+      - 'audit_tests/qualify_jw01_jw10.py'
+      - 'audit_tests/test_jw_joint_rollback_limit.py'
+      - '.github/workflows/jw01-jw10-qualify.yml'
+      - 'docs/JW01_JW10_EXACT_HEAD_QUALIFICATION.md'
+permissions:
+  contents: read
+jobs:
+  laboratory-qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies with bounded retries
+        run: |
+          for attempt in 1 2 3; do
+            if python -m pip install --retries 4 --timeout 60 -e '.[test,ep02]'; then break; fi
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep $((attempt * 5))
+          done
+      - name: Reproduce exact-head JW-01 through JW-10 evidence and joint rollback limit
+        run: |
+          python audit_tests/qualify_jw01_jw10.py --output-dir artifacts/jw01-jw10
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+          output=Path('artifacts/jw01-jw10')
+          report=json.loads((output/'qualification-result.json').read_text())
+          topo=json.loads((output/'topology.json').read_text())
+          head=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          assert head==report['source_head_sha']
+          assert report['jw08_baseline_sha']=='c23f9d61c3fa03e81432d766c05fc747b904fa61'
+          assert report['verdict']=='HOLD_NOT_VERIFIED'
+          assert report['normative_verified'] is False
+          assert all(v['status']=='SCOPED_TEST_PASS'
+                     for v in report['jw_evidence'].values())
+          assert report['missing_or_failed_mandatory_tests']==[]
+          assert not topo['external_monotonic_anchor']
+          assert not topo['topology_id_match']
+          assert report['negative_limits'][
+              'test_joint_kernel_and_witness_snapshot_restore_is_not_detected_locally']['pass']
+          print('JW exact-head candidate: SCOPED_TEST_PASS; GLOBAL HOLD (expected)')
+          PY
+      - name: Upload raw qualified scope evidence (not global certification)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jw01-jw10-single-head-scoped-hold-${{ github.run_id }}
+          path: artifacts/jw01-jw10/
+          if-no-files-found: warn
+          retention-days: 30

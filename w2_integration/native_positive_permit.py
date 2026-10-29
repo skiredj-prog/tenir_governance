@@ -37,7 +37,8 @@ def _canonical(obj: dict) -> bytes:
 
 class NativePositivePermitAuthority:
     def __init__(self, backend: SQLiteConsensusBackend, *, witness=None,
-                 trusted_provider_public_key: bytes | None = None):
+                 trusted_provider_public_key: bytes | None = None,
+                 verifiable_recovery: bool = False):
         if not isinstance(backend, SQLiteConsensusBackend):
             raise TypeError("SQLiteConsensusBackend required")
         self.backend = backend
@@ -45,9 +46,10 @@ class NativePositivePermitAuthority:
         self.topology_id = TOPOLOGY_ID
         self.productive = False
         self._accepted_grant_id = None
+        self.verifiable_recovery = verifiable_recovery
         self.witness = (
             witness if witness is not None
-            else IndependentWitness(self.db_path + ".witness.sqlite3")
+            else IndependentWitness(self.db_path + ".witness.sqlite3", verifiable_recovery=verifiable_recovery)
         )
         if trusted_provider_public_key is None:
             self.trusted_provider_public_key = None
@@ -155,6 +157,20 @@ class NativePositivePermitAuthority:
                 END;
             """)
         self._load_key()
+        if verifiable_recovery:
+            if self.key_custody != "EXTERNAL_HEX" or self.witness.key_custody != "EXTERNAL_HEX":
+                raise RuntimeError("JW-10 injected kernel and witness custody required")
+            with self._write("jw10_custody_pin") as db:
+                db.execute("CREATE TABLE IF NOT EXISTS w2_verifiable_custody "
+                           "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+                           "kernel_key_id TEXT NOT NULL, witness_key_id TEXT NOT NULL)")
+                row=db.execute("SELECT kernel_key_id,witness_key_id "
+                               "FROM w2_verifiable_custody WHERE singleton=1").fetchone()
+                expected=(self.key_id,self.witness.key_id)
+                if row is not None and tuple(row)!=expected:
+                    raise RuntimeError("JW-10 kernel/witness key changed on restart")
+                if row is None:
+                    db.execute("INSERT INTO w2_verifiable_custody VALUES(1,?,?)",expected)
 
     def _tx(self):
         """Autocommit connection for schema and reads. Not a write transaction."""
@@ -479,8 +495,15 @@ class NativePositivePermitAuthority:
                 except Exception as exc:
                     raise RuntimeError("independent witness refused claim") from exc
                 record = witness_evidence["record"]
-                execution_id = record.get("execution_id") or proposed_execution
-                claim_token = record.get("claim_token") or proposed_token
+                if (record.get("subject") != witness_subject
+                        or record.get("snapshot_fingerprint") != witness_fingerprint
+                        or not isinstance(record.get("execution_id"), str)
+                        or not record["execution_id"]
+                        or not isinstance(record.get("claim_token"), str)
+                        or not record["claim_token"]):
+                    raise RuntimeError("JW-09 foreign or incomplete witness resolution")
+                execution_id = record["execution_id"]
+                claim_token = record["claim_token"]
                 witness_evidence_json = json.dumps(
                     witness_evidence, sort_keys=True, separators=(",", ":")
                 )
