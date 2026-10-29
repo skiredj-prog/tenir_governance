@@ -88,6 +88,8 @@ MAPPING={
         ("test_jw09_jw10_recovery_custody","test_jw10_kernel_change_rejected_on_restart"),
         ("test_jw09_jw10_recovery_custody","test_jw10_pinned_kernel_cannot_downgrade_with_keys_unchanged"),
         ("test_jw09_jw10_recovery_custody","test_jw10_pinned_witness_cannot_downgrade_with_same_key"),
+        ("test_jw09_jw10_recovery_custody","test_jw10_preopened_legacy_kernel_writer_fenced_inside_transaction"),
+        ("test_jw09_jw10_recovery_custody","test_jw10_preopened_legacy_witness_is_fenced_after_other_instance_pins"),
         ("test_jw_external_anchor_gate","test_trusted_current_anchor_rejects_joint_kernel_witness_rollback"),
         ("test_jw_external_anchor_gate","test_anchor_not_optional_when_invoked_and_reader_outage_holds"),
     ),
