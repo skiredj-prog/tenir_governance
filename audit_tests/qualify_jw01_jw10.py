@@ -34,7 +34,7 @@ COMPONENTS=(
     "w2_integration/native_dispatch_adapter.py",
     "w2_integration/proof_provider.py",
     "w2_integration/native_dispatch_command.py",
-    "w2_2b_canonical.py",
+    "w2_integration/w2_2b_canonical.py",
     "tenir_governance/operations/sqlite_backend.py",
     *TEST_FILES,
     "audit_tests/qualify_jw01_jw10.py",
@@ -152,6 +152,10 @@ def main():
     env=dict(os.environ)
     env["PYTHONPATH"]=os.pathsep.join([str(ROOT),str(ROOT/"w2_integration")])
     run=subprocess.run(command,cwd=ROOT,env=env,capture_output=True,text=True)
+    if run.returncode != 0:
+        print("QUALIFICATION PYTEST FAILED (raw test diagnostics):",flush=True)
+        print(run.stdout[-18000:],flush=True)
+        print(run.stderr[-8000:],file=sys.stderr,flush=True)
     (out/"pytest-raw.txt").write_text(
         "$ "+" ".join(command)+"\n\nSTDOUT\n"+run.stdout+
         "\nSTDERR\n"+run.stderr,encoding="utf-8",
