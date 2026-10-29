@@ -1,6 +1,7 @@
 """Agent C's model-level adversarial oracles. NOT native/production certification."""
 import copy
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from audit_tests.agent_c_anchor_reference import (
     AnchorConflict, Checkpoint, ProducerSideVerifier, ReferenceRemoteAuthority, digest,
 )
@@ -106,3 +107,18 @@ def test_remote_anchor_reset_is_out_of_scope_not_proven_by_reference_model():
     reborn = ReferenceRemoteAuthority()
     reborn.bootstrap(old)
     assert v.assess(old, reborn.observe(S, "fresh-nonce-00001"), "fresh-nonce-00001") == "HOLD_INVALID_OBSERVATION"
+
+
+def test_rollback_of_anchor_and_preserved_signing_key_is_undetectable_in_reference_model():
+    """EXPECTED LIMIT: signatures do not prove recency if the authority itself rolls back."""
+    root = Ed25519PrivateKey.generate()
+    authority = ReferenceRemoteAuthority(root)
+    old = Checkpoint(S, 0, digest("bootstrap"), TOPO)
+    authority.bootstrap(old)
+    verifier = ProducerSideVerifier(authority.public_bytes, S, TOPO)
+    advance(authority, old)
+    restarted = ReferenceRemoteAuthority(root)
+    restarted.bootstrap(old)
+    challenge = "fresh-nonce-00001"
+    assert verifier.assess(old, restarted.observe(S, challenge), challenge) == "MATCHED_REFERENCE_ONLY"
+    # This is an EXPECTED SECURITY LIMIT, not evidence of actual nonrollbackability.
