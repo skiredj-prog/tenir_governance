@@ -46,6 +46,33 @@ class NativePositivePermitAuthority:
         self.topology_id = TOPOLOGY_ID
         self.productive = False
         self.verifiable_recovery = verifiable_recovery
+        # JW-10: check any existing kernel custody pin BEFORE schema writes,
+        # key generation or accepting a caller-provided witness object.
+        with self._tx() as custody_db:
+            exists=custody_db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='w2_verifiable_custody'"
+            ).fetchone()
+            if exists:
+                prior=custody_db.execute(
+                    "SELECT kernel_key_id,witness_key_id FROM w2_verifiable_custody "
+                    "WHERE singleton=1"
+                ).fetchone()
+                if prior is None:
+                    raise RuntimeError("JW-10 kernel custody pin missing: HOLD")
+                if not verifiable_recovery:
+                    raise RuntimeError("JW-10 kernel verifiable custody downgrade prohibited")
+            elif verifiable_recovery:
+                # No retroactive upgrading of preexisting native authority.
+                prior_data=custody_db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name IN ('w2_positive_v1_permits','w2_positive_v1_outbox')"
+                ).fetchall()
+                for item in prior_data:
+                    if custody_db.execute(
+                        'SELECT 1 FROM "'+item["name"]+'" LIMIT 1'
+                    ).fetchone():
+                        raise RuntimeError("JW-10 cannot upgrade legacy kernel claims")
         self.witness = (
             witness if witness is not None
             else IndependentWitness(self.db_path + ".witness.sqlite3", verifiable_recovery=verifiable_recovery)
