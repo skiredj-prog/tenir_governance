@@ -1,0 +1,79 @@
+name: R-01 B1 POSIX writer identity — RED-first negative qualification
+on:
+  push:
+    branches: [audit/r01-b1-posix-uid-isolation]
+  pull_request:
+    paths:
+      - 'tests/test_r01_b1_posix_isolation.py'
+      - 'tests/r01_b1_lab_actor.py'
+      - 'tests/r01_b1_evidence_manifest.py'
+      - 'docs/g4a/R01_B1_POSIX_SEPARATE_UID_EVIDENCE.md'
+      - '.github/workflows/r01-b1-posix-negatives.yml'
+permissions:
+  contents: read
+jobs:
+  disposable-linux-uid-separation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Assert exact G4-A source and no implementation mutations
+        run: |
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}" || test -n "${GITHUB_HEAD_REF}"
+          git merge-base --is-ancestor 9d8bf1c462589ac497e3e03ece48d1d9ab0b9db3 HEAD
+          git diff --exit-code 9d8bf1c462589ac497e3e03ece48d1d9ab0b9db3 -- tenir_governance/ w2_integration/
+          git status --short
+      - name: Install same dependency group as G4-A SUT
+        run: |
+          for attempt in 1 2 3; do
+            if python -m pip install --retries 4 --timeout 60 -e '.[test,ep02]'; then break; fi
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep $((attempt * 5))
+          done
+      - name: Stage byte-identical SUT sources for unprivileged actor imports
+        run: |
+          sudo install -d -o root -g root -m 755 /tmp/r01-audit-source
+          sudo cp -a tenir_governance /tmp/r01-audit-source/
+          sudo install -o root -g root -m 444 tests/r01_b1_lab_actor.py /tmp/r01-audit-source/r01_b1_lab_actor.py
+          sudo chown -R root:root /tmp/r01-audit-source
+          sudo find /tmp/r01-audit-source -type d -exec chmod 755 {} +
+          sudo find /tmp/r01-audit-source -type f -exec chmod 444 {} +
+          cmp tenir_governance/operations/experimental_g4a_settlement.py /tmp/r01-audit-source/tenir_governance/operations/experimental_g4a_settlement.py
+          cmp tenir_governance/operations/sqlite_backend.py /tmp/r01-audit-source/tenir_governance/operations/sqlite_backend.py
+          cmp tests/r01_b1_lab_actor.py /tmp/r01-audit-source/r01_b1_lab_actor.py
+      - name: Root-controlled actors on real separate Linux EUIDs
+        env:
+          TENIR_ENV: test
+          HOST_SCOPE: single-host
+          R01_EVIDENCE_DIR: ${{ github.workspace }}/artifacts/r01
+          R01_STAGED_SOURCE: /tmp/r01-audit-source
+          R01_STAGED_ACTOR: /tmp/r01-audit-source/r01_b1_lab_actor.py
+        run: |
+          mkdir -p artifacts/r01
+          python -m py_compile tests/test_r01_b1_posix_isolation.py tests/r01_b1_lab_actor.py tests/r01_b1_evidence_manifest.py
+          set -o pipefail
+          sudo -E env PATH="$PATH" PYTHONPATH="$PWD" \
+            R01_EVIDENCE_DIR="$R01_EVIDENCE_DIR" \
+            R01_STAGED_SOURCE="$R01_STAGED_SOURCE" \
+            R01_STAGED_ACTOR="$R01_STAGED_ACTOR" \
+            python -m pytest -q -ra -s --strict-markers \
+            --junitxml=artifacts/r01/junit.xml \
+            tests/test_r01_b1_posix_isolation.py 2>&1 | tee artifacts/r01/pytest-raw.txt
+      - name: Verify vector matrix and hash original observations
+        if: always()
+        run: |
+          python tests/r01_b1_evidence_manifest.py --directory artifacts/r01
+      - name: Archive raw Linux denial observations
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r01-b1-uid-separated-raw-${{ github.run_id }}
+          path: artifacts/r01/
+          if-no-files-found: warn
+          retention-days: 30
