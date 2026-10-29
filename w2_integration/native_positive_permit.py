@@ -378,6 +378,10 @@ class NativePositivePermitAuthority:
                     "FROM w2_positive_v1_outbox WHERE operation_key=? OR idempotency_key=?",
                     (operation_key, idempotency_key),
                 ).fetchone()
+                review_latched = db.execute(
+                    "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? "
+                    "AND event='dispatch_review' LIMIT 1", (operation_key,),
+                ).fetchone()
                 if replay:
                     if replay["operation_key"] != operation_key or replay["idempotency_key"] != idempotency_key or replay["request_hash"] != request_hash:
                         raise RuntimeError("idempotency key conflict")
@@ -402,6 +406,8 @@ class NativePositivePermitAuthority:
                             "witness": evidence, "witness_hash": witness_hash,
                             "receipt": json.loads(replay["provider_receipt_json"])
                             if replay["provider_receipt_json"] else None}
+                if review_latched:
+                    raise RuntimeError("manual review precedes send")
                 row = db.execute(
                     "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,)
                 ).fetchone()
@@ -486,6 +492,77 @@ class NativePositivePermitAuthority:
                 "token": claim_token, "nonce": claim_token,
                 "status": "PENDING", "claimed": True,
                 "witness": witness_evidence, "witness_hash": witness_hash}
+
+    def latch_review_before_send(self, operation_key: str, reason: str) -> str:
+        """Freeze an operation before any send right is granted.
+
+        A review that arrives after the right was granted is still recorded,
+        but it cannot erase that grant.
+        """
+        if not isinstance(operation_key, str) or not operation_key:
+            raise RuntimeError("operation required")
+        if not isinstance(reason, str) or not reason.strip():
+            raise RuntimeError("manual review reason required")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._write("latch_review_before_send") as db:
+            granted = db.execute(
+                "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? "
+                "AND event='dispatch_send_granted' LIMIT 1", (operation_key,),
+            ).fetchone()
+            prior = db.execute(
+                "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? "
+                "AND event='dispatch_review' LIMIT 1", (operation_key,),
+            ).fetchone()
+            if not prior:
+                detail = json.dumps(
+                    {"reason": reason.strip(), "before_send": granted is None},
+                    sort_keys=True, separators=(",", ":"),
+                )
+                db.execute(
+                    "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) "
+                    "VALUES (?, 'dispatch_review', ?, ?)",
+                    (operation_key, now, detail),
+                )
+            return "REVIEW_AFTER_GRANT" if granted else "HOLD"
+
+    def grant_send_right(self, claim: dict) -> str:
+        """Give exactly one caller the right to send this claim.
+
+        The decision is the append-only ``dispatch_send_granted`` event, taken
+        in the same transaction that observes a manual-review latch. Replay and
+        crash do not insert a second event and therefore must not send again.
+        """
+        if not isinstance(claim, dict):
+            raise RuntimeError("dispatch claim required")
+        execution_id = claim.get("execution_id")
+        token = claim.get("claim_token")
+        if not execution_id or not token:
+            raise RuntimeError("dispatch claim identity missing")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._write("grant_send_right") as db:
+            row = db.execute(
+                "SELECT operation_key, status, claim_token FROM w2_positive_v1_outbox "
+                "WHERE execution_id=?", (execution_id,),
+            ).fetchone()
+            if not row or row["claim_token"] != token:
+                raise RuntimeError("dispatch claim does not own outbox row")
+            if db.execute(
+                "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? "
+                "AND event='dispatch_review' LIMIT 1", (row["operation_key"],),
+            ).fetchone():
+                return "REVIEW"
+            granted = db.execute(
+                "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? "
+                "AND event='dispatch_send_granted' LIMIT 1", (row["operation_key"],),
+            ).fetchone()
+            if granted or row["status"] != "PENDING":
+                return "ALREADY"
+            db.execute(
+                "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) "
+                "VALUES (?, 'dispatch_send_granted', ?, ?)",
+                (row["operation_key"], now, execution_id),
+            )
+            return "GRANTED"
 
     def load_dispatch_payload(self, claim: dict) -> dict:
         """Read the committed outbox command for this exact native capability.

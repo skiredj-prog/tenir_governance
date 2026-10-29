@@ -111,7 +111,8 @@ class NativeClaimedDispatchAdapter:
 
         Legacy keyword arguments are optional assertions, not argument sources.
         A sparse historical payload requires a newly approved complete command.
-        Pending dispatch election remains a separate qualification gate.
+        The send right is granted once. Replay, crash and a review latched
+        before that grant do not call the provider.
         """
         command = snapshot_command(payload)
         for name, value in (("action_type", action_type), ("amount", amount),
@@ -128,9 +129,17 @@ class NativeClaimedDispatchAdapter:
                     matches = False
             if not matches:
                 raise RuntimeError(f"provider {name} does not match authorized command")
-        claim = self.authority.consume_and_claim(
-            operation_key, command, idempotency_key
-        )
+        if self.authority.requires_manual_review(operation_key):
+            return {"status": "HOLD", "claim": None,
+                    "reason": "manual review precedes send"}
+        try:
+            claim = self.authority.consume_and_claim(
+                operation_key, command, idempotency_key
+            )
+        except RuntimeError as exc:
+            if "manual review precedes send" not in str(exc):
+                raise
+            return {"status": "HOLD", "claim": None, "reason": str(exc)}
         persisted = snapshot_command(self.authority.load_dispatch_payload(claim))
         if canon_request_hash(persisted) != canon_request_hash(command):
             raise RuntimeError("persisted command differs from authorized command")
@@ -150,6 +159,18 @@ class NativeClaimedDispatchAdapter:
                 claim, operation_key, idempotency_key, command,
                 provider_reference=claim.get("provider_reference", ""),
             )
+
+        decision = self.authority.grant_send_right(claim)
+        if decision == "REVIEW":
+            return {"status": "HOLD", "claim": claim,
+                    "reason": "manual review precedes send"}
+        if decision != "GRANTED":
+            try:
+                self.authority.mark_dispatch_unknown(claim)
+            except RuntimeError:
+                pass
+            return {"status": "UNKNOWN", "claim": claim, "replayed": True,
+                    "reason": "send right already granted"}
 
         try:
             result = self.provider.execute(
