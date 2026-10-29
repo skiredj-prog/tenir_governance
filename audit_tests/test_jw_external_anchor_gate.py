@@ -80,6 +80,10 @@ def test_trusted_current_anchor_rejects_joint_kernel_witness_rollback(candidate)
         "lab:anchor-op",payload,"lab:idem")
     assert claim["claimed"]
     reader.current=_signed(signer,backend,native,generation=2)
+    assert reader.current["payload"]["kernel_sha256"]==sqlite_logical_fingerprint(backend._database_path), (
+        "kernel fingerprint changed between signing and immediate checking")
+    assert reader.current["payload"]["witness_sha256"]==sqlite_logical_fingerprint(native.witness.db_path), (
+        "witness fingerprint changed between signing and immediate checking")
     approved=gate.verify_cold_restart(
         subject="lab:checkpoint",kernel_db=backend._database_path,
         witness_db=native.witness.db_path,min_generation=2)
@@ -168,6 +172,8 @@ def test_anchor_subject_topology_and_snapshot_changes_hold(candidate):
 def test_independent_current_anchor_is_cold_restart_only_not_dispatch_permission(candidate):
     _,backend,native,payload,signer,reader,gate=candidate
     reader.current=_signed(signer,backend,native)
+    assert reader.current["payload"]["kernel_sha256"]==sqlite_logical_fingerprint(backend._database_path), "kernel fingerprint drift on stable read"
+    assert reader.current["payload"]["witness_sha256"]==sqlite_logical_fingerprint(native.witness.db_path), "witness fingerprint drift on stable read"
     receipt=gate.verify_cold_restart(
         subject="lab:checkpoint",kernel_db=backend._database_path,
         witness_db=native.witness.db_path)
