@@ -60,6 +60,8 @@ jobs:
           set -o pipefail
           sudo -E env PATH="$PATH" PYTHONPATH="$PWD" \
             R01_EVIDENCE_DIR="$R01_EVIDENCE_DIR" \
+            R01_STAGED_SOURCE="$R01_STAGED_SOURCE" \
+            R01_STAGED_ACTOR="$R01_STAGED_ACTOR" \
             python -m pytest -q -ra -s --strict-markers \
             --junitxml=artifacts/r01/junit.xml \
             tests/test_r01_b1_posix_isolation.py 2>&1 | tee artifacts/r01/pytest-raw.txt
