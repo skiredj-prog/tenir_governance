@@ -1,0 +1,118 @@
+{
+  "compensations": [],
+  "reservations": [
+    {
+      "amount": "7",
+      "committed_at": null,
+      "created_at": 1793250374.7590556,
+      "idempotency_key": "op-jw13-qual",
+      "refunded_at": null,
+      "released_at": null,
+      "reservation_id": "res-op-jw13-qual",
+      "resource_id": "lab:budget",
+      "state": "RESERVED"
+    }
+  ],
+  "resources": [
+    {
+      "capacity": "50",
+      "committed": "0",
+      "reserved": "7",
+      "resource_id": "lab:budget"
+    }
+  ],
+  "sqlite_sequence": [
+    {
+      "name": "w2_positive_v1_events",
+      "seq": 2
+    }
+  ],
+  "w2_positive_g4a_v1_custody": [
+    {
+      "key_id": "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+      "noted_at": "2026-10-29T05:06:14.760803+00:00",
+      "public_key_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
+    }
+  ],
+  "w2_positive_g4a_v1_grants": [
+    {
+      "amount": "7",
+      "consumed": 1,
+      "evaluation_id": "eval-jw13",
+      "expires_at": "2026-10-29T05:11:14.758093+00:00",
+      "grant_id": "grant-826d026672e1412fa5a57c38896362ef",
+      "issued_at": "2026-10-29T05:06:14.760803+00:00",
+      "key_id": "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+      "operation_key": "op-jw13-qual",
+      "permit_id": "permit-op-jw13-qual",
+      "request_hash": "359fd6db8ffe97a11b06583deee3c036c542fb52476cb10ddb91556df5b40991",
+      "reservation_id": "res-op-jw13-qual",
+      "resource_id": "lab:budget",
+      "schema_id": "native-positive-g4a-grant/v1",
+      "signature": "b'\\r\\xea\\xdf\\xd9\\xc7\\x14\\xecI\"\\xdb\\x8b\\xa9\\x91\\xe5U\\xdd\\x1f\\xda\\xd0\\x82\\xc0,\\xf2`T\\x9b%\\xc7\\xba2h;\\xc5mp\\xfb7V\\xdc\\x96\\xfc]\\x1a\\xd1\\xef%\\xc0\\xed GB\\x81\\xbb\\xf2\\xe8\\x14\\x93\\xe7\\xcf\\xab@\\x15E\\t'"
+    }
+  ],
+  "w2_positive_v1_capacity": [
+    {
+      "amount": 7,
+      "operation_key": "op-jw13-qual",
+      "reservation_id": "res-op-jw13-qual",
+      "reserved": 1,
+      "resource_id": "lab:budget",
+      "settled": 0
+    }
+  ],
+  "w2_positive_v1_events": [
+    {
+      "at": "2026-10-29T05:06:14.758079+00:00",
+      "detail": "res-op-jw13-qual",
+      "event": "permit_issued_after_reservation",
+      "id": 1,
+      "operation_key": "op-jw13-qual"
+    },
+    {
+      "at": "2026-10-29T05:06:14.763766+00:00",
+      "detail": "idem-jw13",
+      "event": "dispatch_claimed",
+      "id": 2,
+      "operation_key": "op-jw13-qual"
+    }
+  ],
+  "w2_positive_v1_outbox": [
+    {
+      "claim_token": "mnJPl2YC0CnAkgKECAlO2rmoFaYD4n0jgbcXJzuUU7g",
+      "created_at": "2026-10-29T05:06:14.763766+00:00",
+      "execution_id": "exec-b936edd3698e43488b1ede62244b7363",
+      "idempotency_key": "idem-jw13",
+      "operation_key": "op-jw13-qual",
+      "payload_json": "{\"action_type\":\"payment\",\"agent_id\":\"lab-agent\",\"amount\":7,\"metadata\":{\"recipient\":\"recipient-1\"},\"resource_id\":\"lab:budget\",\"schema\":\"tenir-dispatch-command/v1\"}",
+      "provider_receipt_json": null,
+      "request_hash": "359fd6db8ffe97a11b06583deee3c036c542fb52476cb10ddb91556df5b40991",
+      "status": "PENDING",
+      "witness_evidence_json": "{\"record\":{\"claim_token\":\"mnJPl2YC0CnAkgKECAlO2rmoFaYD4n0jgbcXJzuUU7g\",\"execution_id\":\"exec-b936edd3698e43488b1ede62244b7363\",\"issued_at\":\"2026-10-29T05:06:14.764432+00:00\",\"key_id\":\"24f6ed6acbfe1009c030d7ca567c33ca4830911498236b5561a6c82abec5de28\",\"previous_fingerprint\":null,\"revision\":1,\"schema\":\"tenir-independent-witness/v1\",\"snapshot_fingerprint\":\"8ac90c082ac1cccaf1d75760ac86fcea24aa6bb7d58f99c053ae7067c9493cc7\",\"subject\":\"op-jw13-qual:idem-jw13\"},\"signature\":\"07825d4e029a7f5421e9525a58a155d472a15d4bc74138acfa857ed33affa899f888d7af49925a675458fe0a3600caf418de2dfef517a8f9f711de3b43cc8901\"}",
+      "witness_hash": "3e9cef1dbc118c0089f961c9b54109fcdea86c19b70f17e0d2c05b3bbb4211a7"
+    }
+  ],
+  "w2_positive_v1_permits": [
+    {
+      "audience": "kernel-dispatch",
+      "consumed": 1,
+      "dispatch_claim": 1,
+      "evaluation_id": "eval-jw13",
+      "execution_id": "exec-b936edd3698e43488b1ede62244b7363",
+      "expires_at": "2026-10-29T05:11:14.758093+00:00",
+      "idempotency_key": "idem-jw13",
+      "issued_at": "2026-10-29T05:06:14.758079+00:00",
+      "key_id": "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+      "nonce_hash": "b0d47e9e8b4a460df864a4ee4cf17c896d9c1544175ebb4559b37259c5115952",
+      "nonce_status": "CONSUMED",
+      "operation_key": "op-jw13-qual",
+      "payload_json": "{\"action_type\":\"payment\",\"agent_id\":\"lab-agent\",\"amount\":7,\"metadata\":{\"recipient\":\"recipient-1\"},\"resource_id\":\"lab:budget\",\"schema\":\"tenir-dispatch-command/v1\"}",
+      "permit_id": "permit-op-jw13-qual",
+      "request_hash": "359fd6db8ffe97a11b06583deee3c036c542fb52476cb10ddb91556df5b40991",
+      "reservation_id": "res-op-jw13-qual",
+      "schema_id": "w2-positive-permit/v1",
+      "signature": "b'\\xc9\\x15\\x0e\\xe2\\x85\\x8a+\\xf2o\\xcdM\"\\x9ad\\xb1\\x88\\xb7A\\x89U\\xa3B\\xd4\\xa1jP\\xaeLJ\\xd4Q\\xb9S\\xea\\x19\\xfa\\xb2-L0\\x052\"K8\\x16n\\xb6+\\x1f{\\xb3d\\x1dGx7-\\xfeC\\x9do\\xe1\\x0f'"
+    }
+  ]
+}

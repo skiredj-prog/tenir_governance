@@ -1,0 +1,20 @@
+{
+  "audit_corpus_canonical_command": "VERIFIED",
+  "caller_supplied_verifier_refused": "VERIFIED",
+  "connector_attestation_not_provider_receipt": "VERIFIED",
+  "e2e": "HOLD",
+  "ephemeral_key_refused": "VERIFIED",
+  "grant_to_b3_same_request_hash": "VERIFIED",
+  "historical_g4a_receipt_not_a_grant": "VERIFIED",
+  "historical_g4a_wired": "OPEN",
+  "independent_custody": "OPEN",
+  "inherited_claim_refused_after_grant": "VERIFIED",
+  "integration_lock": "HOLD",
+  "missing_expired_divergent_grant_no_effect": "VERIFIED",
+  "posix_sigkill_claim_replay": "VERIFIED",
+  "production": "HOLD",
+  "real_provider_authenticity": "OPEN",
+  "same_uid_sql_write": "OPEN",
+  "spawn_public_mutator": "VERIFIED",
+  "witness_kernel_atomicity": "OPEN"
+}

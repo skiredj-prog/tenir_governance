@@ -1,0 +1,52 @@
+{
+  "authorities": [
+    {
+      "name": "NativePositiveG4A",
+      "role": "positive grant",
+      "schema": "native-positive-g4a-grant/v1"
+    },
+    {
+      "name": "NativePositivePermitAuthority",
+      "role": "I8 reservation and permit"
+    },
+    {
+      "execution_authorized": false,
+      "name": "ExperimentalG4AAuthority",
+      "role": "historical",
+      "wired": false
+    }
+  ],
+  "branch": "fix/jw12-close-open",
+  "campaign": "CAMP-2026-10-29-JW13-QUAL",
+  "classification": [
+    "RECONSTRUCTED",
+    "LAB_ONLY",
+    "NON_CERTIFYING"
+  ],
+  "command": "PYTHONPATH=w2_integration:. python3 w2_integration/export_jw13_ceb01.py",
+  "evaluation_id": "eval-jw13",
+  "generated_at": "2026-10-29T05:06:14.774761+00:00",
+  "grant_schema": "native-positive-g4a-grant/v1",
+  "historical_execution_authorized": false,
+  "idempotency_key": "idem-jw13",
+  "keys": {
+    "authority": "TENIR_W2_PRIVATE_KEY_HEX injected, not stored",
+    "provider": "TENIR_B3_PRIVATE_KEY_HEX injected, not stored",
+    "witness": "TENIR_WITNESS_PRIVATE_KEY_HEX injected, not stored"
+  },
+  "operation_id": "op-jw13-qual",
+  "private_keys_included": false,
+  "request_hash": "359fd6db8ffe97a11b06583deee3c036c542fb52476cb10ddb91556df5b40991",
+  "runtime": {
+    "platform": "linux-x86_64",
+    "python": "Python 3.10.22",
+    "sqlite": "3.40.1"
+  },
+  "subject_sha": "f5e021bca4e3b0ca281527938a013e6d2cd6c58c",
+  "topology_id": "lab-s1-native-sqlite-single-host-2026-10-28",
+  "writers": [
+    "NativePositivePermitAuthority on consensus.sqlite3",
+    "IndependentWitness on consensus.sqlite3.witness.sqlite3",
+    "KernelClaimProofProvider on provider.db"
+  ]
+}
