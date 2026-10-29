@@ -136,6 +136,9 @@ class NativePositiveG4A:
     ) -> dict:
         command = snapshot_command(payload)
         self._require_grant(operation_key, command, grant)
+        from kernel_claim_provider import KernelClaimProofProvider
+        if not isinstance(provider, KernelClaimProofProvider):
+            raise RuntimeError("positive dispatch requires the native claim provider")
         self.authority._accepted_grant_id = grant["grant_id"]
         try:
             claim = self.authority.consume_and_claim(operation_key, command, idempotency_key)
@@ -154,6 +157,8 @@ class NativePositiveG4A:
         receipt = provider.execute(
             operation_key, idempotency_key, command, claim=claim,
         )
+        if receipt.get("attestation_type") or receipt.get("schema") != "proof-provider-receipt/candidate-v0.1":
+            raise RuntimeError("connector attestation is not a provider receipt")
         if receipt.get("request_hash") != grant["request_hash"]:
             raise RuntimeError("B3 receipt request_hash diverges from grant")
         return {
@@ -166,6 +171,10 @@ class NativePositiveG4A:
     def _require_grant(self, operation_key: str, command: dict, grant: dict) -> None:
         if not isinstance(grant, dict) or not grant.get("grant_id"):
             raise RuntimeError("positive G4-A grant required")
+        if grant.get("simulated") or grant.get("decision") == "HOLD":
+            raise RuntimeError("historical G4-A receipt is not a positive grant")
+        if grant.get("execution_authorized") is True:
+            raise RuntimeError("historical execution flag cannot authorize dispatch")
         expected = canon_request_hash(command)
         if grant.get("request_hash") != expected or grant.get("operation_key") != operation_key:
             raise RuntimeError("grant does not match request")

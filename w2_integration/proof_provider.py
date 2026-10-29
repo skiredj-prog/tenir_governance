@@ -100,6 +100,11 @@ class ProofProvider:
     def execute(self, operation_id: str, idempotency_key: str, payload: dict,
                 lose_ack: bool = False, *, claim=None, binding=None):
         protected = self.claim_verifier is not None
+        native = getattr(self.claim_verifier, "_native_bound", False) or getattr(
+            getattr(self.claim_verifier, "__func__", None), "_native_bound", False
+        )
+        if protected and not native:
+            raise RuntimeError("caller-supplied claim verifier refused")
         if protected:
             try:
                 valid_claim = self.claim_verifier(
