@@ -1,0 +1,31 @@
+name: Agent C reference anchor contract (non-certifying)
+
+on:
+  pull_request:
+    paths:
+      - "audit_tests/agent_c_anchor_reference.py"
+      - "audit_tests/test_agent_c_anchor_reference.py"
+      - "docs/AGENT_C_B2_MONOTONE_EXTERNAL_20261029.md"
+      - ".github/workflows/agent-c-anchor-reference.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reference-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install reference-only dependencies
+        run: python -m pip install "pytest>=8,<10" "cryptography>=42,<47"
+      - name: Run Agent C reference-contract tests (NOT native conformance)
+        run: python -m pytest -q audit_tests/test_agent_c_anchor_reference.py
+      - name: Explicit qualification boundary
+        run: |
+          echo "AGENT_C_REFERENCE_ONLY_PASS != B2_CUSTODY_VERIFIED"
+          echo "AGENT_C_REFERENCE_ONLY_PASS != EXTERNAL_MONOTONE_VERIFIED"
+          echo "INTEGRATION_LOCK_HOLD / E2E_HOLD / PRODUCTION_HOLD"
