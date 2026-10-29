@@ -313,8 +313,29 @@ class SQLiteConsensusBackend:
         )
         return ReservationResult("RESERVED", reservation_id, normalized)
 
+    def _positive_authority_owns(self, connection, *, reservation_id=None, idempotency_key=None) -> bool:
+        """True when this I8 row is bound to the native positive permit path."""
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='w2_positive_v1_capacity'"
+        ).fetchone()
+        if not table:
+            return False
+        if reservation_id is not None and connection.execute(
+            "SELECT 1 FROM w2_positive_v1_capacity WHERE reservation_id=?",
+            (reservation_id,),
+        ).fetchone():
+            return True
+        if idempotency_key is not None and connection.execute(
+            "SELECT 1 FROM w2_positive_v1_capacity WHERE operation_key=?",
+            (idempotency_key,),
+        ).fetchone():
+            return True
+        return False
+
     def commit(self, reservation_id: str) -> CommitResult:
         with self._transaction("commit") as connection:
+            if self._positive_authority_owns(connection, reservation_id=reservation_id):
+                return CommitResult("POSITIVE_AUTHORITY_OWNS_RESERVATION")
             return self._commit_in_connection(connection, reservation_id)
 
     def _commit_in_connection(
@@ -352,6 +373,8 @@ class SQLiteConsensusBackend:
 
     def release(self, reservation_id: str) -> ReleaseResult:
         with self._transaction("release") as connection:
+            if self._positive_authority_owns(connection, reservation_id=reservation_id):
+                return ReleaseResult("POSITIVE_AUTHORITY_OWNS_RESERVATION")
             record = connection.execute(
                 "SELECT * FROM reservations WHERE reservation_id = ?", (reservation_id,),
             ).fetchone()
@@ -381,6 +404,8 @@ class SQLiteConsensusBackend:
 
     def refund(self, reservation_id: str) -> RefundResult:
         with self._transaction("refund") as connection:
+            if self._positive_authority_owns(connection, reservation_id=reservation_id):
+                return RefundResult("POSITIVE_AUTHORITY_OWNS_RESERVATION")
             record = connection.execute(
                 "SELECT * FROM reservations WHERE reservation_id = ?", (reservation_id,),
             ).fetchone()
@@ -408,6 +433,8 @@ class SQLiteConsensusBackend:
 
     def reconcile(self, key: str) -> ReconciliationResult:
         with self._connection() as connection:
+            if self._positive_authority_owns(connection, idempotency_key=key):
+                return ReconciliationResult("POSITIVE_AUTHORITY_OWNS_RESERVATION")
             record = connection.execute(
                 "SELECT * FROM reservations WHERE idempotency_key = ?", (key,),
             ).fetchone()
