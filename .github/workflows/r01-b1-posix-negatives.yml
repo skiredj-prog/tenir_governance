@@ -36,11 +36,24 @@ jobs:
             if [ "$attempt" -eq 3 ]; then exit 1; fi
             sleep $((attempt * 5))
           done
+      - name: Stage byte-identical SUT sources for unprivileged actor imports
+        run: |
+          sudo install -d -o root -g root -m 755 /tmp/r01-audit-source
+          sudo cp -a tenir_governance w2_integration /tmp/r01-audit-source/
+          sudo install -o root -g root -m 444 tests/r01_b1_lab_actor.py /tmp/r01-audit-source/r01_b1_lab_actor.py
+          sudo chown -R root:root /tmp/r01-audit-source
+          sudo find /tmp/r01-audit-source -type d -exec chmod 755 {} +
+          sudo find /tmp/r01-audit-source -type f -exec chmod 444 {} +
+          cmp tenir_governance/operations/experimental_g4a_settlement.py /tmp/r01-audit-source/tenir_governance/operations/experimental_g4a_settlement.py
+          cmp tenir_governance/operations/sqlite_backend.py /tmp/r01-audit-source/tenir_governance/operations/sqlite_backend.py
+          cmp tests/r01_b1_lab_actor.py /tmp/r01-audit-source/r01_b1_lab_actor.py
       - name: Root-controlled actors on real separate Linux EUIDs
         env:
           TENIR_ENV: test
           HOST_SCOPE: single-host
           R01_EVIDENCE_DIR: ${{ github.workspace }}/artifacts/r01
+          R01_STAGED_SOURCE: /tmp/r01-audit-source
+          R01_STAGED_ACTOR: /tmp/r01-audit-source/r01_b1_lab_actor.py
         run: |
           mkdir -p artifacts/r01
           python -m py_compile tests/test_r01_b1_posix_isolation.py tests/r01_b1_lab_actor.py tests/r01_b1_evidence_manifest.py
