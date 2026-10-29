@@ -12,6 +12,7 @@ budget based on an unverified failure.
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -22,6 +23,10 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from tenir_governance.operations.provider import ProviderOutcome
 from w2_2b_canonical import request_hash as canon_request_hash
+from w2_integration.native_dispatch_command import snapshot_command
+
+
+_UNSET = object()
 
 
 def _canonical(value: dict) -> bytes:
@@ -79,7 +84,8 @@ class NativeClaimedDispatchAdapter:
     """Separate, explicit adapter; never changes the historical Governor path."""
 
     def __init__(self, authority, provider, attestor: Ed25519ConnectorAttestor):
-        if not callable(getattr(authority, "consume_and_claim", None)):
+        if (not callable(getattr(authority, "consume_and_claim", None))
+                or not callable(getattr(authority, "load_dispatch_payload", None))):
             raise TypeError("native claim authority required")
         if not callable(getattr(provider, "execute", None)) or not callable(
             getattr(provider, "reconcile", None)
@@ -95,18 +101,40 @@ class NativeClaimedDispatchAdapter:
 
     def dispatch(
         self, operation_key: str, idempotency_key: str, payload: dict, *,
-        action_type: str, amount: float, agent_id: str,
-        metadata: dict | None = None,
+        action_type=_UNSET, amount=_UNSET, agent_id=_UNSET, metadata=_UNSET,
     ) -> dict:
-        """Execute once, then require provider-side reconciliation to confirm.
+        """Derive the provider arguments exclusively from the durable command.
 
         Replayed UNKNOWN claims are reconciled only; they never call execute()
         again. FAILED or conflicting outcomes receive a durable review marker
         and retain the I8 reservation for human resolution.
+
+        Legacy keyword arguments are optional assertions, not argument sources.
+        A sparse historical payload requires a newly approved complete command.
+        Pending dispatch election remains a separate qualification gate.
         """
+        command = snapshot_command(payload)
+        for name, value in (("action_type", action_type), ("amount", amount),
+                            ("agent_id", agent_id), ("metadata", metadata)):
+            if value is _UNSET:
+                continue
+            expected = command[name]
+            if name == "amount":
+                matches = type(value) in (int, float) and value == expected
+            else:
+                try:
+                    matches = canon_request_hash({name: value}) == canon_request_hash({name: expected})
+                except (TypeError, ValueError):
+                    matches = False
+            if not matches:
+                raise RuntimeError(f"provider {name} does not match authorized command")
         claim = self.authority.consume_and_claim(
-            operation_key, payload, idempotency_key
+            operation_key, command, idempotency_key
         )
+        persisted = snapshot_command(self.authority.load_dispatch_payload(claim))
+        if canon_request_hash(persisted) != canon_request_hash(command):
+            raise RuntimeError("persisted command differs from authorized command")
+        command = persisted
         if self.authority.requires_manual_review(operation_key):
             return {"status": "HOLD", "claim": claim,
                     "reason": "durable provider conflict requires human review"}
@@ -119,17 +147,17 @@ class NativeClaimedDispatchAdapter:
 
         if claim.get("status") == "UNKNOWN":
             return self._reconcile_and_settle(
-                claim, operation_key, idempotency_key, payload,
+                claim, operation_key, idempotency_key, command,
                 provider_reference=claim.get("provider_reference", ""),
             )
 
         try:
             result = self.provider.execute(
                 idempotency_key=idempotency_key,
-                action_type=action_type,
-                amount=amount,
-                agent_id=agent_id,
-                metadata=payload if metadata is None else metadata,
+                action_type=command["action_type"],
+                amount=command["amount"],
+                agent_id=command["agent_id"],
+                metadata=deepcopy(command["metadata"]),
             )
         except Exception as exc:
             self.authority.mark_dispatch_unknown(claim)
@@ -149,7 +177,7 @@ class NativeClaimedDispatchAdapter:
                     "reason": "provider outcome is pending or ambiguous"}
 
         return self._reconcile_and_settle(
-            claim, operation_key, idempotency_key, payload,
+            claim, operation_key, idempotency_key, command,
             provider_reference=getattr(result, "provider_reference", ""),
             initial_outcome=outcome,
         )

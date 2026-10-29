@@ -1,0 +1,65 @@
+name: JW-01 canonical provider command
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/jw01-canonical-provider-command]
+  pull_request:
+    paths:
+      - w2_integration/native_dispatch_command.py
+      - w2_integration/native_dispatch_adapter.py
+      - w2_integration/native_positive_permit.py
+      - w2_integration/test_native_command_binding.py
+      - w2_integration/test_native_dispatch_adapter.py
+      - .github/workflows/jw01-command-binding.yml
+
+permissions:
+  contents: read
+
+jobs:
+  command-binding:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            path_separator: ':'
+          - os: windows-latest
+            path_separator: ';'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      TENIR_ENV: test
+      HOST_SCOPE: single-host
+      PYTHONPATH: ${{ github.workspace }}${{ matrix.path_separator }}${{ github.workspace }}/w2_integration
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Record source and install test dependencies
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/checkout-sha.txt
+          python -m pip install -e '.[test,ep02]'
+          python -m pip check
+          python -m pip freeze > evidence/environment.txt
+      - name: Command acceptance and related regressions
+        run: |
+          set -euo pipefail
+          python -m pytest w2_integration/test_native_command_binding.py w2_integration/test_native_dispatch_adapter.py tests/test_p0_sqlite_atomicity.py tests/test_p0_budget_validation.py tests/test_provider.py --junitxml=evidence/jw01.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jw01-${{ matrix.os }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: evidence/
