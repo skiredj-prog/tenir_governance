@@ -76,3 +76,69 @@ def test_jw09_legacy_checkpoint_without_binding_not_upgraded(tmp_path,monkeypatc
     assert w.verify(old,subject="op:idem")
     with pytest.raises(RuntimeError,match="missing immutable identity"):
         w.issue("op:idem","ab"*32,identity={"execution_id":"ex","claim_token":"tok"})
+
+
+def _crash_between_witness_and_kernel_commit(directory):
+    # Separate OS process: independent Witness COMMIT, then kernel kill.
+    import os
+    from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
+    from w2_integration.native_positive_permit import NativePositivePermitAuthority
+    backend=SQLiteConsensusBackend(directory)
+    authority=NativePositivePermitAuthority(backend,verifiable_recovery=True)
+    backend._before_commit=lambda op: os._exit(86) if op=="positive_claim" else None
+    command={
+        "schema":"tenir-dispatch-command/v1",
+        "resource_id":"lab:budget","amount":7,"action_type":"payment",
+        "agent_id":"lab-agent","metadata":{"recipient":"lab-1"},
+    }
+    authority.consume_and_claim("lab:jw09","lab:jw09-idem",command)
+    os._exit(99)
+
+
+def test_jw09_real_process_crash_leaves_one_witness_and_zero_kernel_outbox(
+        tmp_path,monkeypatch):
+    import multiprocessing
+    _keys(monkeypatch)
+    directory=str(tmp_path/"native")
+    backend=SQLiteConsensusBackend(directory)
+    assert backend.register_resource("lab:budget",20)=="REGISTERED"
+    authority=NativePositivePermitAuthority(backend,verifiable_recovery=True)
+    payload={
+        "schema":"tenir-dispatch-command/v1",
+        "resource_id":"lab:budget","amount":7,"action_type":"payment",
+        "agent_id":"lab-agent","metadata":{"recipient":"lab-1"},
+    }
+    authority.admit_reserve_issue(
+        "lab:jw09","lab:evaluation",payload,resource_id="lab:budget",
+    )
+    ctx=multiprocessing.get_context("spawn")
+    child=ctx.Process(target=_crash_between_witness_and_kernel_commit,
+                      args=(directory,))
+    child.start()
+    child.join(timeout=20)
+    assert child.exitcode==86
+    with backend._connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_outbox").fetchone()[0]==0
+        assert db.execute(
+            "SELECT consumed FROM w2_positive_v1_permits "
+            "WHERE operation_key='lab:jw09'"
+        ).fetchone()[0]==0
+    witness_path=backend._database_path+".witness.sqlite3"
+    with sqlite3.connect(witness_path) as db:
+        before=db.execute(
+            "SELECT record_json, signature FROM witness_checkpoints"
+        ).fetchall()
+    assert len(before)==1
+    restored=NativePositivePermitAuthority(backend,verifiable_recovery=True)
+    claim=restored.consume_and_claim("lab:jw09",payload,"lab:jw09-idem")
+    assert claim["claimed"] is True
+    assert claim["witness"]["record"]["subject"]=="lab:jw09:lab:jw09-idem"
+    assert restored.verify_dispatch_claim(
+        "lab:jw09","lab:jw09-idem",payload,claim)
+    with sqlite3.connect(witness_path) as db:
+        after=db.execute(
+            "SELECT record_json, signature FROM witness_checkpoints"
+        ).fetchall()
+    assert after==before
+    assert restored.consume_and_claim(
+        "lab:jw09",payload,"lab:jw09-idem")["execution_id"]==claim["execution_id"]
