@@ -142,3 +142,63 @@ def test_jw09_real_process_crash_leaves_one_witness_and_zero_kernel_outbox(
     assert after==before
     assert restored.consume_and_claim(
         "lab:jw09",payload,"lab:jw09-idem")["execution_id"]==claim["execution_id"]
+
+
+def test_jw10_pinned_witness_cannot_downgrade_with_same_key(tmp_path,monkeypatch):
+    _keys(monkeypatch)
+    db=str(tmp_path/"witness.sqlite")
+    signed=IndependentWitness(db,verifiable_recovery=True)
+    with pytest.raises(RuntimeError,match="downgrade prohibited"):
+        IndependentWitness(db,verifiable_recovery=False)
+    assert IndependentWitness(db,verifiable_recovery=True).key_id==signed.key_id
+
+
+def test_jw10_pinned_witness_cannot_downgrade_by_removing_key(tmp_path,monkeypatch):
+    _keys(monkeypatch)
+    db=str(tmp_path/"witness.sqlite")
+    signed=IndependentWitness(db,verifiable_recovery=True)
+    monkeypatch.delenv("TENIR_WITNESS_PRIVATE_KEY_HEX",raising=False)
+    with pytest.raises(RuntimeError,match="downgrade prohibited"):
+        IndependentWitness(db)
+    _keys(monkeypatch)
+    assert IndependentWitness(db,verifiable_recovery=True).key_id==signed.key_id
+
+
+def test_jw10_pinned_kernel_cannot_downgrade_with_keys_unchanged(tmp_path,monkeypatch):
+    _keys(monkeypatch)
+    backend=SQLiteConsensusBackend(str(tmp_path/"kernel"))
+    before=NativePositivePermitAuthority(backend,verifiable_recovery=True)
+    with pytest.raises(RuntimeError,match="kernel verifiable custody downgrade prohibited"):
+        NativePositivePermitAuthority(backend,verifiable_recovery=False)
+    assert NativePositivePermitAuthority(backend,verifiable_recovery=True).key_id==before.key_id
+
+
+def test_jw10_pinned_kernel_cannot_downgrade_with_removed_keys(tmp_path,monkeypatch):
+    _keys(monkeypatch)
+    backend=SQLiteConsensusBackend(str(tmp_path/"kernel"))
+    NativePositivePermitAuthority(backend,verifiable_recovery=True)
+    monkeypatch.delenv("TENIR_W2_PRIVATE_KEY_HEX",raising=False)
+    monkeypatch.delenv("TENIR_WITNESS_PRIVATE_KEY_HEX",raising=False)
+    with pytest.raises(RuntimeError,match="kernel verifiable custody downgrade prohibited"):
+        NativePositivePermitAuthority(backend)
+    _keys(monkeypatch)
+    assert NativePositivePermitAuthority(backend,verifiable_recovery=True).verifiable_recovery
+
+
+def test_jw10_legacy_witness_evidence_cannot_be_rebranded(tmp_path,monkeypatch):
+    _keys(monkeypatch)
+    db=str(tmp_path/"old-witness.sqlite")
+    previous=IndependentWitness(db,verifiable_recovery=False)
+    previous.issue("legacy-subject","ab"*32)
+    with pytest.raises(RuntimeError,match="cannot upgrade legacy witness checkpoints"):
+        IndependentWitness(db,verifiable_recovery=True)
+
+
+def test_jw10_corrupted_kernel_pin_fails_even_with_original_key(tmp_path,monkeypatch):
+    _keys(monkeypatch)
+    backend=SQLiteConsensusBackend(str(tmp_path/"kernel"))
+    NativePositivePermitAuthority(backend,verifiable_recovery=True)
+    with backend._connection() as db:
+        db.execute("DELETE FROM w2_verifiable_custody")
+    with pytest.raises(RuntimeError,match="custody pin missing"):
+        NativePositivePermitAuthority(backend,verifiable_recovery=True)
