@@ -368,10 +368,11 @@ class NativePositivePermitAuthority:
 
     def consume_and_claim(self, operation_key: str, payload: dict, idempotency_key: str) -> dict:
         request_hash = canon_request_hash(payload)
-        now = datetime.now(timezone.utc).isoformat()
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        witness_subject = f"{operation_key}:{idempotency_key}"
         try:
             with self._write("positive_claim") as db:
+                now = datetime.now(timezone.utc).isoformat()
                 replay = db.execute(
                     "SELECT execution_id, operation_key, idempotency_key, request_hash, claim_token, status, "
                     "witness_evidence_json, witness_hash, provider_receipt_json "
@@ -393,10 +394,13 @@ class NativePositivePermitAuthority:
                     if not evidence_json or not witness_hash:
                         raise RuntimeError("claim witness evidence missing")
                     evidence = json.loads(evidence_json)
+                    if evidence.get("record", {}).get("subject") != witness_subject:
+                        raise RuntimeError("witness subject mismatch")
                     expected_witness_hash = hashlib.sha256(
                         b"TENIR-W2-CLAIM-WITNESS-v1\0" + _canonical(evidence)
                     ).hexdigest()
-                    if expected_witness_hash != witness_hash or not self.witness.verify(evidence):
+                    if (expected_witness_hash != witness_hash
+                            or not self.witness.verify(evidence, subject=witness_subject)):
                         raise RuntimeError("claim witness evidence invalid")
                     return {"operation_key": operation_key, "idempotency_key": idempotency_key,
                             "execution_id": replay["execution_id"], "claim_token": replay["claim_token"],
@@ -435,7 +439,6 @@ class NativePositivePermitAuthority:
                 if not cap or not cap["reserved"]:
                     raise RuntimeError("no native reservation")
                 self._require_native_i8(db, operation_key, payload, allow_committed=False)
-                witness_subject = f"{operation_key}:{idempotency_key}"
                 witness_fingerprint = hashlib.sha256(
                     b"TENIR-W2-CLAIM-FINGERPRINT-v1\0" + _canonical({
                         "operation_key": operation_key,
@@ -448,7 +451,7 @@ class NativePositivePermitAuthority:
                 ).hexdigest()
                 try:
                     witness_evidence = self.witness.issue(witness_subject, witness_fingerprint)
-                    if not self.witness.verify(witness_evidence):
+                    if not self.witness.verify(witness_evidence, subject=witness_subject):
                         raise RuntimeError("witness signature or checkpoint invalid")
                 except Exception as exc:
                     raise RuntimeError("independent witness refused claim") from exc
@@ -557,6 +560,12 @@ class NativePositivePermitAuthority:
             ).fetchone()
             if granted or row["status"] != "PENDING":
                 return "ALREADY"
+            permit = db.execute(
+                "SELECT expires_at FROM w2_positive_v1_permits WHERE operation_key=?",
+                (row["operation_key"],),
+            ).fetchone()
+            if not permit or permit["expires_at"] <= datetime.now(timezone.utc).isoformat():
+                return "EXPIRED"
             db.execute(
                 "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) "
                 "VALUES (?, 'dispatch_send_granted', ?, ?)",
@@ -727,7 +736,10 @@ class NativePositivePermitAuthority:
             if (not evidence or not row["witness_hash"]
                     or claim.get("witness_hash") != row["witness_hash"]
                     or claim.get("witness") != evidence
-                    or not self.witness.verify(evidence)):
+                    or evidence.get("record", {}).get("subject") != f"{row['operation_key']}:{row['idempotency_key']}"
+                    or not self.witness.verify(
+                        evidence, subject=f"{row['operation_key']}:{row['idempotency_key']}",
+                    )):
                 raise RuntimeError("claim witness is invalid")
             if db.execute(
                 "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? "
@@ -847,8 +859,11 @@ class NativePositivePermitAuthority:
             ).hexdigest()
             if (expected_hash != witness_hash
                     or claim.get("witness_hash") != witness_hash
-                    or claim.get("witness") != evidence):
+                    or claim.get("witness") != evidence
+                    or evidence.get("record", {}).get("subject") != f"{operation_key}:{idempotency_key}"):
                 return False
-            return bool(self.witness.verify(evidence))
+            return bool(self.witness.verify(
+                evidence, subject=f"{operation_key}:{idempotency_key}",
+            ))
         except Exception:
             return False
