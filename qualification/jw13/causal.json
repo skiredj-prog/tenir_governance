@@ -1,0 +1,9 @@
+{
+  "canon_version": "canon-v1",
+  "evaluation_id": "eval-jw13",
+  "grant_id": "grant-826d026672e1412fa5a57c38896362ef",
+  "idempotency_key": "",
+  "operation_id": "op-jw13-qual",
+  "receipt_digest": "dcb576426a17b7df13907007cb02a1f1dfc12fc6c69f603717abca59d03b888e",
+  "request_hash": "359fd6db8ffe97a11b06583deee3c036c542fb52476cb10ddb91556df5b40991"
+}

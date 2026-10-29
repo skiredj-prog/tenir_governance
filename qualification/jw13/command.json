@@ -1,0 +1,10 @@
+{
+  "action_type": "payment",
+  "agent_id": "lab-agent",
+  "amount": 7,
+  "metadata": {
+    "recipient": "recipient-1"
+  },
+  "resource_id": "lab:budget",
+  "schema": "tenir-dispatch-command/v1"
+}

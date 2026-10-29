@@ -1,0 +1,12 @@
+campaign=CAMP-2026-10-29-JW13-QUAL
+classification=['RECONSTRUCTED', 'LAB_ONLY', 'NON_CERTIFYING']
+subject_sha=f5e021bca4e3b0ca281527938a013e6d2cd6c58c
+branch=fix/jw12-close-open
+topology_id=lab-s1-native-sqlite-single-host-2026-10-28
+grant_schema=native-positive-g4a-grant/v1
+operation_id=op-jw13-qual
+evaluation_id=eval-jw13
+idempotency_key=idem-jw13
+request_hash=359fd6db8ffe97a11b06583deee3c036c542fb52476cb10ddb91556df5b40991
+historical_execution_authorized=False
+private_keys_included=False
