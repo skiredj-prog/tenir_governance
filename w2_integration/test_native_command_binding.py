@@ -98,8 +98,9 @@ def test_legacy_argument_substitution_is_refused_before_consumption(
     backend, _, provider, _, adapter, command = _system(tmp_path, monkeypatch)
     assertions = {name: deepcopy(command[name]) for name in ("action_type", "amount", "agent_id", "metadata")}
     assertions[field] = replacement
-    with pytest.raises(RuntimeError):
-        adapter.dispatch(OPERATION, IDEMPOTENCY, command, **assertions)
+    result = adapter.dispatch(OPERATION, IDEMPOTENCY, command, **assertions)
+    assert result["status"] == "HOLD"
+    assert result["claim"] is None
     _assert_unconsumed(backend, provider)
 
 

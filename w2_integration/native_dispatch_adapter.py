@@ -140,7 +140,8 @@ class NativeClaimedDispatchAdapter:
                 except (TypeError, ValueError):
                     matches = False
             if not matches:
-                raise RuntimeError(f"provider {name} does not match authorized command")
+                return {"status": "HOLD", "claim": None,
+                        "reason": f"provider {name} does not match authorized command"}
         if self.authority.requires_manual_review(operation_key):
             return {"status": "HOLD", "claim": None,
                     "reason": "manual review precedes send"}
@@ -149,9 +150,10 @@ class NativeClaimedDispatchAdapter:
                 operation_key, command, idempotency_key
             )
         except RuntimeError as exc:
-            if "manual review precedes send" not in str(exc):
+            text = str(exc)
+            if "manual review precedes send" not in text and "native I8 reservation state invalid" not in text:
                 raise
-            return {"status": "HOLD", "claim": None, "reason": str(exc)}
+            return {"status": "HOLD", "claim": None, "reason": text}
         persisted = snapshot_command(self.authority.load_dispatch_payload(claim))
         if canon_request_hash(persisted) != canon_request_hash(command):
             raise RuntimeError("persisted command differs from authorized command")
