@@ -25,12 +25,14 @@ REQUESTED_TOPOLOGY="LAB-TENIR-GOV-PROD-CANDIDATE-09"
 TEST_FILES=(
     "audit_tests/test_jw09_jw10_recovery_custody.py",
     "audit_tests/test_jw_joint_rollback_limit.py",
+    "audit_tests/test_jw_external_anchor_gate.py",
     "w2_integration/test_native_command_binding.py",
     "audit_tests/test_jolt_safety_contract.py",
 )
 COMPONENTS=(
     "w2_integration/independent_witness.py",
     "w2_integration/native_positive_permit.py",
+    "w2_integration/external_cold_restart_anchor.py",
     "w2_integration/native_dispatch_adapter.py",
     "w2_integration/proof_provider.py",
     "w2_integration/native_dispatch_command.py",
@@ -84,11 +86,18 @@ MAPPING={
         ("test_jw09_jw10_recovery_custody","test_jw10_ephemeral_rejected_on_verifiable_path"),
         ("test_jw09_jw10_recovery_custody","test_jw10_restart_same_keys_pass_and_changed_witness_fails"),
         ("test_jw09_jw10_recovery_custody","test_jw10_kernel_change_rejected_on_restart"),
+        ("test_jw09_jw10_recovery_custody","test_jw10_pinned_kernel_cannot_downgrade_with_keys_unchanged"),
+        ("test_jw09_jw10_recovery_custody","test_jw10_pinned_witness_cannot_downgrade_with_same_key"),
+        ("test_jw_external_anchor_gate","test_trusted_current_anchor_rejects_joint_kernel_witness_rollback"),
+        ("test_jw_external_anchor_gate","test_anchor_not_optional_when_invoked_and_reader_outage_holds"),
     ),
 }
 LIMIT_TESTS=(
     ("test_jw_joint_rollback_limit","test_joint_kernel_and_witness_snapshot_restore_is_not_detected_locally"),
     ("test_jw_joint_rollback_limit","test_witness_only_rollback_is_detected_by_preserved_kernel_claim"),
+    # This test proves the *current-reader freshness* is an external trust
+    # assumption; a stale but valid signed anchor can be replayed.
+    ("test_jw_external_anchor_gate","test_trusted_current_anchor_rejects_joint_kernel_witness_rollback"),
 )
 
 
@@ -198,6 +207,9 @@ def main():
         "witness_storage":"separate SQLite WAL",
         "custody":"injected lab Ed25519 keys for verifiable mode; local key ID pins",
         "external_monotonic_anchor":False,
+        "external_anchor_validator_implemented":True,
+        "external_anchor_current_reader_live_service_provisioned":False,
+        "external_anchor_signed_stale_token_replay_excluded":False,
         "multi_host_consensus":False,
         "provider_external_effect_tested_by_joint_rollback_case":False,
         "scope":"single-host reproducible lab, not institutional cutover",
@@ -222,7 +234,7 @@ def main():
         "jw_evidence":matrix,
         "negative_limits":limits,
         "joint_kernel_witness_rollback_detection_demonstrated":False,
-        "reason":"Joint restoration of both local SQLite stores is not detected without an independent monotonic anchor.",
+        "reason":"JW-10 mode downgrade is locally refused; joint rollback is detectable only against a separately trusted live-current anchor. No production independent monotonic service is provisioned and stale signed anchor replay remains possible when the reader violates freshness.",
         "pytest_returncode":run.returncode,
         "junit_case_count":len(cases),
         "missing_or_failed_mandatory_tests":missing,
