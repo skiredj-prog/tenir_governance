@@ -1,0 +1,25 @@
+{
+  "amount": "7",
+  "causal": {
+    "canon_version": "canon-v1",
+    "evaluation_id": "eval-jw13",
+    "grant_id": "grant-826d026672e1412fa5a57c38896362ef",
+    "idempotency_key": "",
+    "operation_id": "op-jw13-qual",
+    "receipt_digest": null,
+    "request_hash": "359fd6db8ffe97a11b06583deee3c036c542fb52476cb10ddb91556df5b40991"
+  },
+  "evaluation_id": "eval-jw13",
+  "expires_at": "2026-10-29T05:11:14.758093+00:00",
+  "grant_id": "grant-826d026672e1412fa5a57c38896362ef",
+  "historical_execution_authorized": false,
+  "issued_at": "2026-10-29T05:06:14.760803+00:00",
+  "key_id": "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+  "operation_key": "op-jw13-qual",
+  "permit_id": "permit-op-jw13-qual",
+  "request_hash": "359fd6db8ffe97a11b06583deee3c036c542fb52476cb10ddb91556df5b40991",
+  "reservation_id": "res-op-jw13-qual",
+  "resource_id": "lab:budget",
+  "schema": "native-positive-g4a-grant/v1",
+  "signature_sha256": "ad6907148b58e880f02b714199f3f10c5c8e2e40ebc645996fd5fddcbfb5a485"
+}

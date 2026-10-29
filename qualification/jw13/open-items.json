@@ -1,0 +1,7 @@
+{
+  "historical_g4a_wired": "ExperimentalG4AAuthority remains HOLD / execution_authorized=false.",
+  "independent_custody": "Injected environment key is not an independent custodian.",
+  "real_provider_authenticity": "Lab provider signature is not a Stripe or external provider signature.",
+  "same_uid_sql_write": "A same-UID process can write SQLite directly.",
+  "witness_kernel_atomicity": "Witness and kernel use separate databases."
+}

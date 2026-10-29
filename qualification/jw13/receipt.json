@@ -1,0 +1,21 @@
+{
+  "action_type": "payment",
+  "effect_digest": "dcb576426a17b7df13907007cb02a1f1dfc12fc6c69f603717abca59d03b888e",
+  "effect_status": "EXECUTED",
+  "finality": "PROVIDER_LEDGER_TERMINAL",
+  "idempotency_key": "idem-jw13",
+  "issued_at": "2026-10-29T05:06:14.769069+00:00",
+  "key_id": "03396219237f75a64f12aeb7f39723abf400b160c364980a765dac24aeba2464",
+  "operation_id": "op-jw13-qual",
+  "provider_id": "lab-provider-reconstructed",
+  "provider_signature": "5QEGvAlvdjfkjoLDg0loP/WeDtVQAzQsoZ3GA/HXFSB4jeKAbFB/WjoSpu/grA3HwT51KXEj/A+NMYTDA8A1Ag==",
+  "reason": "executed",
+  "request_hash": "359fd6db8ffe97a11b06583deee3c036c542fb52476cb10ddb91556df5b40991",
+  "schema": "proof-provider-receipt/candidate-v0.1",
+  "scope": {
+    "account": "test",
+    "amount_minor": 100,
+    "currency": "EUR"
+  },
+  "sequence": 1
+}
