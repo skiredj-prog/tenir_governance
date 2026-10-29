@@ -94,10 +94,15 @@ def test_kernel_retry_reuses_the_orphan_witness_resolution(tmp_path, monkeypatch
         }, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     subject = f"{OPERATION}:{IDEMPOTENCY}"
-    orphan = authority.witness.issue(subject, fingerprint)
+    orphan = authority.witness.issue(
+        subject, fingerprint,
+        identity={"execution_id": "exec-orphan", "claim_token": "token-orphan"},
+    )
     assert _checkpoint_count(authority.witness.db_path) == 1
     claim = authority.consume_and_claim(OPERATION, command, IDEMPOTENCY)
     assert claim["witness"]["record"]["revision"] == orphan["record"]["revision"]
+    assert claim["witness"]["record"]["execution_id"] == "exec-orphan"
+    assert claim["witness"]["record"]["claim_token"] == "token-orphan"
     assert claim["witness"]["signature"] == orphan["signature"]
     assert claim["witness"]["record"]["subject"] == subject
     assert _checkpoint_count(authority.witness.db_path) == 1

@@ -25,10 +25,11 @@ def _claim_worker(db_dir, payload, gate, results):
         results.put(("error", str(exc)))
 
 
-def _crash_claim_worker(db_dir, payload, crash_flag, operation_key, idempotency_key):
+def _crash_claim_worker(db_dir, payload, crash_flag, operation_key, idempotency_key,
+                        verifiable_recovery=False):
     os.environ[crash_flag] = "1"
     backend = SQLiteConsensusBackend(db_dir)
-    auth = NativePositivePermitAuthority(backend)
+    auth = NativePositivePermitAuthority(backend, verifiable_recovery=verifiable_recovery)
     auth.consume_and_claim(operation_key, payload, idempotency_key)
 
 
