@@ -669,7 +669,7 @@ class NativePositivePermitAuthority:
                 )
             return "REVIEW_AFTER_GRANT" if granted else "HOLD"
 
-    def grant_send_right(self, claim: dict) -> str:
+    def grant_send_right(self, claim: dict, *, _send_hook=None) -> str:
         """Give exactly one caller the right to send this claim.
 
         The decision is the append-only ``dispatch_send_granted`` event, taken
@@ -707,6 +707,8 @@ class NativePositivePermitAuthority:
             ).fetchone()
             if not permit or permit["expires_at"] <= datetime.now(timezone.utc).isoformat():
                 return "EXPIRED"
+            if _send_hook is not None:
+                _send_hook(db)
             db.execute(
                 "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) "
                 "VALUES (?, 'dispatch_send_granted', ?, ?)",
