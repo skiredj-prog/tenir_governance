@@ -7,6 +7,7 @@ import pytest
 from tenir_governance.operations.experimental_g4a_uid_service import (
     ExperimentalUidG4AService, _unique_object,
 )
+from tenir_governance.operations.registry import OperationRecord
 
 
 @dataclass
@@ -48,3 +49,14 @@ def test_protocol_exposes_only_explicit_commands():
         with pytest.raises(ValueError):
             service._dispatch(bad)
     assert service.authority.calls == ["lab:1"]
+
+
+def test_admission_rejects_unrecognized_record_fields_before_authority():
+    service = object.__new__(ExperimentalUidG4AService)
+    service.authority = FakeAuthority()
+    record = OperationRecord(idempotency_key="lab:1", passage_id="p", agent_id="a", action_type="x").to_dict()
+    record["unknown_binding"] = "ignored by legacy parser"
+    with pytest.raises(ValueError, match="unrecognized"):
+        service._dispatch({"schema": "tenir.g4a.uid-lab.v1", "action": "admit",
+                           "record": record, "attempt_id": "lab:a", "request_id": "lab:r"})
+    assert service.authority.calls == []

@@ -134,6 +134,8 @@ class ExperimentalUidG4AService:
             return asdict(self.authority.inspect(obj["operation_key"]))
         if action == "admit" and set(obj) == {"schema", "action", "record", "attempt_id", "request_id"}:
             record = OperationRecord.from_dict(obj["record"])
+            if record.to_dict() != obj["record"]:
+                raise ValueError("noncanonical or unrecognized record fields")
             return asdict(self.authority.admit_created(record, attempt_id=obj["attempt_id"], request_id=obj["request_id"]))
         if action == "settle" and set(obj) == {"schema", "action", "request_id", "evidence"}:
             if not isinstance(obj["evidence"], list) or len(obj["evidence"]) > 16:
