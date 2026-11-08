@@ -200,4 +200,3 @@ class IndependentWitness:
         if subject is not None and row[2] != subject:
             return False
         return True
-
