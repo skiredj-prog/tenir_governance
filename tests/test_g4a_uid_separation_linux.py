@@ -63,7 +63,7 @@ def service_actor(base):
     service.open()
     print("READY", flush=True)
     try:
-        for _ in range(int(os.environ.get("UID_LAB_SERVE_COUNT", "6"))):
+        for _ in range(int(os.environ.get("UID_LAB_SERVE_COUNT", "8"))):
             service.serve_one()
     finally:
         service.close()
@@ -101,6 +101,9 @@ def client_actor(base, action):
                    "attempt_id": "lab:attempt", "request_id": "lab:request"}
     if action == "invalid":
         command["sql"] = "DROP TABLE resources"
+    if action in ("positive", "dispatch"):
+        command = {"schema": command["schema"], "action": "positive_grant" if action == "positive" else "dispatch",
+                   "operation_key": "lab:uid", "request_id": "lab:unauthorized-grant"}
     payload = json.dumps(command).encode()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
         conn.settimeout(5)
@@ -166,6 +169,9 @@ def test_uid_separation_real_processes():
             assert call(OTHER, "inspect")["ok"] is False
             assert call(WRITER, "inspect")["ok"] is False
             assert call(WORKER, "invalid")["ok"] is False
+            assert call(WORKER, "positive")["ok"] is False
+            assert call(WORKER, "dispatch")["ok"] is False
+            assert state_hashes() == before
             first = call(WORKER, "admit")
             assert first["ok"] and first["receipt"]["decision"] == "HOLD"
             assert first["receipt"]["execution_authorized"] is False

@@ -68,3 +68,22 @@ service is not independent custody.
 
 Until an implementation and these tests exist, B1, Integration Lock, REG+
 and production remain HOLD.
+
+## Positive-path wiring remains a separate gate
+
+The socket in this branch exposes only the simulated G4-A methods. On the
+candidate source, `NativePositiveG4A.evaluate_and_grant` calls the native
+reservation/permit authority before a separate transaction inserts the grant.
+`dispatch_to_b3` obtains the claim, consumes the grant in a further native
+transaction, and then calls a provider object. These are source observations,
+not proof that each crash window has been exploited. The provider and Witness
+also maintain separate state. Moving these Python calls behind an IPC socket
+does not turn them into one transaction or establish a provider effect.
+
+Before adding positive IPC actions, specify and test the operation identity,
+grant replay after a lost response, claim/grant interleavings, worker/authority
+ownership, provider idempotency and ambiguous outcomes. Test crashes at each
+cross-store boundary with an actual provider simulator and an independently
+controlled witness where claimed. A caller-supplied grant flag, shared writer
+UID, or an untrusted callback is not a substitute for the boundary. The
+simulated service must continue to reject positive grant and dispatch commands.
