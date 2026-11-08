@@ -115,6 +115,12 @@ class NativePositiveG4A:
                 "SELECT * FROM w2_positive_g4a_v1_grants WHERE operation_key=?", (operation_key,),
             ).fetchone()
             if prior_grant:
+                custody = db.execute(
+                    "SELECT key_id, public_key_hex FROM w2_positive_g4a_v1_custody LIMIT 1"
+                ).fetchone()
+                if (not custody or custody["key_id"] != self.authority.key_id
+                        or custody["public_key_hex"] != self.public_key_bytes().hex()):
+                    raise RuntimeError("stored grant custody integrity mismatch")
                 body = {key: prior_grant[key] for key in (
                     "grant_id", "operation_key", "evaluation_id", "permit_id", "reservation_id",
                     "request_hash", "resource_id", "amount", "issued_at", "expires_at", "key_id",

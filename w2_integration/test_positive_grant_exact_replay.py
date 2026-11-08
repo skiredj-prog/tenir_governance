@@ -130,6 +130,19 @@ def test_replay_preserves_preexisting_signed_decimal_format(system):
     assert replay["grant_id"] == first["grant_id"]
 
 
+@pytest.mark.parametrize("damage", ["delete", "change_public_key"])
+def test_replay_rejects_missing_or_inconsistent_custody_pin(system, damage):
+    _, backend, gate = system
+    issue(gate)
+    with backend._connection() as db:
+        if damage == "delete":
+            db.execute("DELETE FROM w2_positive_g4a_v1_custody")
+        else:
+            db.execute("UPDATE w2_positive_g4a_v1_custody SET public_key_hex=?", ("00" * 32,))
+    with pytest.raises(RuntimeError, match="custody integrity"):
+        issue(gate)
+
+
 def _issue_worker(path, ready, start, results):
     try:
         gate = NativePositiveG4A(NativePositivePermitAuthority(SQLiteConsensusBackend(path)))
