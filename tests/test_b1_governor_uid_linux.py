@@ -67,6 +67,20 @@ def _governor(base):
                       "executed": result.get("executed")}))
 
 
+def _bypass_quarantine(base):
+    """Characterize current direct socket path; this is not an acceptance test."""
+    from b1_governor_uid_provider import ExperimentalGovernorUidProvider
+    from tenir_governance.operations.registry import DurableOperationRegistry
+    request = json.load(sys.stdin)
+    registry = DurableOperationRegistry(str(base / "worker/registry.json"))
+    registry.set_quarantine(True, locked_by="lab", incident_id="cross-uid-incident")
+    proxy = ExperimentalGovernorUidProvider(base / "socket/positive-lab.sock", writer_uid=WRITER, registry=registry)
+    response = proxy._exchange(request)  # A worker can also send this wire request directly.
+    print(json.dumps({"quarantine_active": registry.quarantine_is_active(),
+                      "record_exists": registry.get("lab:governor") is not None,
+                      "response": response}))
+
+
 def _spoof_server(base):
     path = base / "socket/positive-lab.sock"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
@@ -103,7 +117,8 @@ def _base(prefix, owner):
     return temporary, base
 
 
-def test_actual_governor_uses_signed_uid_service_without_claiming_external_effect():
+@pytest.mark.parametrize("mode", ["governor", "bypass-quarantine"])
+def test_governor_and_direct_worker_behavior_against_separate_uid_service(mode):
     if sys.platform != "linux" or os.geteuid() != 0:
         pytest.skip("requires disposable Linux root controller and setuid")
     from b1_approved_positive_uid_service import canonical_approval
@@ -115,6 +130,8 @@ def test_actual_governor_uses_signed_uid_service_without_claiming_external_effec
         (base / "socket").chmod(0o755)
         (base / "state").mkdir(mode=0o700)
         os.chown(base / "state", WRITER, WRITER)
+        (base / "worker").mkdir(mode=0o700)
+        os.chown(base / "worker", WORKER, WORKER)
         command = {"schema": "tenir-dispatch-command/v1", "resource_id": "budget", "amount": 7,
                    "action_type": "payment", "agent_id": "alice", "metadata": {"recipient": "lab"}}
         now = int(time.time())
@@ -137,12 +154,18 @@ def test_actual_governor_uses_signed_uid_service_without_claiming_external_effec
                                   env=writer_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             assert server.stdout.readline().strip() == "READY", server.stderr.read()
-            process = subprocess.run([sys.executable, actor, "governor", str(base)], preexec_fn=_identity(WORKER),
+            process = subprocess.run([sys.executable, actor, mode, str(base)], preexec_fn=_identity(WORKER),
                                      input=json.dumps(request), env=env, capture_output=True, text=True, timeout=20, check=True)
             response = json.loads(process.stdout)
-            assert response["admitted"] == "reserved"
-            assert response["state"] == "unknown"
-            assert not response["executed"]
+            if mode == "governor":
+                assert response["admitted"] == "reserved"
+                assert response["state"] == "unknown"
+                assert not response["executed"]
+            else:
+                # Deliberately proves the blocker, not an acceptable property.
+                assert response["quarantine_active"] is True
+                assert response["record_exists"] is False
+                assert response["response"]["receipt"]["status"] == "EXECUTED"
             assert server.wait(timeout=20) == 0, server.stderr.read()
             with sqlite3.connect(str(base / "state/synthetic-provider.sqlite3")) as db:
                 assert db.execute("SELECT COUNT(*) FROM effects").fetchone()[0] == 1
@@ -181,5 +204,6 @@ def test_client_rejects_spoofed_server_uid_before_sending_request():
 
 if __name__ == "__main__":
     actions = {"service": _service, "governor": _governor,
+               "bypass-quarantine": _bypass_quarantine,
                "spoof-server": _spoof_server, "spoof-client": _spoof_client}
     actions[sys.argv[1]](Path(sys.argv[2]))
