@@ -11,7 +11,7 @@ import pytest
 WRITER=61021
 AGENT=61022
 ACTOR=Path(os.environ.get("R01_STAGED_ACTOR",str(Path(__file__).with_name("r01_b1_lab_actor.py"))))
-SOURCE_SHA="9d8bf1c462589ac497e3e03ece48d1d9ab0b9db3"
+SOURCE_SHA="f4072116404d403c82c5ae1acf2622e9e66af9a5"
 
 
 def _set_credentials(uid):
