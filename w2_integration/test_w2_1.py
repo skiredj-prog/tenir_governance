@@ -1,178 +1,156 @@
-"""W2.1 tests: persistence, restart, idempotence conflict"""
-import os, tempfile, json, sqlite3
-from lab_s1_bridge import run_lab_s1_scenario, RC01Lab
+"""W2.1 invariants through authenticated native claims; legacy entrypoint stays closed."""
+from contextlib import closing
+import multiprocessing
+import os
+import sqlite3
+import tempfile
+
+import pytest
+
+from lab_s1_bridge import RC01Lab
 from proof_provider import ProofProvider
+from w2_regression_support import RESOURCE, command, native_lab, native_s1_scenario
+
 
 def test_restart_persistence():
     with tempfile.TemporaryDirectory() as d:
-        r1 = run_lab_s1_scenario(op_id="op-restart", db_dir=d)
-        assert r1["execute_count"] == 1
-        assert r1["settlement_count"] == 1
-        assert r1["final_state"] == "RECONCILED_CONFIRMED"
-        # Re-open stores
-        provider = ProofProvider(db_path=os.path.join(d, "provider.db"))
-        assert provider.execute_count("op-restart") == 1
-        rc01 = RC01Lab(db_path=os.path.join(d, "rc01.db"))
-        assert rc01.get_state("op-restart") == "RECONCILED_CONFIRMED"
-        print("restart persistence (B3 + RC-01): PASS")
+        result = native_s1_scenario(d, "op-restart")
+        assert result["execute_count"] == 1
+        assert result["settlement_count"] == 1
+        assert result["final_state"] == "RECONCILED_CONFIRMED"
+        with native_lab(d) as reopened:
+            assert reopened.provider.execute_count("op-restart") == 1
+            assert reopened.provider.verify_receipt(result["receipt"])
+        with closing(RC01Lab(os.path.join(d, "rc01.db")).conn) as db:
+            assert db.execute("SELECT state FROM rc01_states WHERE operation_id='op-restart'").fetchone()[0] == "RECONCILED_CONFIRMED"
+
 
 def test_idempotence_conflict():
-    with tempfile.TemporaryDirectory() as d:
-        p = ProofProvider(db_path=os.path.join(d, "p.db"))
-        payload1 = {"scope": {"account": "a", "amount_minor": 100, "currency": "EUR"}}
-        payload2 = {"scope": {"account": "b", "amount_minor": 200, "currency": "EUR"}}
-        p.execute("op1", "same-key", payload1)
-        try:
-            p.execute("op2", "same-key", payload2)
-            raise AssertionError("should have rejected different request on same key")
-        except ValueError as e:
-            assert "idempotency key conflict" in str(e)
-        print("idempotence conflict: PASS")
+    with tempfile.TemporaryDirectory() as d, native_lab(d) as lab:
+        first, second = command(100, "a"), command(200, "b")
+        lab.auth.admit_reserve_issue("op1", "eval1", first, resource_id=RESOURCE)
+        lab.auth.admit_reserve_issue("op2", "eval2", second, resource_id=RESOURCE)
+        result = lab.provider.dispatch_authorized(lab.auth, "op1", "same-key", first)
+        assert result["status"] == "CONFIRMED"
+        with pytest.raises(RuntimeError, match="idempotency key conflict"):
+            lab.provider.dispatch_authorized(lab.auth, "op2", "same-key", second)
+        assert lab.provider.execute_count("op1") == 1
+        assert lab.provider.execute_count("op2") == 0
+
 
 def test_terminal_not_reverted():
     with tempfile.TemporaryDirectory() as d:
-        r1 = run_lab_s1_scenario(op_id="op-terminal", db_dir=d)
-        assert r1["final_state"] == "RECONCILED_CONFIRMED"
-        rc01 = RC01Lab(db_path=os.path.join(d, "rc01.db"))
-        try:
-            rc01.transition("op-terminal", "RESERVED", "replay_attempt")
-            raise AssertionError("should have refused leaving terminal state")
-        except RuntimeError as e:
-            assert "refusing terminal replacement" in str(e)
-        assert rc01.get_state("op-terminal") == "RECONCILED_CONFIRMED"
-        print("terminal state protected: PASS")
+        result = native_s1_scenario(d, "op-terminal")
+        assert result["final_state"] == "RECONCILED_CONFIRMED"
+        rc01 = RC01Lab(os.path.join(d, "rc01.db"))
+        with closing(rc01.conn):
+            with pytest.raises(RuntimeError, match="refusing terminal replacement"):
+                rc01.transition("op-terminal", "RESERVED", "replay_attempt")
+            assert rc01.get_state("op-terminal") == "RECONCILED_CONFIRMED"
+
 
 def test_terminal_to_terminal_rejected():
     with tempfile.TemporaryDirectory() as d:
-        r1 = run_lab_s1_scenario(op_id="op-tt", db_dir=d)
-        assert r1["final_state"] == "RECONCILED_CONFIRMED"
-        rc01 = RC01Lab(db_path=os.path.join(d, "rc01.db"))
-        try:
-            rc01.transition("op-tt", "CONFIRMED", "contradictory_terminal")
-            raise AssertionError("should have refused terminal-to-terminal")
-        except RuntimeError as e:
-            assert "refusing terminal replacement" in str(e)
-        assert rc01.get_state("op-tt") == "RECONCILED_CONFIRMED"
-        print("terminal-to-terminal rejected: PASS")
+        result = native_s1_scenario(d, "op-tt")
+        assert result["final_state"] == "RECONCILED_CONFIRMED"
+        rc01 = RC01Lab(os.path.join(d, "rc01.db"))
+        with closing(rc01.conn):
+            with pytest.raises(RuntimeError, match="refusing terminal replacement"):
+                rc01.transition("op-tt", "CONFIRMED", "contradictory_terminal")
+            assert rc01.get_state("op-tt") == "RECONCILED_CONFIRMED"
+
+
+def _legacy_database(path, index_sql=None, duplicates=False):
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute(
+            "CREATE TABLE effects (operation_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL, "
+            "request_hash TEXT, effect_status TEXT, receipt_json TEXT, signature BLOB, created_at TEXT)"
+        )
+        if duplicates:
+            db.executemany("INSERT INTO effects VALUES (?, 'dup-key', ?, 'EXECUTED', '{}', X'', 't')",
+                           [("op1", "h1"), ("op2", "h2")])
+        if index_sql:
+            db.execute(index_sql)
+
+
+def _assert_migration_refused(path, reason):
+    # Keep the partially initialized object to close its SQLite handle even when
+    # the constructor rejects a corrupt old schema (important on Windows).
+    provider = ProofProvider.__new__(ProofProvider)
+    try:
+        with pytest.raises(RuntimeError, match=reason):
+            provider.__init__(db_path=path)
+    finally:
+        if hasattr(provider, "conn"):
+            provider.conn.close()
+
 
 def test_migration_duplicates_fail():
     with tempfile.TemporaryDirectory() as d:
         db = os.path.join(d, "legacy.db")
-        # Create legacy DB with duplicates
-        conn = sqlite3.connect(db)
-        conn.execute("""
-            CREATE TABLE effects (
-                operation_id TEXT PRIMARY KEY,
-                idempotency_key TEXT NOT NULL,
-                request_hash TEXT,
-                effect_status TEXT,
-                receipt_json TEXT,
-                signature BLOB,
-                created_at TEXT
-            )
-        """)
-        conn.execute("INSERT INTO effects VALUES ('op1', 'dup-key', 'h1', 'EXECUTED', '{}', X'', 't')")
-        conn.execute("INSERT INTO effects VALUES ('op2', 'dup-key', 'h2', 'EXECUTED', '{}', X'', 't')")
-        conn.commit()
-        conn.close()
-        try:
-            ProofProvider(db_path=db)
-            raise AssertionError("should have refused duplicate keys on open")
-        except RuntimeError as e:
-            assert "invalid migration" in str(e)
-        print("migration duplicates fail-closed: PASS")
+        _legacy_database(db, duplicates=True)
+        _assert_migration_refused(db, "invalid migration")
 
-def test_concurrent_terminal():
-    import multiprocessing
-    with tempfile.TemporaryDirectory() as d:
-        db = os.path.join(d, "rc01.db")
-        # Seed a non-terminal state
-        rc = RC01Lab(db_path=db)
-        rc.transition("op-conc", "REPAIR", "seed")
-        queue = multiprocessing.Queue()
-        def worker(target, q):
-            try:
-                r = RC01Lab(db_path=db)
-                r.transition("op-conc", target, "race")
-                q.put(("ok", target))
-            except RuntimeError:
-                q.put(("rejected", target))
-        p1 = multiprocessing.Process(target=worker, args=("RECONCILED_CONFIRMED", queue))
-        p2 = multiprocessing.Process(target=worker, args=("FAILED", queue))
-        p1.start(); p2.start()
-        p1.join(); p2.join()
-        results = []
-        while not queue.empty():
-            results.append(queue.get())
-        final = RC01Lab(db_path=db).get_state("op-conc")
-        assert final in ("RECONCILED_CONFIRMED", "FAILED")
-        ok_count = sum(1 for r in results if r[0] == "ok")
-        assert ok_count == 1, f"expected exactly one success, got {results}"
-        print(f"concurrent terminal: PASS (winner={final})")
 
 def test_migration_nonunique_index_fail():
     with tempfile.TemporaryDirectory() as d:
         db = os.path.join(d, "legacy_nonunique.db")
-        conn = sqlite3.connect(db)
-        conn.execute("""
-            CREATE TABLE effects (
-                operation_id TEXT PRIMARY KEY,
-                idempotency_key TEXT NOT NULL,
-                request_hash TEXT,
-                effect_status TEXT,
-                receipt_json TEXT,
-                signature BLOB,
-                created_at TEXT
-            )
-        """)
-        # Pre-create a NON-unique index with the expected name
-        conn.execute("CREATE INDEX idx_effects_idempotency ON effects(idempotency_key)")
-        conn.commit()
-        conn.close()
-        try:
-            ProofProvider(db_path=db)
-            raise AssertionError("should have refused non-unique index with colliding name")
-        except RuntimeError as e:
-            assert "not UNIQUE" in str(e)
-        print("migration non-unique index collision: PASS")
+        _legacy_database(db, "CREATE INDEX idx_effects_idempotency ON effects(idempotency_key)")
+        _assert_migration_refused(db, "not UNIQUE")
+
 
 def test_migration_partial_unique_index_fail():
     with tempfile.TemporaryDirectory() as d:
         db = os.path.join(d, "legacy_partial.db")
-        conn = sqlite3.connect(db)
-        conn.execute("""
-            CREATE TABLE effects (
-                operation_id TEXT PRIMARY KEY,
-                idempotency_key TEXT NOT NULL,
-                request_hash TEXT,
-                effect_status TEXT,
-                receipt_json TEXT,
-                signature BLOB,
-                created_at TEXT
-            )
-        """)
-        # Pre-create a partial UNIQUE index with the expected name
-        conn.execute("""
-            CREATE UNIQUE INDEX idx_effects_idempotency
-            ON effects(idempotency_key)
-            WHERE effect_status = 'EXECUTED'
-        """)
-        conn.commit()
-        conn.close()
-        try:
-            ProofProvider(db_path=db)
-            raise AssertionError("should have refused partial UNIQUE index")
-        except RuntimeError as e:
-            assert "partial" in str(e)
-        print("migration partial UNIQUE index: PASS")
+        _legacy_database(db, "CREATE UNIQUE INDEX idx_effects_idempotency ON effects(idempotency_key) WHERE effect_status='EXECUTED'")
+        _assert_migration_refused(db, "partial")
 
-if __name__ == "__main__":
-    test_restart_persistence()
-    test_idempotence_conflict()
-    test_terminal_not_reverted()
-    test_terminal_to_terminal_rejected()
-    test_migration_duplicates_fail()
-    test_migration_nonunique_index_fail()
-    test_migration_partial_unique_index_fail()
-    test_concurrent_terminal()
-    print("W2.1 tests: PASS")
+
+def _terminal_worker(path, target, ready, start, results):
+    rc = RC01Lab(path)
+    try:
+        ready.put(target)
+        if not start.wait(30):
+            raise RuntimeError("terminal race start not observed")
+        try:
+            rc.transition("op-conc", target, "race")
+            results.put(("ok", target))
+        except RuntimeError as exc:
+            results.put(("rejected", str(exc)))
+    finally:
+        rc.conn.close()
+
+
+def test_concurrent_terminal():
+    with tempfile.TemporaryDirectory() as d:
+        db = os.path.join(d, "rc01.db")
+        rc = RC01Lab(db)
+        with closing(rc.conn):
+            rc.transition("op-conc", "REPAIR", "seed")
+        ctx = multiprocessing.get_context("spawn")
+        ready, results, start = ctx.Queue(), ctx.Queue(), ctx.Event()
+        targets = ["RECONCILED_CONFIRMED", "FAILED"]
+        workers = [ctx.Process(target=_terminal_worker, args=(db, state, ready, start, results)) for state in targets]
+        for worker in workers:
+            worker.start()
+        try:
+            assert sorted([ready.get(timeout=30), ready.get(timeout=30)]) == sorted(targets)
+            start.set()
+            outcomes = [results.get(timeout=30), results.get(timeout=30)]
+            for worker in workers:
+                worker.join(10)
+                assert worker.exitcode == 0
+            assert sum(status == "ok" for status, _ in outcomes) == 1
+            rejected = [reason for status, reason in outcomes if status == "rejected"]
+            assert len(rejected) == 1 and "refusing terminal replacement" in rejected[0]
+            rc = RC01Lab(db)
+            with closing(rc.conn):
+                assert rc.get_state("op-conc") == next(state for status, state in outcomes if status == "ok")
+        finally:
+            start.set()
+            for worker in workers:
+                if worker.is_alive():
+                    worker.terminate()
+                worker.join(10)
+            ready.close()
+            results.close()

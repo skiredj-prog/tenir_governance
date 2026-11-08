@@ -1,6 +1,10 @@
 """
-W2 LAB-S1 Integration Bridge — Experimental
+W2 LAB-S1 Historical Bridge — Runner disabled, RC-01 fixture retained
 PROOF-01 / Candidate / Non-certifying
+
+The assumed-grant runner now refuses before opening stores or reserving I8.
+Its old unreachable algorithm remains as migration evidence and for mutation
+tests. Use authenticated native fixtures for positive regression scenarios.
 
 This module introduces an explicit LAB-S1 integration boundary.
 It does NOT wire the historical G4-A (experimental_g4a_settlement.py) directly to the provider.
@@ -56,6 +60,9 @@ class RC01Lab:
 
 def run_lab_s1_scenario(op_id: str = "op-w2-lab-001", db_dir: str = None):
     """Minimal LAB-S1 scenario with optional persistent stores"""
+    # Historical assumed grants cannot create reservations or dispatch intents.
+    # Keep the old algorithm below as migration evidence, never an enabled path.
+    raise RuntimeError("legacy LAB-S1 disabled: authenticated kernel claim required")
     import tempfile, os
     if db_dir is None:
         db_dir = tempfile.mkdtemp(prefix="w2lab_")

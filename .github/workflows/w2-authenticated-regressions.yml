@@ -1,0 +1,68 @@
+name: W2 authenticated regressions and entrypoint mutations
+on:
+  push:
+    branches: [fix/w2-authenticated-regressions]
+  pull_request:
+    paths:
+      - w2_integration/**
+      - .github/workflows/w2-authenticated-regressions.yml
+      - scripts/verify_w2_mutations.py
+permissions:
+  contents: read
+jobs:
+  w2:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            sep: ':'
+          - os: windows-latest
+            sep: ';'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      TENIR_ENV: test
+      HOST_SCOPE: single-host
+      PYTHONPATH: ${{ github.workspace }}${{ matrix.sep }}${{ github.workspace }}/w2_integration
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install and record exact source
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/sha.txt
+          python -m pip install -e '.[api,test,raft,ep02]'
+          python -m pip check
+          python -m pip freeze > evidence/dependencies.txt
+          python -m compileall -q w2_integration scripts/verify_w2_mutations.py
+          git diff --check
+      - name: W2 invariants and eight negative entrypoints
+        run: |
+          set -euo pipefail
+          python -m pytest -q -ra --tb=short -o addopts= w2_integration/test_w2_1.py w2_integration/test_w2_2_positive.py w2_integration/test_w2_2b_complete.py w2_integration/test_w2_entrypoint_refusals.py --junitxml=evidence/w2.xml 2>&1 | tee evidence/w2.log
+      - name: Demonstrate all eight mutations are detected
+        if: always()
+        run: python scripts/verify_w2_mutations.py evidence
+      - name: Full regression including Raft and historical W2
+        if: always()
+        run: |
+          set -euo pipefail
+          python -m pytest -q -ra --tb=short -o addopts= tests/ w2_integration/ --junitxml=evidence/full.xml 2>&1 | tee evidence/full.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: w2-authenticated-${{ matrix.os }}-${{ github.run_id }}
+          path: evidence/
