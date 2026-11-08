@@ -4,6 +4,8 @@ Unclaimed provider execution is not a way to demonstrate that property.
 """
 import os
 import tempfile
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from kernel_claim_provider import KernelClaimProofProvider
 from native_positive_permit import NativePositivePermitAuthority
@@ -61,7 +63,8 @@ def _test_native_b3_same_hash():
     with tempfile.TemporaryDirectory() as d:
         backend = SQLiteConsensusBackend(d)
         backend.register_resource("budget", 1000000)
-        authority = NativePositivePermitAuthority(backend)
+        provider_public_key = Ed25519PrivateKey.from_private_bytes(bytes(range(64, 96))).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        authority = NativePositivePermitAuthority(backend, trusted_provider_public_key=provider_public_key)
         issued = authority.admit_reserve_issue(
             "op-x", "eval-x", payload, resource_id="budget",
         )
@@ -70,8 +73,7 @@ def _test_native_b3_same_hash():
             db_path=d + "/provider.db",
             claim_verifier=authority.verify_dispatch_claim,
         )
-        claim = authority.consume_and_claim("op-x", payload, "idem-x")
-        receipt = provider.execute("op-x", "idem-x", payload, claim=claim)
+        receipt = provider.dispatch_authorized(authority, "op-x", "idem-x", payload)["receipt"]
         assert receipt["request_hash"] == expected
         assert receipt["request_hash"] == issued["request_hash"]
         assert provider.execute_count("op-x") == 1

@@ -39,3 +39,11 @@ Moving to a real provider requires a trusted policy issuer, a single reviewed
 integrated authority, transaction/recovery design, real credential and network
 isolation, exhaustive writer and connector inventory, provider-specific
 idempotency/reconciliation and independent end-to-end validation.
+
+For the reconstructed generic laboratory provider, a valid native claim alone
+is not a send right. A durable send election precedes a one-use capability held
+only by the active writer process. After an ambiguous result or restart, the
+laboratory provider reconciles its existing receipt rather than calling
+`execute` again. Python-level checks and ephemeral memory are not protection
+against code running as the trusted writer UID, and this behavior does not
+restrict the production `StripeProvider` or its credentials.

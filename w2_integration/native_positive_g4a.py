@@ -236,10 +236,11 @@ class NativePositiveG4A:
         capability = secrets.token_urlsafe(32)
         with self.authority._positive_send_lock:
             self.authority._positive_live_sends[claim['execution_id']] = capability
+            self.authority._provider_live_sends[claim['execution_id']] = (claim['claim_token'], capability)
         try:
             receipt = provider.execute(
                 operation_key, idempotency_key, command,
-                claim={**claim, 'positive_send_capability': capability},
+                claim={**claim, 'positive_send_capability': capability, 'provider_send_capability': capability},
             )
             if receipt.get("attestation_type") or receipt.get("schema") != "proof-provider-receipt/candidate-v0.1":
                 raise RuntimeError("connector attestation is not a provider receipt")
@@ -255,6 +256,7 @@ class NativePositiveG4A:
         finally:
             with self.authority._positive_send_lock:
                 self.authority._positive_live_sends.pop(claim['execution_id'], None)
+                self.authority._provider_live_sends.pop(claim['execution_id'], None)
         return {
             "status": "EXECUTED",
             "claim": claim,
