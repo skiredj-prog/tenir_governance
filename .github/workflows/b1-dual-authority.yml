@@ -1,0 +1,87 @@
+name: B1 dual authority laboratory
+on:
+  push:
+    branches: [fix/b1-dual-authority-contract]
+  pull_request:
+    paths:
+      - w2_integration/b1_dual_authority.py
+      - w2_integration/test_b1_dual_authority.py
+      - w2_integration/b1_approved_positive_uid_service.py
+      - w2_integration/native_positive_g4a.py
+      - tests/test_b1_dual_authority_linux.py
+      - .github/workflows/b1-dual-authority.yml
+permissions:
+  contents: read
+jobs:
+  dual-authority:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            sep: ':'
+          - os: windows-latest
+            sep: ';'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      TENIR_ENV: test
+      HOST_SCOPE: single-host
+      PYTHONPATH: ${{ github.workspace }}${{ matrix.sep }}${{ github.workspace }}/w2_integration
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install and record exact source
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/sha.txt
+          python -m pip install -e '.[api,test,raft,ep02]'
+          python -m pip check
+          python -m pip freeze > evidence/dependencies.txt
+          python -m compileall -q w2_integration tenir_governance tenir_kernel
+          git diff --check
+      - name: Dual authority and inherited B1 regressions
+        run: |
+          set -euo pipefail
+          python -m pytest -q -rx -o addopts= w2_integration/test_b1_dual_authority.py w2_integration/test_b1_governor_uid_provider.py w2_integration/test_b1_generic_provider_fence.py w2_integration/test_b1_approved_uid_protocol.py w2_integration/test_positive_uid_protocol.py w2_integration/test_b1_untrusted_verifier.py w2_integration/test_positive_process_exit_fence.py w2_integration/test_positive_provider_review_latch.py w2_integration/test_positive_grant_exact_replay.py w2_integration/test_jw03_dispatch_right.py w2_integration/test_jw04_witness_binding.py w2_integration/test_jw09_positive_g4a.py w2_integration/test_jw10_b1_isolation.py w2_integration/test_jw11_custody.py w2_integration/test_jw12_close_open.py w2_integration/test_native_positive.py w2_integration/test_native_cross_boundary.py w2_integration/test_native_dispatch_adapter.py w2_integration/test_native_reservation_owner.py tests/test_provider.py tests/test_ep02_governor_commit_gate.py tests/test_quarantine_cross_registry.py --junitxml=evidence/regression.xml 2>&1 | tee evidence/regression.log
+      - name: Stage read-only source for distinct UID tests
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /run/tenir-dual-source/tests
+          sudo cp -a tenir_governance tenir_kernel w2_integration /run/tenir-dual-source/
+          sudo cp tests/test_b1_dual_authority_linux.py /run/tenir-dual-source/tests/
+          sudo chown -R root:root /run/tenir-dual-source
+          sudo find /run/tenir-dual-source -type d -exec chmod 755 {} +
+          sudo find /run/tenir-dual-source -type f -exec chmod 444 {} +
+          diff -rq tenir_governance /run/tenir-dual-source/tenir_governance
+          diff -rq tenir_kernel /run/tenir-dual-source/tenir_kernel
+          diff -rq w2_integration /run/tenir-dual-source/w2_integration
+          cmp tests/test_b1_dual_authority_linux.py /run/tenir-dual-source/tests/test_b1_dual_authority_linux.py
+      - name: Verify direct worker requests with separate UIDs
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo -E env PATH="$PATH" PYTHONPATH=/run/tenir-dual-source:/run/tenir-dual-source/w2_integration PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TENIR_ENV=test HOST_SCOPE=single-host python -m pytest -q -rs -o addopts= /run/tenir-dual-source/tests/test_b1_dual_authority_linux.py --junitxml="$PWD/evidence/uid.xml" 2>&1 | tee evidence/uid.log
+      - name: Full Linux regression including Raft and historical W2
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          python -m pytest -q -rx --tb=short -o addopts= tests/ w2_integration/ --junitxml=evidence/full.xml 2>&1 | tee evidence/full.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b1-dual-authority-${{ matrix.os }}-${{ github.run_id }}
+          path: evidence/
