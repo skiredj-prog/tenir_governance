@@ -3,6 +3,8 @@ from copy import deepcopy
 from contextlib import closing
 import hashlib
 import multiprocessing
+import os
+import signal
 import sqlite3
 import time
 
@@ -16,6 +18,34 @@ from native_positive_g4a import NativePositiveG4A
 from native_positive_permit import NativePositivePermitAuthority
 from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
 from w2_2b_canonical import request_hash
+
+
+def _crash_admission(path, public, request, phase, crash_method):
+    backend = SQLiteConsensusBackend(path)
+    authority = NativePositivePermitAuthority(backend)
+    service = object.__new__(ApprovedPositiveUidService)
+    service.authority = authority
+    service.gate = NativePositiveG4A(authority)
+    service.provider = KernelClaimProofProvider(db_path=path + "/crash-provider.db", claim_verifier=authority.verify_dispatch_claim)
+    service._initialize_approval_trust(public)
+    def die():
+        if crash_method == "sigkill":
+            os.kill(os.getpid(), signal.SIGKILL)
+        os._exit(86)
+    if phase == "before-commit":
+        def before_commit(operation):
+            if operation == "positive_admit":
+                die()
+        backend._before_commit = before_commit
+    else:
+        original = authority.admit_reserve_issue
+        def after_commit(*args, **kwargs):
+            result = original(*args, **kwargs)
+            die()
+            return result
+        authority.admit_reserve_issue = after_commit
+    service._dispatch(request)
+    os._exit(99)
 
 
 def _compete_approval(path, public, request, ready, start, results):
@@ -119,7 +149,7 @@ def test_nonce_or_approval_id_cannot_be_rebound_to_another_operation(lab):
     assert service.provider.execute_count("other") == 0
 
 
-def test_failed_native_admission_leaves_exact_binding_but_retry_succeeds(lab, monkeypatch):
+def test_failed_native_admission_rolls_back_binding_and_retry_succeeds(lab, monkeypatch):
     backend, service, req, sign = lab
     authorized = {**req, "approval": sign()}
     def fail(operation):
@@ -129,28 +159,109 @@ def test_failed_native_admission_leaves_exact_binding_but_retry_succeeds(lab, mo
     with pytest.raises(RuntimeError, match="injected admission failure"):
         service._dispatch(authorized)
     with backend._connection() as db:
-        assert db.execute("SELECT COUNT(*) FROM b1_approved_requests").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM b1_approved_requests").fetchone()[0] == 0
         assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_permits").fetchone()[0] == 0
-        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            db.execute("DELETE FROM b1_approved_requests")
     assert backend.get_state("budget").reserved == 0
     assert service.provider.execute_count("op") == 0
     monkeypatch.setattr(backend, "_before_commit", lambda _: None)
     assert service._dispatch(authorized)["status"] == "EXECUTED"
     assert service.provider.execute_count("op") == 1
+    with backend._connection() as db:
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            db.execute("DELETE FROM b1_approved_requests")
 
 
 def test_approval_binding_rolls_back_if_its_transaction_fails(lab, monkeypatch):
     backend, service, req, sign = lab
-    def fail(operation):
-        if operation == "b1_bind_approval":
-            raise RuntimeError("injected approval failure")
-    monkeypatch.setattr(backend, "_before_commit", fail)
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected approval failure")
+    monkeypatch.setattr(backend, "_reserve_in_connection", fail)
     with pytest.raises(RuntimeError, match="injected approval failure"):
         service._dispatch({**req, "approval": sign()})
     with backend._connection() as db:
         assert db.execute("SELECT COUNT(*) FROM b1_approved_requests").fetchone()[0] == 0
         assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_permits").fetchone()[0] == 0
+    assert backend.get_state("budget").reserved == 0
+    assert service.provider.execute_count("op") == 0
+
+
+def test_approval_and_i8_rollback_together_when_admission_commit_fails(lab, monkeypatch):
+    backend, service, req, sign = lab
+    def fail(operation):
+        if operation == "positive_admit":
+            raise RuntimeError("injected atomic admission failure")
+    monkeypatch.setattr(backend, "_before_commit", fail)
+    with pytest.raises(RuntimeError, match="injected atomic admission failure"):
+        service._dispatch({**req, "approval": sign()})
+    with backend._connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM b1_approved_requests").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_permits").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] == 0
+    assert backend.get_state("budget").reserved == 0
+    assert service.provider.execute_count("op") == 0
+
+
+@pytest.mark.parametrize("phase,committed", [("before-commit", False), ("after-commit", True)])
+@pytest.mark.parametrize("crash_method", ["exit", pytest.param("sigkill", marks=pytest.mark.skipif(os.name == "nt", reason="SIGKILL requires POSIX"))])
+def test_admission_process_exit_preserves_atomic_binding_and_i8(lab, tmp_path, phase, committed, crash_method):
+    backend, service, req, sign = lab
+    approved = {**req, "approval": sign()}
+    public = Ed25519PrivateKey.from_private_bytes(bytes(range(96, 128))).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    process = multiprocessing.get_context("spawn").Process(target=_crash_admission, args=(str(tmp_path), public, approved, phase, crash_method))
+    process.start()
+    process.join(30)
+    try:
+        assert process.exitcode == (86 if crash_method == "exit" else -signal.SIGKILL)
+        with backend._connection() as db:
+            assert db.execute("SELECT COUNT(*) FROM b1_approved_requests").fetchone()[0] == int(committed)
+            assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_permits").fetchone()[0] == int(committed)
+            assert db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] == int(committed)
+            assert db.execute("SELECT COUNT(*) FROM w2_positive_g4a_v1_grants").fetchone()[0] == 0
+            assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_outbox").fetchone()[0] == 0
+        assert backend.get_state("budget").reserved == (7 if committed else 0)
+        assert service.provider.execute_count("op") == 0
+        assert service._dispatch(approved)["status"] == "EXECUTED"
+        assert service.provider.execute_count("op") == 1
+    finally:
+        if process.is_alive():
+            process.terminate()
+        process.join(10)
+
+
+def test_unapproved_preexisting_permit_cannot_be_adopted(lab):
+    backend, service, req, sign = lab
+    service.authority.admit_reserve_issue("op", "eval", req["command"], resource_id="budget")
+    with pytest.raises(RuntimeError, match="unapproved existing permit"):
+        service._dispatch({**req, "approval": sign()})
+    with backend._connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM b1_approved_requests").fetchone()[0] == 0
+    assert backend.get_state("budget").reserved == 7
+    assert service.provider.execute_count("op") == 0
+
+
+def test_legacy_orphaned_approval_requires_review_instead_of_readmission(lab):
+    backend, service, req, sign = lab
+    approval = sign()
+    body = {name: value for name, value in approval.items() if name != "signature"}
+    encoded = canonical_approval(body)
+    with backend._connection() as db:
+        db.execute("INSERT INTO b1_approved_requests VALUES(?,?,?,?,?,?,?)",
+                   (body["approval_id"], body["nonce"], body["operation_key"], body["idempotency_key"],
+                    hashlib.sha256(encoded).hexdigest(), encoded.decode("utf-8"), approval["signature"]))
+    with pytest.raises(RuntimeError, match="orphaned approval binding"):
+        service._dispatch({**req, "approval": approval})
+    with backend._connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_permits").fetchone()[0] == 0
+    assert backend.get_state("budget").reserved == 0
+    assert service.provider.execute_count("op") == 0
+
+
+def test_changed_trust_pin_is_detected_before_reservation(lab):
+    backend, service, req, sign = lab
+    with backend._connection() as db:
+        db.execute("UPDATE b1_approval_trust SET key_id='changed' WHERE singleton=1")
+    with pytest.raises(RuntimeError, match="trust key changed"):
+        service._dispatch({**req, "approval": sign()})
     assert backend.get_state("budget").reserved == 0
     assert service.provider.execute_count("op") == 0
 
