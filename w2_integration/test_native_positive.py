@@ -293,8 +293,9 @@ def test_external_key_hex_not_written():
         os.environ.pop("TENIR_W2_PRIVATE_KEY_HEX", None)
 
 
-def test_kernel_claim_required():
+def test_kernel_claim_required(monkeypatch):
     from w2_integration.kernel_claim_provider import KernelClaimProofProvider
+    monkeypatch.setenv("TENIR_B3_PRIVATE_KEY_HEX", bytes(range(64, 96)).hex())
     with tempfile.TemporaryDirectory() as d:
         from w2_integration.proof_provider import ProofProvider
         payload = {"amount": 1}
@@ -307,7 +308,10 @@ def test_kernel_claim_required():
 
         backend = SQLiteConsensusBackend(d + "/native")
         backend.register_resource("budget", 1000000)
-        authority = NativePositivePermitAuthority(backend)
+        provider_public_key = Ed25519PrivateKey.from_private_bytes(bytes(range(64, 96))).public_key().public_bytes(
+            Encoding.Raw, PublicFormat.Raw
+        )
+        authority = NativePositivePermitAuthority(backend, trusted_provider_public_key=provider_public_key)
         authority.admit_reserve_issue("op", "eval", payload, resource_id="budget")
         claim = authority.consume_and_claim("op", payload, "idem")
         provider = KernelClaimProofProvider(
@@ -335,10 +339,13 @@ def test_kernel_claim_required():
         except RuntimeError as exc:
             assert "authenticated kernel claim required" in str(exc)
         assert provider.execute_count("op") == 0
-        body = provider.execute("op", "idem", payload, claim=claim)
-        assert body["effect_status"] == "EXECUTED"
-        replay = provider.execute("op", "idem", payload, claim=claim)
-        assert replay == body
+        with pytest.raises(RuntimeError, match="authenticated kernel claim required"):
+            provider.execute("op", "idem", payload, claim=claim)
+        body = provider.dispatch_authorized(authority, "op", "idem", payload)
+        assert body["status"] == "CONFIRMED"
+        assert body["receipt"]["effect_status"] == "EXECUTED"
+        replay = provider.dispatch_authorized(authority, "op", "idem", payload)
+        assert replay["receipt"] == body["receipt"]
         assert provider.execute_count("op") == 1
         provider.conn.close()
         print("kernel claim required: PASS")
@@ -418,6 +425,9 @@ def test_ack_lost_retries_same_claim_then_confirms_once(monkeypatch):
             claim_verifier=authority.verify_dispatch_claim,
         )
         assert provider.key_custody == "EXTERNAL_ENV"
+        def forbid_resend(*args, **kwargs):
+            raise AssertionError("UNKNOWN replay must reconcile without sending again")
+        monkeypatch.setattr(provider, "execute", forbid_resend)
 
         forged_receipt = dict(provider.reconcile("op-ack-lost"))
         forged_receipt["effect_status"] = "FAILED"

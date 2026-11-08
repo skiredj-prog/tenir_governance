@@ -65,6 +65,7 @@ class NativePositivePermitAuthority:
         # This is an in-process laboratory send fence, not an OS security boundary.
         self._positive_send_lock = threading.Lock()
         self._positive_live_sends = {}
+        self._provider_live_sends = {}
         self.verifiable_recovery = verifiable_recovery
         self.external_anchor = None
         # JW-10: check any existing kernel custody pin BEFORE schema writes,
@@ -712,6 +713,40 @@ class NativePositivePermitAuthority:
                 (row["operation_key"], now, execution_id),
             )
             return "GRANTED"
+
+    def _grant_kernel_provider_send(self, claim: dict):
+        """Issue an in-process, one-use lab-provider capability after election.
+
+        A crash after election cannot recreate the capability from SQLite.
+        This is not protection against code running as the trusted writer UID.
+        """
+        decision = self.grant_send_right(claim)
+        if decision != "GRANTED":
+            return decision, None
+        capability = secrets.token_urlsafe(32)
+        with self._positive_send_lock:
+            self._provider_live_sends[claim["execution_id"]] = (claim["claim_token"], capability)
+        return decision, capability
+
+    def _consume_kernel_provider_send(self, claim: dict) -> bool:
+        if not isinstance(claim, dict):
+            return False
+        execution = claim.get("execution_id")
+        token = claim.get("claim_token")
+        capability = claim.get("provider_send_capability")
+        if not all(isinstance(x, str) and x for x in (execution, token, capability)):
+            return False
+        with self._positive_send_lock:
+            expected = self._provider_live_sends.get(execution)
+            if (not expected or not secrets.compare_digest(expected[0], token)
+                    or not secrets.compare_digest(expected[1], capability)):
+                return False
+            del self._provider_live_sends[execution]
+            return True
+
+    def _discard_kernel_provider_send(self, claim: dict) -> None:
+        with self._positive_send_lock:
+            self._provider_live_sends.pop(claim.get("execution_id"), None)
 
     def load_dispatch_payload(self, claim: dict) -> dict:
         """Read the committed outbox command for this exact native capability.

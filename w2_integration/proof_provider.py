@@ -100,9 +100,14 @@ class ProofProvider:
     def execute(self, operation_id: str, idempotency_key: str, payload: dict,
                 lose_ack: bool = False, *, claim=None, binding=None):
         protected = self.claim_verifier is not None
-        native = getattr(self.claim_verifier, "_native_bound", False) or getattr(
-            getattr(self.claim_verifier, "__func__", None), "_native_bound", False
-        )
+        # A marker on a caller-supplied function is forgeable. This is a
+        # consistency check within the trusted writer, not a Python sandbox.
+        from kernel_claim_provider import KernelClaimProofProvider as DirectProvider
+        from w2_integration.kernel_claim_provider import KernelClaimProofProvider as PackageProvider
+        owner = getattr(self.claim_verifier, "__self__", None)
+        method = getattr(self.claim_verifier, "__func__", None)
+        native = any(type(owner) is cls and method is cls._verify_native_claim
+                     for cls in (DirectProvider, PackageProvider))
         if protected and not native:
             raise RuntimeError("caller-supplied claim verifier refused")
         if protected:

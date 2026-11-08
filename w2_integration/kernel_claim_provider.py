@@ -18,7 +18,6 @@ class KernelClaimProofProvider(ProofProvider):
             raise ValueError("native claim verifier required")
         self.audience = audience
         self._native_claim_verifier = claim_verifier
-        self._verify_native_claim.__func__._native_bound = True
         super().__init__(db_path, claim_verifier=self._verify_native_claim)
 
     @staticmethod
@@ -46,9 +45,9 @@ class KernelClaimProofProvider(ProofProvider):
             return False
         if claim.get("nonce") != token or claim.get("claim_token") != token:
             return False
-        return bool(self._native_claim_verifier(
-            operation_id, idempotency_key, payload, claim
-        ))
+        if not self._native_claim_verifier(operation_id, idempotency_key, payload, claim):
+            return False
+        return self._native_claim_verifier.__self__._consume_kernel_provider_send(claim)
 
     def execute(self, operation_id: str, idempotency_key: str, payload: dict,
                 lose_ack: bool = False, *, claim=None, binding=None):
@@ -64,6 +63,8 @@ class KernelClaimProofProvider(ProofProvider):
         provider_key_id = hashlib.sha256(provider_key).hexdigest()
         if getattr(authority, "trusted_provider_key_id", None) != provider_key_id:
             raise RuntimeError("provider key is not anchored by native authority")
+        if getattr(self._native_claim_verifier, "__self__", None) is not authority:
+            raise RuntimeError("provider verifier belongs to a different authority")
         claim = authority.consume_and_claim(operation_id, payload, idempotency_key)
         if claim.get("status") == "CONFIRMED":
             receipt = claim.get("receipt")
@@ -71,18 +72,54 @@ class KernelClaimProofProvider(ProofProvider):
                 raise RuntimeError("confirmed provider receipt failed verification")
             return {"status": "CONFIRMED", "claim": claim, "receipt": receipt,
                     "replayed": True}
+        if claim.get("status") == "UNKNOWN":
+            receipt = self.reconcile(operation_id)
+            if receipt is None:
+                return {"status": "UNKNOWN", "claim": claim, "receipt": None,
+                        "reason": "provider outcome remains unresolved", "replayed": True}
+            if not self.verify_receipt(receipt):
+                authority.mark_dispatch_review(claim, "provider reconciliation receipt invalid")
+                raise RuntimeError("provider reconciliation receipt invalid")
+            authority.mark_dispatch_confirmed(claim, receipt)
+            return {"status": "CONFIRMED", "claim": claim, "receipt": receipt,
+                    "replayed": True}
+        decision, capability = authority._grant_kernel_provider_send(claim)
+        if decision != "GRANTED":
+            if decision == "ALREADY":
+                status = authority.mark_dispatch_unknown(claim)
+                if status == "CONFIRMED":
+                    replay = authority.consume_and_claim(operation_id, payload, idempotency_key)
+                    receipt = replay.get("receipt")
+                    if replay.get("status") != "CONFIRMED" or not self.verify_receipt(receipt):
+                        raise RuntimeError("confirmed provider receipt failed verification")
+                    return {"status": "CONFIRMED", "claim": replay, "receipt": receipt,
+                            "replayed": True}
+                return {"status": status, "claim": claim, "receipt": None,
+                        "reason": "send right already granted", "replayed": True}
+            return {"status": "HOLD", "claim": claim, "receipt": None,
+                    "reason": "send right " + decision.lower()}
         try:
             receipt = self.execute(
-                operation_id, idempotency_key, payload, lose_ack=lose_ack, claim=claim,
+                operation_id, idempotency_key, payload, lose_ack=lose_ack,
+                claim={**claim, "provider_send_capability": capability},
                 binding=authority.receipt_context(claim),
             )
         except AckLost:
             status = authority.mark_dispatch_unknown(claim)
+            if status == "CONFIRMED":
+                replay = authority.consume_and_claim(operation_id, payload, idempotency_key)
+                receipt = replay.get("receipt")
+                if replay.get("status") != "CONFIRMED" or not self.verify_receipt(receipt):
+                    raise RuntimeError("confirmed provider receipt failed verification")
+                return {"status": "CONFIRMED", "claim": replay, "receipt": receipt,
+                        "replayed": True}
             return {"status": status, "claim": claim, "receipt": None,
                     "reason": "provider_ack_lost"}
         except Exception:
             authority.mark_dispatch_unknown(claim)
             raise
+        finally:
+            authority._discard_kernel_provider_send(claim)
         if not self.verify_receipt(receipt):
             authority.mark_dispatch_unknown(claim)
             raise RuntimeError("provider receipt invalid; dispatch retained UNKNOWN")
