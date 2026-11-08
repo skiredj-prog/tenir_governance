@@ -7,6 +7,7 @@ HOLD and execution_authorized=false stay. B3 remains outside the SQLite transact
 from __future__ import annotations
 
 import json
+import secrets
 import uuid
 from datetime import datetime, timezone
 
@@ -184,6 +185,10 @@ class NativePositiveG4A:
         from kernel_claim_provider import KernelClaimProofProvider
         if not isinstance(provider, KernelClaimProofProvider):
             raise RuntimeError("positive dispatch requires the native claim provider")
+        verifier = provider._native_claim_verifier
+        if (getattr(verifier, "__self__", None) is not self.authority
+                or getattr(verifier, "__func__", None) is not NativePositivePermitAuthority.verify_dispatch_claim):
+            raise RuntimeError("positive dispatch requires this authority's native claim verifier")
         self.authority._accepted_grant_id = grant["grant_id"]
         try:
             claim = self.authority.consume_and_claim(operation_key, command, idempotency_key)
@@ -199,9 +204,42 @@ class NativePositiveG4A:
             )
             if updated.rowcount != 1:
                 raise RuntimeError("positive grant already consumed")
+            if db.execute(
+                "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? AND event='dispatch_review'",
+                (operation_key,),
+            ).fetchone():
+                raise RuntimeError("positive dispatch under manual review")
+            if db.execute(
+                "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? AND event='dispatch_send_granted'",
+                (operation_key,),
+            ).fetchone():
+                raise RuntimeError("dispatch send right already granted")
+            updated = db.execute(
+                "UPDATE w2_positive_v1_outbox SET status='UNKNOWN' "
+                "WHERE execution_id=? AND operation_key=? AND idempotency_key=? "
+                "AND claim_token=? AND status='PENDING'",
+                (claim['execution_id'], operation_key, idempotency_key, claim['claim_token']),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("positive dispatch outbox not available")
+            db.execute(
+                "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) "
+                "VALUES (?, 'positive_send_intent', ?, ?)",
+                (operation_key, datetime.now(timezone.utc).isoformat(), claim['execution_id']),
+            )
+            db.execute(
+                "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) "
+                "VALUES (?, 'dispatch_send_granted', ?, ?)",
+                (operation_key, datetime.now(timezone.utc).isoformat(), claim['execution_id']),
+            )
+        claim = {**claim, "status": "UNKNOWN"}
+        capability = secrets.token_urlsafe(32)
+        with self.authority._positive_send_lock:
+            self.authority._positive_live_sends[claim['execution_id']] = capability
         try:
             receipt = provider.execute(
-                operation_key, idempotency_key, command, claim=claim,
+                operation_key, idempotency_key, command,
+                claim={**claim, 'positive_send_capability': capability},
             )
             if receipt.get("attestation_type") or receipt.get("schema") != "proof-provider-receipt/candidate-v0.1":
                 raise RuntimeError("connector attestation is not a provider receipt")
@@ -210,10 +248,13 @@ class NativePositiveG4A:
         except Exception:
             # A caught exception or invalid receipt does not establish whether
             # the provider committed an effect. Keep the reservation, freeze
-            # direct claim verification and require manual review. Abrupt
-            # process death and a failed latch write remain separate gaps.
+            # direct claim verification and require manual review. The pre-send
+            # UNKNOWN state also survives an abrupt process exit.
             self.authority.mark_dispatch_review(claim, "positive provider outcome unverified")
             raise
+        finally:
+            with self.authority._positive_send_lock:
+                self.authority._positive_live_sends.pop(claim['execution_id'], None)
         return {
             "status": "EXECUTED",
             "claim": claim,

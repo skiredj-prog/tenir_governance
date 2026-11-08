@@ -15,6 +15,7 @@ import json
 import os
 import sqlite3
 import secrets
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -61,6 +62,9 @@ class NativePositivePermitAuthority:
         self.topology_id = TOPOLOGY_ID
         self.productive = False
         self._accepted_grant_id = None
+        # This is an in-process laboratory send fence, not an OS security boundary.
+        self._positive_send_lock = threading.Lock()
+        self._positive_live_sends = {}
         self.verifiable_recovery = verifiable_recovery
         self.external_anchor = None
         # JW-10: check any existing kernel custody pin BEFORE schema writes,
@@ -1019,6 +1023,14 @@ class NativePositivePermitAuthority:
                 if row["request_hash"] != canon_request_hash(payload):
                     return False
                 self._require_native_i8(db, operation_key, payload, allow_committed=False)
+                has_grants = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='w2_positive_g4a_v1_grants'"
+                ).fetchone()
+                positive = db.execute(
+                    "SELECT consumed FROM w2_positive_g4a_v1_grants WHERE operation_key=?",
+                    (operation_key,),
+                ).fetchone() if has_grants else None
             token = row["claim_token"]
             if (claim.get("token") != token or claim.get("nonce") != token
                     or claim.get("claim_token") != token
@@ -1037,8 +1049,19 @@ class NativePositivePermitAuthority:
                     or claim.get("witness") != evidence
                     or evidence.get("record", {}).get("subject") != f"{operation_key}:{idempotency_key}"):
                 return False
-            return bool(self.witness.verify(
+            if not self.witness.verify(
                 evidence, subject=f"{operation_key}:{idempotency_key}",
-            ))
+            ):
+                return False
+            if positive:
+                capability = claim.get("positive_send_capability")
+                if positive["consumed"] != 1 or row["status"] != "UNKNOWN" or not isinstance(capability, str):
+                    return False
+                with self._positive_send_lock:
+                    expected = self._positive_live_sends.get(row["execution_id"])
+                    if not expected or not secrets.compare_digest(expected, capability):
+                        return False
+                    del self._positive_live_sends[row["execution_id"]]
+            return True
         except Exception:
             return False
