@@ -57,10 +57,15 @@ jobs:
         if: always()
         run: python scripts/verify_w2_mutations.py evidence
       - name: Full regression including Raft and historical W2
-        if: always()
+        if: always() && runner.os == 'Linux'
         run: |
           set -euo pipefail
           python -m pytest -q -ra --tb=short -o addopts= tests/ w2_integration/ --junitxml=evidence/full.xml 2>&1 | tee evidence/full.log
+      - name: Windows W2 regression profile
+        if: always() && runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          python -m pytest -q -ra --tb=short -o addopts= w2_integration/ --junitxml=evidence/windows-w2.xml 2>&1 | tee evidence/windows-w2.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

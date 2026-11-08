@@ -39,6 +39,12 @@ closed. Corrupt-schema constructor tests retain the partially initialized
 object to close its handle. Spawned process targets are module-level and
 use readiness barriers and bounded joins, including on Windows.
 
+The expanded Windows W2 run at `6523cd4` also exposed six cleanup failures
+in `test_w2_2_i8.py` and `test_w2_2a_path.py`: behavioral assertions passed,
+but open SQLite handles prevented temporary-directory removal. These fixtures
+and their `run_integrated_candidate` helper now close their owned connections
+using ExitStack. Their original behavioral assertions remain unchanged.
+
 ## Eight measured entrypoints
 
 Every row has an ordinary negative test in
@@ -111,7 +117,12 @@ python -m pytest -q -ra -o addopts= tests/ w2_integration/
 
 The workflow checks out the exact PR head, installs Raft dependencies, runs
 `pip check`, records dependencies/SHA, and retains separate ordinary and
-mutated JUnit reports on Linux and Windows. SIGKILL remains POSIX-only; the
+mutated JUnit reports on Linux and Windows. The complete `tests/ w2_integration/`
+suite runs on Linux; Windows runs the complete `w2_integration/` profile.
+Attempting the global suite on Windows at `6523cd4` failed during collection
+in three EP02 modules importing POSIX-only `fcntl`; that failed run remains
+part of the evidence, not a Windows global-suite PASS. No test was skipped
+or disabled to hide this platform mismatch. SIGKILL remains POSIX-only; the
 new process-exit variant also executes on Windows. No test count from one
 scope should be added to an overlapping suite.
 
@@ -124,4 +135,7 @@ Do not write “all paths are closed.” The old signed UID service's
 Governor/quarantine bypass remains a strict XFAIL. Register line #8
 (Governor isolation) remains refuted/open. Credentials, privileged writers,
 direct SQL, older binaries, global B1, B2 and production are not qualified by
-this PR. No main merge, deployment, tag or publication is implied.
+this PR. `I8Sequencer`, `LabS1AuthorizationBoundary` and
+`run_integrated_candidate` are not additional entries in the eight-point
+mutation inventory; their separate legacy tests do not expand its claim.
+No main merge, deployment, tag or publication is implied.
