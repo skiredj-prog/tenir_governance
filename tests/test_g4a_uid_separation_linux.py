@@ -1,4 +1,5 @@
 """Disposable Linux root-controller test: G4-A simulated, no provider calls."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -47,20 +48,38 @@ def service_actor(base):
     service.open()
     print("READY", flush=True)
     try:
-        for _ in range(5):
+        for _ in range(6):
             service.serve_one()
     finally:
         service.close()
 
 
 def client_actor(base, action):
-    if action == "sql":
+    if action in {"sql", "udf", "drop", "replace", "source", "marker", "wal", "shm"}:
         try:
-            sqlite3.connect(str(base / "state/budget/consensus.sqlite3")).execute("DROP TABLE resources")
+            dbpath = base / "state/budget/consensus.sqlite3"
+            if action in {"sql", "udf", "drop"}:
+                with sqlite3.connect(str(dbpath)) as db:
+                    if action == "udf":
+                        db.create_function("tenir_g4a_write", 0, lambda: 1)
+                        db.execute("UPDATE resources SET reserved='19' WHERE resource_id='lab:budget'")
+                    elif action == "drop":
+                        db.execute("DROP TRIGGER g4a_guard_resources_update")
+                    else:
+                        db.execute("INSERT INTO resources VALUES('lab:rogue','1','0','0')")
+            elif action == "replace":
+                os.replace(base / "worker/replacement", dbpath)
+            else:
+                target = {"source": base / "state/source.json",
+                          "marker": base / "state/source.json.g3-sqlite-owner.json",
+                          "wal": Path(str(dbpath) + "-wal"),
+                          "shm": Path(str(dbpath) + "-shm")}[action]
+                with target.open("ab") as stream:
+                    stream.write(b"unauthorized")
         except (sqlite3.Error, OSError) as exc:
             print(json.dumps({"denied": True, "error": type(exc).__name__}))
             return
-        raise AssertionError("worker opened protected SQLite database")
+        raise AssertionError("worker modified protected state")
     command = {"schema": "tenir.g4a.uid-lab.v1", "action": "inspect", "operation_key": "lab:uid"}
     if action in ("admit", "replay"):
         command = {"schema": command["schema"], "action": "admit", "record": record().to_dict(),
@@ -100,6 +119,12 @@ def test_uid_separation_real_processes():
             path.mkdir(mode=mode)
             os.chown(path, WRITER, WRITER)
             path.chmod(mode)
+        worker_dir = base / "worker"
+        worker_dir.mkdir(mode=0o700)
+        os.chown(worker_dir, WORKER, WORKER)
+        replacement = worker_dir / "replacement"
+        replacement.write_bytes(b"hostile replacement")
+        os.chown(replacement, WORKER, WORKER)
         env = dict(os.environ, TENIR_ENV="test", HOST_SCOPE="single-host")
         actor = str(Path(__file__).resolve())
         server = subprocess.Popen([sys.executable, actor, "service", str(base)],
@@ -112,8 +137,15 @@ def test_uid_separation_real_processes():
                                       preexec_fn=identity(uid), env=env, capture_output=True,
                                       text=True, timeout=15, check=True)
                 return json.loads(proc.stdout)
-            assert call(WORKER, "sql")["denied"] is True
+            def state_hashes():
+                return {str(p.relative_to(base / "state")): hashlib.sha256(p.read_bytes()).hexdigest()
+                        for p in (base / "state").rglob("*") if p.is_file()}
+            before = state_hashes()
+            for action in ("sql", "udf", "drop", "replace", "source", "marker", "wal", "shm"):
+                assert call(WORKER, action)["denied"] is True, action
+            assert state_hashes() == before
             assert call(OTHER, "inspect")["ok"] is False
+            assert call(WRITER, "inspect")["ok"] is False
             assert call(WORKER, "invalid")["ok"] is False
             first = call(WORKER, "admit")
             assert first["ok"] and first["receipt"]["decision"] == "HOLD"
