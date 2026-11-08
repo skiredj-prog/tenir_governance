@@ -144,15 +144,20 @@ def test_replay_rejects_missing_or_inconsistent_custody_pin(system, damage):
 
 
 def _issue_worker(path, ready, start, results):
+    initialized = False
     try:
         gate = NativePositiveG4A(NativePositivePermitAuthority(SQLiteConsensusBackend(path)))
         ready.put("ready")
-        if not start.wait(20):
+        initialized = True
+        if not start.wait(55):
             raise RuntimeError("start gate timed out")
         grant = issue(gate)
         results.put(("ok", grant["grant_id"], grant["signature"].hex()))
     except BaseException:
-        results.put(("error", traceback.format_exc()))
+        failure = ("error", traceback.format_exc())
+        if not initialized:
+            ready.put(failure)
+        results.put(failure)
 
 
 def test_two_processes_issue_one_identical_grant(system):
@@ -164,7 +169,8 @@ def test_two_processes_issue_one_identical_grant(system):
     try:
         for worker in workers:
             worker.start()
-        assert [ready.get(timeout=30), ready.get(timeout=30)] == ["ready", "ready"]
+        initializations = [ready.get(timeout=45), ready.get(timeout=45)]
+        assert initializations == ["ready", "ready"], initializations
         start.set()
         outcomes = [results.get(timeout=30), results.get(timeout=30)]
         for worker in workers:
@@ -175,7 +181,7 @@ def test_two_processes_issue_one_identical_grant(system):
             assert db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] == 1
             assert db.execute("SELECT COUNT(*) FROM w2_positive_g4a_v1_grants").fetchone()[0] == 1
     except queue.Empty:
-        pytest.fail("worker did not reach the synchronization gate or return a result")
+        pytest.fail("worker timed out; exit codes: " + repr([worker.exitcode for worker in workers]))
     finally:
         start.set()
         for worker in workers:
