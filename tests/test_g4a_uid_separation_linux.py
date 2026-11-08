@@ -38,17 +38,26 @@ def service_actor(base):
     from tenir_governance.operations.experimental_g4a_settlement import ExperimentalG4AAuthority
     from tenir_governance.operations.experimental_g4a_uid_service import ExperimentalUidG4AService
     state = base / "state"
-    registry = DurableOperationRegistry(str(state / "source.json"))
-    assert registry.register(record())
-    backend = SQLiteConsensusBackend(str(state / "budget"))
-    assert backend.register_resource("lab:budget", 100) == "REGISTERED"
-    G3ExperimentalExclusiveOwner(registry, backend, experimental_only=True).activate()
-    ExperimentalG4AAuthority.provision(backend, trust_generation=1, experimental_only=True)
+    if os.environ.get("UID_LAB_REOPEN") != "1":
+        registry = DurableOperationRegistry(str(state / "source.json"))
+        assert registry.register(record())
+        backend = SQLiteConsensusBackend(str(state / "budget"))
+        assert backend.register_resource("lab:budget", 100) == "REGISTERED"
+        G3ExperimentalExclusiveOwner(registry, backend, experimental_only=True).activate()
+        ExperimentalG4AAuthority.provision(backend, trust_generation=1, experimental_only=True)
     service = ExperimentalUidG4AService(state, base / "socket", worker_uids=[WORKER], trust_generation=1)
+    if os.environ.get("UID_LAB_CRASH_AFTER_ADMIT") == "1":
+        original = service._dispatch
+        def die_after_commit(request):
+            result = original(request)
+            if request.get("action") == "admit":
+                os._exit(86)
+            return result
+        service._dispatch = die_after_commit
     service.open()
     print("READY", flush=True)
     try:
-        for _ in range(6):
+        for _ in range(int(os.environ.get("UID_LAB_SERVE_COUNT", "6"))):
             service.serve_one()
     finally:
         service.close()
@@ -81,7 +90,7 @@ def client_actor(base, action):
             return
         raise AssertionError("worker modified protected state")
     command = {"schema": "tenir.g4a.uid-lab.v1", "action": "inspect", "operation_key": "lab:uid"}
-    if action in ("admit", "replay"):
+    if action in ("admit", "replay", "gated-admit"):
         command = {"schema": command["schema"], "action": "admit", "record": record().to_dict(),
                    "attempt_id": "lab:attempt", "request_id": "lab:request"}
     if action == "invalid":
@@ -90,6 +99,10 @@ def client_actor(base, action):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
         conn.settimeout(5)
         conn.connect(str(base / "socket/g4a-lab.sock"))
+        if action == "gated-admit":
+            print("CLIENT_READY", flush=True)
+            if sys.stdin.readline().strip() != "START":
+                raise RuntimeError("client start gate missing")
         try:
             conn.sendall(struct.pack("!I", len(payload)) + payload)
             header = conn.recv(4)
@@ -154,6 +167,114 @@ def test_uid_separation_real_processes():
             assert call(WORKER, "inspect")["receipt"] == first["receipt"]
             assert server.wait(timeout=15) == 0, server.stderr.read()
         finally:
+            if server.poll() is None:
+                server.kill()
+                server.wait()
+
+
+def test_lost_admission_reply_requires_operator_socket_cleanup_and_exact_replay():
+    if sys.platform != "linux" or os.geteuid() != 0:
+        pytest.skip("requires disposable Linux root controller and setuid")
+    with tempfile.TemporaryDirectory(prefix="tenir-b1-recovery-", dir="/run") as name:
+        base = Path(name)
+        base.chmod(0o755)
+        for dirname, mode in (("state", 0o700), ("socket", 0o755)):
+            path = base / dirname
+            path.mkdir(mode=mode)
+            os.chown(path, WRITER, WRITER)
+            path.chmod(mode)
+        actor = str(Path(__file__).resolve())
+        env = dict(os.environ, TENIR_ENV="test", HOST_SCOPE="single-host")
+
+        def launch(extra):
+            process = subprocess.Popen([sys.executable, actor, "service", str(base)],
+                                       preexec_fn=identity(WRITER), env=dict(env, **extra),
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            assert process.stdout.readline().strip() == "READY", process.stderr.read()
+            return process
+
+        def request(action):
+            proc = subprocess.run([sys.executable, actor, action, str(base)],
+                                  preexec_fn=identity(WORKER), env=env, capture_output=True,
+                                  text=True, timeout=15, check=True)
+            return json.loads(proc.stdout)
+
+        server = launch({"UID_LAB_CRASH_AFTER_ADMIT": "1"})
+        try:
+            assert request("admit")["ok"] is False
+            assert server.wait(timeout=15) == 86
+            dbpath = base / "state/budget/consensus.sqlite3"
+            with sqlite3.connect(str(dbpath)) as db:
+                assert db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] == 1
+                assert db.execute("SELECT COUNT(*) FROM g4a_commands").fetchone()[0] == 1
+                assert db.execute("SELECT COUNT(*) FROM g4a_outbox").fetchone()[0] == 1
+            # A crashed server leaves its socket. Only this trusted test
+            # controller removes it after establishing the writer has exited.
+            stale_socket = base / "socket/g4a-lab.sock"
+            assert stale_socket.lstat().st_uid == WRITER
+            stale_socket.unlink()
+            server = launch({"UID_LAB_REOPEN": "1", "UID_LAB_SERVE_COUNT": "3"})
+            first = request("replay")
+            second = request("replay")
+            inspected = request("inspect")
+            assert first["ok"] and first == second == inspected
+            assert first["receipt"]["execution_authorized"] is False
+            assert server.wait(timeout=15) == 0, server.stderr.read()
+            with sqlite3.connect(str(dbpath)) as db:
+                assert db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] == 1
+                assert db.execute("SELECT COUNT(*) FROM g4a_commands").fetchone()[0] == 1
+                assert db.execute("SELECT COUNT(*) FROM g4a_outbox").fetchone()[0] == 1
+        finally:
+            if server.poll() is None:
+                server.kill()
+                server.wait()
+
+
+def test_two_connected_worker_processes_replay_one_admission():
+    if sys.platform != "linux" or os.geteuid() != 0:
+        pytest.skip("requires disposable Linux root controller and setuid")
+    with tempfile.TemporaryDirectory(prefix="tenir-b1-race-", dir="/run") as name:
+        base = Path(name)
+        base.chmod(0o755)
+        for dirname, mode in (("state", 0o700), ("socket", 0o755)):
+            path = base / dirname
+            path.mkdir(mode=mode)
+            os.chown(path, WRITER, WRITER)
+            path.chmod(mode)
+        actor = str(Path(__file__).resolve())
+        env = dict(os.environ, TENIR_ENV="test", HOST_SCOPE="single-host", UID_LAB_SERVE_COUNT="2")
+        server = subprocess.Popen([sys.executable, actor, "service", str(base)],
+                                  preexec_fn=identity(WRITER), env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        clients = []
+        try:
+            assert server.stdout.readline().strip() == "READY", server.stderr.read()
+            for _ in range(2):
+                clients.append(subprocess.Popen([sys.executable, actor, "gated-admit", str(base)],
+                    preexec_fn=identity(WORKER), env=env, stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+            for client in clients:
+                assert client.stdout.readline().strip() == "CLIENT_READY"
+            for client in clients:
+                client.stdin.write("START\n")
+                client.stdin.flush()
+            results = []
+            for client in clients:
+                output, error = client.communicate(timeout=15)
+                assert client.returncode == 0, error
+                results.append(json.loads(output))
+            assert results[0] == results[1] and results[0]["ok"]
+            assert results[0]["receipt"]["execution_authorized"] is False
+            assert server.wait(timeout=15) == 0, server.stderr.read()
+            with sqlite3.connect(str(base / "state/budget/consensus.sqlite3")) as db:
+                assert db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] == 1
+                assert db.execute("SELECT COUNT(*) FROM g4a_commands").fetchone()[0] == 1
+                assert db.execute("SELECT COUNT(*) FROM g4a_outbox").fetchone()[0] == 1
+        finally:
+            for client in clients:
+                if client.poll() is None:
+                    client.kill()
+                    client.wait()
             if server.poll() is None:
                 server.kill()
                 server.wait()
