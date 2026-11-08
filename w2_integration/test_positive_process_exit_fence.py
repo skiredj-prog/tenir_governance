@@ -223,7 +223,8 @@ def test_provider_with_foreign_verifier_fails_before_consuming_grant(tmp_path, m
     assert backend.register_resource(RESOURCE, 50) == "REGISTERED"
     authority = NativePositivePermitAuthority(backend)
     gate = NativePositiveG4A(authority)
-    provider = KernelClaimProofProvider(claim_verifier=lambda *args: True)
+    foreign = NativePositivePermitAuthority(SQLiteConsensusBackend(str(tmp_path / "foreign")))
+    provider = KernelClaimProofProvider(claim_verifier=foreign.verify_dispatch_claim)
     try:
         grant = gate.evaluate_and_grant(OP, "lab:eval", COMMAND, resource_id=RESOURCE)
         with pytest.raises(RuntimeError, match="native claim verifier"):

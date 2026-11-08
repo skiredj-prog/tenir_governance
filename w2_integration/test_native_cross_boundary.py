@@ -75,6 +75,7 @@ def _test_native_b3_same_hash():
         assert receipt["request_hash"] == expected
         assert receipt["request_hash"] == issued["request_hash"]
         assert provider.execute_count("op-x") == 1
+        provider.conn.close()
 
 
 def test_divergent_refused_before_effect():
@@ -104,6 +105,7 @@ def _test_divergent_refused_before_effect():
         except RuntimeError:
             pass
         assert provider.execute_count("op-y") == 0
+        provider.conn.close()
 
 
 def test_unclaimed_execution_flag_cannot_create_an_effect():
