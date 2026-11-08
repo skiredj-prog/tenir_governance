@@ -1,0 +1,58 @@
+name: B1 positive UID laboratory
+on:
+  push:
+    branches: [fix/b1-positive-uid-service]
+  pull_request:
+    paths:
+      - w2_integration/positive_uid_service.py
+      - w2_integration/test_positive_uid_protocol.py
+      - tests/test_positive_uid_linux.py
+      - .github/workflows/b1-positive-uid-service.yml
+permissions:
+  contents: read
+jobs:
+  positive-uid:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install and verify source
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/sha.txt
+          python -m pip install -e '.[test,ep02]'
+          python -m pip check
+          python -m pip freeze > evidence/dependencies.txt
+      - name: Run positive protocol regression
+        run: |
+          PYTHONPATH="$PWD:$PWD/w2_integration" python -m pytest -q -o addopts= w2_integration/test_positive_uid_protocol.py --junitxml=evidence/protocol.xml
+      - name: Stage read-only source for distinct UIDs
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /run/tenir-positive-source/tests
+          sudo cp -a tenir_governance w2_integration /run/tenir-positive-source/
+          sudo cp tests/test_positive_uid_linux.py /run/tenir-positive-source/tests/
+          sudo chown -R root:root /run/tenir-positive-source
+          sudo find /run/tenir-positive-source -type d -exec chmod 755 {} +
+          sudo find /run/tenir-positive-source -type f -exec chmod 444 {} +
+          diff -rq tenir_governance /run/tenir-positive-source/tenir_governance
+          diff -rq w2_integration /run/tenir-positive-source/w2_integration
+      - name: Exercise positive service as separate operating-system users
+        run: |
+          set -euo pipefail
+          sudo -E env PATH="$PATH" PYTHONPATH=/run/tenir-positive-source:/run/tenir-positive-source/w2_integration PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TENIR_ENV=test HOST_SCOPE=single-host python -m pytest -q -rs -o addopts= /run/tenir-positive-source/tests/test_positive_uid_linux.py --junitxml="$PWD/evidence/positive-uid.xml" 2>&1 | tee evidence/positive-uid.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b1-positive-uid-${{ github.run_id }}
+          path: evidence/
