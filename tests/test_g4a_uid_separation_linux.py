@@ -46,6 +46,12 @@ def service_actor(base):
         G3ExperimentalExclusiveOwner(registry, backend, experimental_only=True).activate()
         ExperimentalG4AAuthority.provision(backend, trust_generation=1, experimental_only=True)
     service = ExperimentalUidG4AService(state, base / "socket", worker_uids=[WORKER], trust_generation=1)
+    fault_stage = os.environ.get("UID_LAB_FAULT_STAGE")
+    if fault_stage:
+        def exit_at_fault(stage):
+            if stage == fault_stage:
+                os._exit(86)
+        service.authority._fault = exit_at_fault
     if os.environ.get("UID_LAB_CRASH_AFTER_ADMIT") == "1":
         original = service._dispatch
         def die_after_commit(request):
@@ -172,7 +178,11 @@ def test_uid_separation_real_processes():
                 server.wait()
 
 
-def test_lost_admission_reply_requires_operator_socket_cleanup_and_exact_replay():
+@pytest.mark.parametrize("fault_stage,committed", [
+    ("after_budget", False), ("before_commit", False),
+    ("after_commit", True), ("after_dispatch", True),
+])
+def test_lost_admission_reply_requires_operator_socket_cleanup_and_exact_replay(fault_stage, committed):
     if sys.platform != "linux" or os.geteuid() != 0:
         pytest.skip("requires disposable Linux root controller and setuid")
     with tempfile.TemporaryDirectory(prefix="tenir-b1-recovery-", dir="/run") as name:
@@ -199,15 +209,17 @@ def test_lost_admission_reply_requires_operator_socket_cleanup_and_exact_replay(
                                   text=True, timeout=15, check=True)
             return json.loads(proc.stdout)
 
-        server = launch({"UID_LAB_CRASH_AFTER_ADMIT": "1"})
+        trigger = ({"UID_LAB_CRASH_AFTER_ADMIT": "1"} if fault_stage == "after_dispatch"
+                   else {"UID_LAB_FAULT_STAGE": fault_stage})
+        server = launch(trigger)
         try:
             assert request("admit")["ok"] is False
             assert server.wait(timeout=15) == 86
             dbpath = base / "state/budget/consensus.sqlite3"
             with sqlite3.connect(str(dbpath)) as db:
-                assert db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] == 1
-                assert db.execute("SELECT COUNT(*) FROM g4a_commands").fetchone()[0] == 1
-                assert db.execute("SELECT COUNT(*) FROM g4a_outbox").fetchone()[0] == 1
+                assert db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] == int(committed)
+                assert db.execute("SELECT COUNT(*) FROM g4a_commands").fetchone()[0] == int(committed)
+                assert db.execute("SELECT COUNT(*) FROM g4a_outbox").fetchone()[0] == int(committed)
             # A crashed server leaves its socket. Only this trusted test
             # controller removes it after establishing the writer has exited.
             stale_socket = base / "socket/g4a-lab.sock"
