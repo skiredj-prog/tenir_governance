@@ -1,0 +1,59 @@
+name: Positive grant exact replay laboratory
+on:
+  push:
+    branches: [fix/positive-grant-exact-replay]
+  pull_request:
+    paths:
+      - w2_integration/native_positive_g4a.py
+      - w2_integration/native_positive_permit.py
+      - w2_integration/test_positive_grant_exact_replay.py
+      - .github/workflows/positive-grant-replay.yml
+permissions:
+  contents: read
+jobs:
+  replay:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            sep: ':'
+          - os: windows-latest
+            sep: ';'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      TENIR_ENV: test
+      HOST_SCOPE: single-host
+      PYTHONPATH: ${{ github.workspace }}${{ matrix.sep }}${{ github.workspace }}/w2_integration
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install and record exact source
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/sha.txt
+          python -m pip install -e '.[test,ep02]'
+          python -m pip check
+          python -m pip freeze > evidence/dependencies.txt
+      - name: Replay, custody and positive-path regressions
+        run: |
+          set -euo pipefail
+          python -m pytest -q -o addopts= w2_integration/test_positive_grant_exact_replay.py w2_integration/test_jw09_positive_g4a.py w2_integration/test_jw10_b1_isolation.py w2_integration/test_jw11_custody.py w2_integration/test_jw12_close_open.py --junitxml=evidence/replay.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: positive-grant-replay-${{ matrix.os }}-${{ github.run_id }}
+          path: evidence/

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from native_positive_permit import NativePositivePermitAuthority, _canonical
+from native_positive_permit import NativePositivePermitAuthority, PERMIT_SCHEMA, _canonical
 from w2_2b_canonical import bind_causal, request_hash as canon_request_hash
 from w2_integration.native_dispatch_command import snapshot_command
 
@@ -80,35 +80,80 @@ class NativePositiveG4A:
         )
         if issued["request_hash"] != canon_request_hash(command):
             raise RuntimeError("grant request_hash diverges from evaluation")
-        with self.authority._tx() as db:
-            permit = db.execute(
-                "SELECT permit_id, reservation_id, expires_at, evaluation_id, request_hash "
-                "FROM w2_positive_v1_permits WHERE operation_key=?",
-                (operation_key,),
-            ).fetchone()
-        if not permit or permit["request_hash"] != issued["request_hash"]:
-            raise RuntimeError("permit missing after positive admit")
-        grant_id = f"grant-{uuid.uuid4().hex}"
-        issued_at = datetime.now(timezone.utc).isoformat()
-        body = {
-            "schema": GRANT_SCHEMA,
-            "grant_id": grant_id,
-            "operation_key": operation_key,
-            "evaluation_id": evaluation_id,
-            "permit_id": permit["permit_id"],
-            "reservation_id": permit["reservation_id"],
-            "request_hash": issued["request_hash"],
-            "resource_id": resource_id,
-            "amount": issued["amount"],
-            "issued_at": issued_at,
-            "expires_at": permit["expires_at"],
-            "key_id": self.authority.key_id,
-            "historical_execution_authorized": False,
-        }
-        signature = self.authority.private_key.sign(_canonical(body))
-        public_hex = self.public_key_bytes().hex()
         with self.authority._write("positive_g4a_grant") as db:
             self._require_same_key(db)
+            permit = db.execute(
+                "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,),
+            ).fetchone()
+            if (not permit or permit["request_hash"] != issued["request_hash"]
+                    or permit["evaluation_id"] != evaluation_id
+                    or permit["key_id"] != self.authority.key_id
+                    or permit["schema_id"] != PERMIT_SCHEMA
+                    or permit["audience"] != "kernel-dispatch"):
+                raise RuntimeError("permit missing or inconsistent after positive admit")
+            self.authority._require_native_i8(db, operation_key, command, allow_committed=True)
+            cap = db.execute(
+                "SELECT amount, resource_id, reservation_id FROM w2_positive_v1_capacity WHERE operation_key=?",
+                (operation_key,),
+            ).fetchone()
+            if (not cap or cap["resource_id"] != resource_id
+                    or cap["reservation_id"] != permit["reservation_id"]):
+                raise RuntimeError("native I8 grant binding mismatch")
+            amount = self.backend._amount(cap["amount"])
+            if amount is None or amount != self.backend._amount(command["amount"]):
+                raise RuntimeError("native I8 grant amount mismatch")
+            permit_body = self.authority._body(
+                permit["permit_id"], operation_key, permit["evaluation_id"], permit["request_hash"],
+                permit["reservation_id"], permit["issued_at"], permit["expires_at"],
+                permit["nonce_hash"], permit["audience"],
+            )
+            try:
+                self.authority.private_key.public_key().verify(permit["signature"], _canonical(permit_body))
+            except (InvalidSignature, ValueError, TypeError) as exc:
+                raise RuntimeError("permit signature invalid") from exc
+            prior_grant = db.execute(
+                "SELECT * FROM w2_positive_g4a_v1_grants WHERE operation_key=?", (operation_key,),
+            ).fetchone()
+            if prior_grant:
+                custody = db.execute(
+                    "SELECT key_id, public_key_hex FROM w2_positive_g4a_v1_custody LIMIT 1"
+                ).fetchone()
+                if (not custody or custody["key_id"] != self.authority.key_id
+                        or custody["public_key_hex"] != self.public_key_bytes().hex()):
+                    raise RuntimeError("stored grant custody integrity mismatch")
+                body = {key: prior_grant[key] for key in (
+                    "grant_id", "operation_key", "evaluation_id", "permit_id", "reservation_id",
+                    "request_hash", "resource_id", "amount", "issued_at", "expires_at", "key_id",
+                )}
+                body.update(schema=prior_grant["schema_id"], historical_execution_authorized=False)
+                if (body["schema"] != GRANT_SCHEMA or body["operation_key"] != operation_key
+                        or body["evaluation_id"] != evaluation_id or body["permit_id"] != permit["permit_id"]
+                        or body["reservation_id"] != permit["reservation_id"]
+                        or body["request_hash"] != permit["request_hash"] or body["resource_id"] != resource_id
+                        or self.backend._amount(body["amount"]) != amount
+                        or body["expires_at"] != permit["expires_at"]
+                        or body["key_id"] != self.authority.key_id):
+                    raise RuntimeError("stored grant integrity mismatch")
+                try:
+                    self.authority.private_key.public_key().verify(prior_grant["signature"], _canonical(body))
+                except (InvalidSignature, ValueError, TypeError) as exc:
+                    raise RuntimeError("stored grant signature invalid") from exc
+                return {**body, "signature": prior_grant["signature"], "causal": self._causal(body)}
+            if permit["consumed"] or permit["nonce_status"] != "ISSUED":
+                raise RuntimeError("cannot issue grant for consumed permit")
+            issued_at = datetime.now(timezone.utc).isoformat()
+            if permit["expires_at"] <= issued_at:
+                raise RuntimeError("cannot issue grant for expired permit")
+            body = {
+                "schema": GRANT_SCHEMA, "grant_id": f"grant-{uuid.uuid4().hex}",
+                "operation_key": operation_key, "evaluation_id": evaluation_id,
+                "permit_id": permit["permit_id"], "reservation_id": permit["reservation_id"],
+                "request_hash": permit["request_hash"], "resource_id": resource_id,
+                "amount": str(amount), "issued_at": issued_at, "expires_at": permit["expires_at"],
+                "key_id": self.authority.key_id, "historical_execution_authorized": False,
+            }
+            signature = self.authority.private_key.sign(_canonical(body))
+            public_hex = self.public_key_bytes().hex()
             prior = db.execute(
                 "SELECT key_id FROM w2_positive_g4a_v1_custody LIMIT 1"
             ).fetchone()
@@ -124,9 +169,9 @@ class NativePositiveG4A:
                     request_hash, resource_id, amount, issued_at, expires_at,
                     signature, key_id, schema_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (grant_id, operation_key, evaluation_id, permit["permit_id"],
+                (body["grant_id"], operation_key, evaluation_id, permit["permit_id"],
                  permit["reservation_id"], issued["request_hash"], resource_id,
-                 issued["amount"], issued_at, permit["expires_at"], signature,
+                 body["amount"], issued_at, permit["expires_at"], signature,
                  self.authority.key_id, GRANT_SCHEMA),
             )
         return {**body, "signature": signature, "causal": self._causal(body)}
