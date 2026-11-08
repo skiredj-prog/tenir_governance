@@ -216,3 +216,28 @@ def test_generic_live_send_capability_is_single_use(tmp_path, monkeypatch):
         assert provider.execute_count(OP) == 1
     finally:
         provider.conn.close()
+
+
+def test_lost_ack_concurrent_confirmation_returns_verified_receipt(tmp_path, monkeypatch):
+    monkeypatch.setenv("TENIR_W2_PRIVATE_KEY_HEX", bytes(range(32)).hex())
+    monkeypatch.setenv("TENIR_WITNESS_PRIVATE_KEY_HEX", bytes(range(32, 64)).hex())
+    monkeypatch.setenv("TENIR_B3_PRIVATE_KEY_HEX", bytes(range(64, 96)).hex())
+    backend = SQLiteConsensusBackend(str(tmp_path))
+    assert backend.register_resource("budget", 50) == "REGISTERED"
+    authority = NativePositivePermitAuthority(backend, trusted_provider_public_key=_public_key())
+    authority.admit_reserve_issue(OP, "eval", COMMAND, resource_id="budget")
+    provider = KernelClaimProofProvider(claim_verifier=authority.verify_dispatch_claim)
+    original = authority.mark_dispatch_unknown
+    def concurrent_confirm(claim):
+        receipt = provider.reconcile(OP)
+        assert receipt is not None
+        authority.mark_dispatch_confirmed(claim, receipt)
+        return original(claim)
+    monkeypatch.setattr(authority, "mark_dispatch_unknown", concurrent_confirm)
+    try:
+        result = provider.dispatch_authorized(authority, OP, KEY, COMMAND, lose_ack=True)
+        assert result["status"] == "CONFIRMED"
+        assert provider.verify_receipt(result["receipt"])
+        assert provider.execute_count(OP) == 1
+    finally:
+        provider.conn.close()

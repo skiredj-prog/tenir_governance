@@ -106,6 +106,13 @@ class KernelClaimProofProvider(ProofProvider):
             )
         except AckLost:
             status = authority.mark_dispatch_unknown(claim)
+            if status == "CONFIRMED":
+                replay = authority.consume_and_claim(operation_id, payload, idempotency_key)
+                receipt = replay.get("receipt")
+                if replay.get("status") != "CONFIRMED" or not self.verify_receipt(receipt):
+                    raise RuntimeError("confirmed provider receipt failed verification")
+                return {"status": "CONFIRMED", "claim": replay, "receipt": receipt,
+                        "replayed": True}
             return {"status": status, "claim": claim, "receipt": None,
                     "reason": "provider_ack_lost"}
         except Exception:
