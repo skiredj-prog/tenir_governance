@@ -9,21 +9,24 @@ production. B1, B2, integration and production remain HOLD.
 An external issuer signs the exact operation key, evaluation ID, idempotency
 key, canonical command hash, audience, approval ID, nonce, issuer key ID and
 validity period. The writer pins the configured Ed25519 public key in its
-private SQLite store, verifies the signature and persists an append-only binding
-before invoking the synthetic positive path. Reuse of an approval ID, nonce,
+private SQLite store and verifies the signature. It persists an append-only
+binding in the same SQLite transaction as native I8 reservation and permit
+issuance. Reuse of an approval ID, nonce,
 operation or idempotency key for a different signed body is refused. Exact
 replay follows the existing UNKNOWN behavior. The writer must run with a private
 umask and trusted paths and be isolated from workers by Linux UIDs.
 
 ## Transaction and recovery boundary
 
-The approval-binding transaction commits **before** the native permit and I8
-reservation, which are followed by outbox creation and a pre-send intent. These
-are separate transactions. A crash can leave an approval bound without a
-reservation; exact retry while the approval remains valid may continue. No
-atomic all-or-nothing claim is made across approval, budget, outbox and an
-external provider. After an ambiguous send, no automatic resend or second
-external effect is asserted.
+Approval binding, native permit issuance and I8 reservation commit together.
+The later positive grant, native outbox creation, witness and pre-send intent
+remain separate operations or transactions. A crash after admission can leave
+a bound approval and reservation without an outbox; exact retry while the
+approval remains valid can continue. No atomic all-or-nothing claim is made
+across approval, budget, grant, witness, outbox and an external provider. After
+an ambiguous send, no automatic resend or second external effect is asserted.
+An orphaned approval binding left by the earlier two-transaction prototype is
+refused for operator review; it is not silently converted into a new permit.
 
 Trust-key installation is refused on a store already containing positive
 operations, and a pinned key change is refused. Key rotation and revocation,

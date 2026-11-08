@@ -1,9 +1,9 @@
 """Signed approval gate for the synthetic UID laboratory, not production.
 
 The issuer is external to this service; a signed approval is not a proof that
-the issuer's policy was correct. Approval binding commits separately from the
-native reservation and outbox, so this prototype does not claim atomicity
-across those transactions. There is no real-provider configuration here.
+the issuer's policy was correct. Approval binding and native reservation share
+one SQLite transaction. Grant, outbox and witness remain separate transactions.
+There is no real-provider configuration here.
 """
 from __future__ import annotations
 
@@ -64,6 +64,7 @@ class ApprovedPositiveUidService(ExperimentalPositiveUidService):
             db.execute("CREATE TRIGGER IF NOT EXISTS b1_approvals_no_delete BEFORE DELETE ON b1_approved_requests "
                        "BEGIN SELECT RAISE(ABORT, 'approval binding is append-only'); END")
         self._approval_public = Ed25519PublicKey.from_public_bytes(public_key)
+        self._approval_public_bytes = public_key
         self._approval_key_id = key_id
 
     def _dispatch(self, obj):
@@ -97,27 +98,54 @@ class ApprovedPositiveUidService(ExperimentalPositiveUidService):
             self._approval_public.verify(bytes.fromhex(signature), encoded)
         except (InvalidSignature, ValueError) as exc:
             raise ValueError("approval signature invalid") from exc
-        now = int(time.time())
-        if issued > now + 30:
-            raise ValueError("approval not yet valid")
         body_hash = hashlib.sha256(encoded).hexdigest()
-        with self.authority._write("b1_bind_approval") as db:
+        def bind_approval(db):
+            # BEGIN IMMEDIATE has completed. Recheck trust and time under the
+            # same lock that governs nonce binding and I8 reservation.
+            trust = db.execute("SELECT key_id, public_key FROM b1_approval_trust WHERE singleton=1").fetchone()
+            if (not trust or trust["key_id"] != self._approval_key_id
+                    or bytes(trust["public_key"]) != self._approval_public_bytes):
+                raise RuntimeError("approval trust key changed")
+            now = int(time.time())
+            if issued > now + 30:
+                raise ValueError("approval not yet valid")
+            outboxes = db.execute(
+                "SELECT operation_key, idempotency_key, request_hash, status FROM w2_positive_v1_outbox "
+                "WHERE operation_key=? OR idempotency_key=?", (operation, idempotency),
+            ).fetchall()
+            if len(outboxes) > 1 or (outboxes and (
+                    outboxes[0]["operation_key"] != operation or outboxes[0]["idempotency_key"] != idempotency
+                    or outboxes[0]["request_hash"] != request_hash(command))):
+                raise RuntimeError("approval binding conflict with existing outbox")
             rows = db.execute(
                 "SELECT * FROM b1_approved_requests WHERE approval_id=? OR nonce=? OR operation_key=? OR idempotency_key=?",
                 (approval_id, nonce, operation, idempotency),
             ).fetchall()
+            existing_permit = db.execute(
+                "SELECT 1 FROM w2_positive_v1_permits WHERE operation_key=?", (operation,),
+            ).fetchone()
             if rows:
-                if len(rows) != 1 or rows[0]["body_hash"] != body_hash or rows[0]["signature"] != signature:
+                if (len(rows) != 1 or rows[0]["body_hash"] != body_hash
+                        or rows[0]["body_json"] != encoded.decode("utf-8") or rows[0]["signature"] != signature):
                     raise RuntimeError("approval binding conflict")
+                if not existing_permit:
+                    raise RuntimeError("orphaned approval binding requires review")
             else:
                 if expires <= now:
                     raise ValueError("approval expired")
+                if existing_permit:
+                    raise RuntimeError("unapproved existing permit cannot be adopted")
                 db.execute("INSERT INTO b1_approved_requests VALUES(?,?,?,?,?,?,?)",
                            (approval_id, nonce, operation, idempotency, body_hash, encoded.decode("utf-8"), signature))
             if expires <= now:
-                outbox = db.execute("SELECT status FROM w2_positive_v1_outbox WHERE operation_key=?", (operation,)).fetchone()
-                if not outbox or outbox["status"] == "PENDING":
+                if not outboxes or outboxes[0]["status"] == "PENDING":
                     raise ValueError("approval expired before send")
-        return super()._dispatch({"schema": "tenir.positive.uid-lab.v1", "action": "submit",
-                                  "operation_key": operation, "evaluation_id": evaluation,
-                                  "idempotency_key": idempotency, "command": command})
+        grant = self.gate.evaluate_and_grant(
+            operation, evaluation, command, resource_id=command["resource_id"], _admit_hook=bind_approval,
+        )
+        with self.authority._tx() as db:
+            prior = db.execute("SELECT status FROM w2_positive_v1_outbox WHERE operation_key=?", (operation,)).fetchone()
+        if prior and prior["status"] != "PENDING":
+            return {"status": prior["status"], "synthetic": True, "execution_authorized": False}
+        result = self.gate.dispatch_to_b3(operation, idempotency, command, grant, self.provider)
+        return {"status": result["status"], "synthetic": True, "execution_authorized": False}

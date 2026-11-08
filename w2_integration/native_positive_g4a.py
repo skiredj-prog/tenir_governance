@@ -72,12 +72,12 @@ class NativePositiveG4A:
             raise RuntimeError("positive G4-A key changed since grant")
 
     def evaluate_and_grant(
-        self, operation_key: str, evaluation_id: str, payload: dict, *, resource_id: str,
+        self, operation_key: str, evaluation_id: str, payload: dict, *, resource_id: str, _admit_hook=None,
     ) -> dict:
         self._require_external_key()
         command = snapshot_command(payload)
         issued = self.authority.admit_reserve_issue(
-            operation_key, evaluation_id, command, resource_id=resource_id,
+            operation_key, evaluation_id, command, resource_id=resource_id, _admit_hook=_admit_hook,
         )
         if issued["request_hash"] != canon_request_hash(command):
             raise RuntimeError("grant request_hash diverges from evaluation")

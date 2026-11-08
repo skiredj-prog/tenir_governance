@@ -355,12 +355,14 @@ class NativePositivePermitAuthority:
 
     def admit_reserve_issue(
         self, operation_key: str, evaluation_id: str, payload: dict,
-        amount=None, *, resource_id: str,
+        amount=None, *, resource_id: str, _admit_hook=None,
     ) -> dict:
         """Atomically reserve native I8 capacity and issue its bound positive permit.
 
         The amount defaults to the canonical payload's ``amount`` field. The I8
-        resource must already exist in SQLiteConsensusBackend.
+        resource must already exist in SQLiteConsensusBackend. The private hook
+        composes trusted writer-side checks with the same SQLite transaction;
+        it is not a security boundary against code running as the writer.
         """
         payload = snapshot_payload(payload)
         if payload.get("schema") == COMMAND_SCHEMA:
@@ -391,6 +393,8 @@ class NativePositivePermitAuthority:
         signature = self.private_key.sign(_canonical(body))
         try:
             with self._write("positive_admit") as db:
+                if _admit_hook is not None:
+                    _admit_hook(db)
                 existing = db.execute(
                     "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,)
                 ).fetchone()
