@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from contextlib import nullcontext
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -29,6 +30,15 @@ def canonical_approval(body):
 
 class ApprovedPositiveUidService(ExperimentalPositiveUidService):
     """Opt-in synthetic service gated by an independently supplied approval key."""
+
+    def _admission_guard(self):
+        return nullcontext()
+
+    def _send_guard(self):
+        return nullcontext()
+
+    def _validate_send(self, db):
+        """Additional trusted service checks inside the send transaction."""
 
     def __init__(self, state_dir, socket_dir, *, worker_uids, approval_public_key):
         if not isinstance(approval_public_key, bytes) or len(approval_public_key) != 32:
@@ -140,12 +150,14 @@ class ApprovedPositiveUidService(ExperimentalPositiveUidService):
             if expires <= now:
                 if not outboxes or outboxes[0]["status"] == "PENDING":
                     raise ValueError("approval expired before send")
-        grant = self.gate.evaluate_and_grant(
-            operation, evaluation, command, resource_id=command["resource_id"], _admit_hook=bind_approval,
-        )
+        with self._admission_guard():
+            grant = self.gate.evaluate_and_grant(
+                operation, evaluation, command, resource_id=command["resource_id"], _admit_hook=bind_approval,
+            )
         with self.authority._tx() as db:
             prior = db.execute("SELECT status FROM w2_positive_v1_outbox WHERE operation_key=?", (operation,)).fetchone()
         if prior and prior["status"] != "PENDING":
             return {"status": prior["status"], "synthetic": True, "execution_authorized": False}
-        result = self.gate.dispatch_to_b3(operation, idempotency, command, grant, self.provider)
+        result = self.gate.dispatch_to_b3(operation, idempotency, command, grant, self.provider,
+                                          _send_guard=self._send_guard, _send_hook=self._validate_send)
         return {"status": result["status"], "synthetic": True, "execution_authorized": False}

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import secrets
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from cryptography.exceptions import InvalidSignature
@@ -178,7 +179,8 @@ class NativePositiveG4A:
         return {**body, "signature": signature, "causal": self._causal(body)}
 
     def dispatch_to_b3(
-        self, operation_key: str, idempotency_key: str, payload: dict, grant: dict, provider,
+        self, operation_key: str, idempotency_key: str, payload: dict, grant: dict, provider, *,
+        _send_guard=None, _send_hook=None,
     ) -> dict:
         command = snapshot_command(payload)
         self._require_grant(operation_key, command, grant)
@@ -196,7 +198,11 @@ class NativePositiveG4A:
             self.authority._accepted_grant_id = None
         if claim.get("claimed") is not True:
             raise RuntimeError("positive grant did not produce a claim")
-        with self.authority._write("positive_g4a_consume") as db:
+        # The trusted optional guard ends before provider I/O; an emergency lock
+        # does not wait for an already-started provider call to finish.
+        with (_send_guard() if _send_guard is not None else nullcontext()), self.authority._write("positive_g4a_consume") as db:
+            if _send_hook is not None:
+                _send_hook(db)
             updated = db.execute(
                 "UPDATE w2_positive_g4a_v1_grants SET consumed=1 "
                 "WHERE grant_id=? AND operation_key=? AND consumed=0",
