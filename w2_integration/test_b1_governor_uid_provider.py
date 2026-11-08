@@ -192,3 +192,22 @@ def test_governor_stays_unknown_if_independent_signature_is_forged(integrated_la
     assert len(calls) == 1
     assert service.provider.execute_count(passage.idempotency_key) == 0
     assert backend.get_state("budget").reserved == 0
+
+
+def test_characterize_signed_direct_service_bypasses_governor_quarantine(integrated_lab):
+    governor, _, service, _, _, request_for = integrated_lab
+    key = "lab:direct-quarantine"
+    governor.registry.set_quarantine(True, locked_by="lab", incident_id="lab-incident")
+    assert governor.registry.quarantine_is_active()
+    assert governor.registry.get(key) is None
+    assert service._dispatch(request_for(key))["status"] == "EXECUTED"
+    assert service.provider.execute_count(key) == 1
+
+
+@pytest.mark.xfail(strict=True, reason="B1 blocker: signed service does not verify Governor adjudication or its quarantine")
+def test_signed_direct_service_should_not_bypass_governor_quarantine(integrated_lab):
+    governor, _, service, _, _, request_for = integrated_lab
+    key = "lab:direct-quarantine"
+    governor.registry.set_quarantine(True, locked_by="lab", incident_id="lab-incident")
+    service._dispatch(request_for(key))
+    assert service.provider.execute_count(key) == 0

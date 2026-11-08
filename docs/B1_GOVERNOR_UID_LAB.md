@@ -22,6 +22,14 @@ production authority handover, or end-to-end enforcement. The provider's
 receipt into real-provider confirmation. A worker may still use other code or
 provider credentials unless the deployment independently isolates both.
 
+The cooperative proxy is optional. A worker that possesses a valid signed
+request can currently call the service directly without a Governor decision.
+The service also does not consult the Governor's quarantine lock. A known
+strict expected-failure test demonstrates a synthetic effect through that path
+while the Governor's quarantine is active. Do not treat a passing CI run or a
+signed request as evidence that Governor adjudication or quarantine is enforced
+at the service boundary.
+
 The historical `StripeProvider`, other connector paths and real credentials
 are not routed through this adapter. The adapter and service are not a supported
 production deployment or packaged public interface. B1, B2, integration and
