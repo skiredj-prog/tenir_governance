@@ -291,7 +291,9 @@ class DualApprovedUidService(ApprovedPositiveUidService):
                 or governor["policy_context_hash"] != self._governor_policy_context_hash):
             raise RuntimeError("dual authority trust changed before send")
 
-    def _dispatch(self, obj):
+    @contextmanager
+    def checked_request(self, obj):
+        """Verify the two-proof envelope and scope its shared-gate context."""
         if not isinstance(obj, dict) or "governor_receipt" not in obj:
             raise RuntimeError("Governor receipt required")
         request = snapshot_payload({key: value for key, value in obj.items() if key != "governor_receipt"})
@@ -319,6 +321,10 @@ class DualApprovedUidService(ApprovedPositiveUidService):
             raise RuntimeError("Governor receipt signature refused") from exc
         self._governor_context.request = (request, body["passage_id"], body["quarantine_epoch"])
         try:
-            return super()._dispatch(request)
+            yield request
         finally:
             del self._governor_context.request
+
+    def _dispatch(self, obj):
+        with self.checked_request(obj) as request:
+            return super()._dispatch(request)
