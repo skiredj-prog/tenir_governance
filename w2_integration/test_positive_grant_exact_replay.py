@@ -7,6 +7,7 @@ import traceback
 
 import pytest
 
+import native_positive_permit as permit_module
 from native_positive_g4a import NativePositiveG4A
 from native_positive_permit import NativePositivePermitAuthority, _canonical
 from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
@@ -141,6 +142,31 @@ def test_replay_rejects_missing_or_inconsistent_custody_pin(system, damage):
             db.execute("UPDATE w2_positive_g4a_v1_custody SET public_key_hex=?", ("00" * 32,))
     with pytest.raises(RuntimeError, match="custody integrity"):
         issue(gate)
+
+
+def test_schema_trigger_replacement_is_invisible_until_commit_and_rolls_back(system, monkeypatch):
+    _, backend, _ = system
+    trigger = "w2_block_historical_after_positive"
+    def trigger_sql(db):
+        row = db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (trigger,)).fetchone()
+        return row[0] if row else None
+    with backend._connection() as reader:
+        original = trigger_sql(reader)
+    assert original
+    execute = permit_module._execute_schema_statements
+    def fail_after_drop(db, script):
+        if "DROP TRIGGER IF EXISTS w2_block_historical_after_positive" in script:
+            db.execute("DROP TRIGGER w2_block_historical_after_positive")
+            assert trigger_sql(db) is None
+            with backend._connection() as reader:
+                assert trigger_sql(reader) == original
+            raise RuntimeError("injected schema interruption")
+        execute(db, script)
+    monkeypatch.setattr(permit_module, "_execute_schema_statements", fail_after_drop)
+    with pytest.raises(RuntimeError, match="injected schema interruption"):
+        NativePositivePermitAuthority(backend)
+    with backend._connection() as reader:
+        assert trigger_sql(reader) == original
 
 
 def _issue_worker(path, ready, start, results):

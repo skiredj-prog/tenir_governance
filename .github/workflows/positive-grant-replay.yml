@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - w2_integration/native_positive_g4a.py
+      - w2_integration/native_positive_permit.py
       - w2_integration/test_positive_grant_exact_replay.py
       - .github/workflows/positive-grant-replay.yml
 permissions:

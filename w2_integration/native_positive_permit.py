@@ -36,6 +36,20 @@ def _canonical(obj: dict) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
 
 
+def _execute_schema_statements(db, script: str) -> None:
+    """Execute static DDL without executescript's implicit transaction commit."""
+    if not db.in_transaction:
+        raise RuntimeError("schema changes require a transaction")
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            db.execute(statement)
+            statement = ""
+    if statement.strip():
+        raise RuntimeError("incomplete schema statement")
+
+
 class NativePositivePermitAuthority:
     def __init__(self, backend: SQLiteConsensusBackend, *, witness=None,
                  trusted_provider_public_key: bytes | None = None,
@@ -92,12 +106,15 @@ class NativePositivePermitAuthority:
             self.trusted_provider_key_id = hashlib.sha256(
                 trusted_provider_public_key
             ).hexdigest()
-        with self._tx() as db:
+        # Creation, migrations and trigger replacement form one writer
+        # transaction. executescript() would implicitly commit and expose a
+        # missing-trigger window to other processes.
+        with self.backend._transaction("positive_schema") as db:
             if db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='w2_positive_v1_keys'"
             ).fetchone():
                 raise RuntimeError("refusing store that contains w2_positive_v1_keys")
-            db.executescript("""
+            _execute_schema_statements(db, """
                 CREATE TABLE IF NOT EXISTS w2_positive_v1_capacity (
                   operation_key TEXT PRIMARY KEY,
                   amount INTEGER NOT NULL,
@@ -152,7 +169,7 @@ class NativePositivePermitAuthority:
             self._add_column(db, "w2_positive_v1_outbox", "witness_evidence_json", "TEXT")
             self._add_column(db, "w2_positive_v1_outbox", "witness_hash", "TEXT")
             self._add_column(db, "w2_positive_v1_outbox", "provider_receipt_json", "TEXT")
-            db.executescript("""
+            _execute_schema_statements(db, """
                 DROP TRIGGER IF EXISTS w2_block_historical_after_positive;
                 CREATE TRIGGER w2_block_historical_after_positive
                 BEFORE INSERT ON reservations
