@@ -1,0 +1,58 @@
+name: Positive provider review latch laboratory
+on:
+  push:
+    branches: [fix/positive-provider-review-latch]
+  pull_request:
+    paths:
+      - w2_integration/native_positive_g4a.py
+      - w2_integration/test_positive_provider_review_latch.py
+      - .github/workflows/positive-provider-review.yml
+permissions:
+  contents: read
+jobs:
+  review-latch:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            sep: ':'
+          - os: windows-latest
+            sep: ';'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      TENIR_ENV: test
+      HOST_SCOPE: single-host
+      PYTHONPATH: ${{ github.workspace }}${{ matrix.sep }}${{ github.workspace }}/w2_integration
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Record source and install dependencies
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/sha.txt
+          python -m pip install -e '.[test,ep02]'
+          python -m pip check
+          python -m pip freeze > evidence/dependencies.txt
+      - name: Run caught-failure and related grant regressions
+        run: |
+          set -euo pipefail
+          python -m pytest -q -o addopts= w2_integration/test_positive_provider_review_latch.py w2_integration/test_positive_grant_exact_replay.py w2_integration/test_jw09_positive_g4a.py w2_integration/test_jw10_b1_isolation.py w2_integration/test_jw11_custody.py w2_integration/test_jw12_close_open.py --junitxml=evidence/review.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: positive-provider-review-${{ matrix.os }}-${{ github.run_id }}
+          path: evidence/

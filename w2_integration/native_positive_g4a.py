@@ -199,13 +199,21 @@ class NativePositiveG4A:
             )
             if updated.rowcount != 1:
                 raise RuntimeError("positive grant already consumed")
-        receipt = provider.execute(
-            operation_key, idempotency_key, command, claim=claim,
-        )
-        if receipt.get("attestation_type") or receipt.get("schema") != "proof-provider-receipt/candidate-v0.1":
-            raise RuntimeError("connector attestation is not a provider receipt")
-        if receipt.get("request_hash") != grant["request_hash"]:
-            raise RuntimeError("B3 receipt request_hash diverges from grant")
+        try:
+            receipt = provider.execute(
+                operation_key, idempotency_key, command, claim=claim,
+            )
+            if receipt.get("attestation_type") or receipt.get("schema") != "proof-provider-receipt/candidate-v0.1":
+                raise RuntimeError("connector attestation is not a provider receipt")
+            if receipt.get("request_hash") != grant["request_hash"]:
+                raise RuntimeError("B3 receipt request_hash diverges from grant")
+        except Exception:
+            # A caught exception or invalid receipt does not establish whether
+            # the provider committed an effect. Keep the reservation, freeze
+            # direct claim verification and require manual review. Abrupt
+            # process death and a failed latch write remain separate gaps.
+            self.authority.mark_dispatch_review(claim, "positive provider outcome unverified")
+            raise
         return {
             "status": "EXECUTED",
             "claim": claim,
