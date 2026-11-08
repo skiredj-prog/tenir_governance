@@ -14,14 +14,27 @@ from proof_provider import AckLost, ProofProvider
 class KernelClaimProofProvider(ProofProvider):
     def __init__(self, db_path: str = ":memory:", audience: str = "kernel-dispatch",
                  *, claim_verifier=None):
-        if claim_verifier is None:
+        if not self._is_native_verifier(claim_verifier):
             raise ValueError("native claim verifier required")
         self.audience = audience
         self._native_claim_verifier = claim_verifier
         self._verify_native_claim.__func__._native_bound = True
         super().__init__(db_path, claim_verifier=self._verify_native_claim)
 
+    @staticmethod
+    def _is_native_verifier(verifier):
+        # The lab supports both existing import paths; never accept a wrapper
+        # callback or a subclass override as the native authority method.
+        from native_positive_permit import NativePositivePermitAuthority as DirectAuthority
+        from w2_integration.native_positive_permit import NativePositivePermitAuthority as PackageAuthority
+        owner = getattr(verifier, "__self__", None)
+        method = getattr(verifier, "__func__", None)
+        return any(type(owner) is cls and method is cls.verify_dispatch_claim
+                   for cls in (DirectAuthority, PackageAuthority))
+
     def _verify_native_claim(self, operation_id, idempotency_key, payload, claim) -> bool:
+        if not self._is_native_verifier(self._native_claim_verifier):
+            return False
         if not isinstance(claim, dict):
             return False
         if (claim.get("operation") != operation_id

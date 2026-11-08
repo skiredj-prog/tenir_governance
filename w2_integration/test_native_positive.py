@@ -298,11 +298,12 @@ def test_kernel_claim_required():
     with tempfile.TemporaryDirectory() as d:
         from w2_integration.proof_provider import ProofProvider
         payload = {"amount": 1}
+        raw_provider = ProofProvider(db_path=d + "/raw.db")
         try:
-            ProofProvider(db_path=d + "/raw.db").execute("op", "idem", payload)
-            raise AssertionError("raw provider must fail closed")
-        except RuntimeError as exc:
-            assert "authenticated kernel claim required" in str(exc)
+            with pytest.raises(RuntimeError, match="authenticated kernel claim required"):
+                raw_provider.execute("op", "idem", payload)
+        finally:
+            raw_provider.conn.close()
 
         backend = SQLiteConsensusBackend(d + "/native")
         backend.register_resource("budget", 1000000)
@@ -384,16 +385,15 @@ def test_ack_lost_retries_same_claim_then_confirms_once(monkeypatch):
         payload = {"amount": 5, "currency": "EUR"}
         backend = SQLiteConsensusBackend(d + "/native")
         backend.register_resource("budget", 1000000)
-        authority_ref = {}
-        provider = KernelClaimProofProvider(
-            db_path=d + "/provider.db",
-            claim_verifier=lambda *args: authority_ref["authority"].verify_dispatch_claim(*args),
+        provider_public_key = Ed25519PrivateKey.from_private_bytes(bytes(range(64, 96))).public_key().public_bytes(
+            Encoding.Raw, PublicFormat.Raw
         )
-        provider_public_key = provider.public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
         authority = NativePositivePermitAuthority(
             backend, trusted_provider_public_key=provider_public_key
         )
-        authority_ref["authority"] = authority
+        provider = KernelClaimProofProvider(
+            db_path=d + "/provider.db", claim_verifier=authority.verify_dispatch_claim,
+        )
         authority.admit_reserve_issue("op-ack-lost", "eval-ack", payload, resource_id="budget")
 
         uncertain = provider.dispatch_authorized(
@@ -410,13 +410,12 @@ def test_ack_lost_retries_same_claim_then_confirms_once(monkeypatch):
             assert row["idempotency_key"] == "idem-ack-lost"
 
         provider.conn.close()
-        authority_ref["authority"] = NativePositivePermitAuthority(
+        authority = NativePositivePermitAuthority(
             backend, trusted_provider_public_key=provider_public_key
         )
-        authority = authority_ref["authority"]
         provider = KernelClaimProofProvider(
             db_path=d + "/provider.db",
-            claim_verifier=lambda *args: authority_ref["authority"].verify_dispatch_claim(*args),
+            claim_verifier=authority.verify_dispatch_claim,
         )
         assert provider.key_custody == "EXTERNAL_ENV"
 
@@ -505,6 +504,7 @@ def test_untrusted_provider_key_blocks_before_claim_consumption():
                 "WHERE operation_key='op-untrusted-provider'"
             ).fetchone()[0] == 0
         assert provider.execute_count("op-untrusted-provider") == 0
+        provider.conn.close()
 
 
 def test_same_approval_claim_is_linearized_across_processes():
