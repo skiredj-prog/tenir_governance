@@ -1,0 +1,51 @@
+name: B1 simulated G4-A UID service laboratory
+on:
+  push:
+    branches: [fix/b1-uid-writer-isolation]
+  pull_request:
+    paths:
+      - 'tenir_governance/operations/experimental_g4a_uid_service.py'
+      - 'tests/test_experimental_g4a_uid_service.py'
+      - 'tests/test_g4a_uid_separation_linux.py'
+      - '.github/workflows/b1-uid-service-lab.yml'
+permissions:
+  contents: read
+jobs:
+  uid-lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install -e '.[test,ep02]'
+          python -m pip check
+      - name: Stage root-owned read-only source
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/checkout-sha.txt
+          sudo mkdir -p /run/tenir-uid-source/tests
+          sudo cp -a tenir_governance /run/tenir-uid-source/
+          sudo cp tests/test_g4a_uid_separation_linux.py /run/tenir-uid-source/tests/
+          sudo chown -R root:root /run/tenir-uid-source
+          sudo find /run/tenir-uid-source -type d -exec chmod 755 {} +
+          sudo find /run/tenir-uid-source -type f -exec chmod 444 {} +
+          diff -rq tenir_governance /run/tenir-uid-source/tenir_governance
+      - name: Run protocol and real UID separation tests
+        run: |
+          set -euo pipefail
+          python -m pytest -q -o addopts= tests/test_experimental_g4a_uid_service.py --junitxml=evidence/protocol.xml
+          sudo -E env PATH="$PATH" PYTHONPATH=/run/tenir-uid-source PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TENIR_ENV=test HOST_SCOPE=single-host python -m pytest -q -rs -o addopts= /run/tenir-uid-source/tests/test_g4a_uid_separation_linux.py --junitxml="$PWD/evidence/uid.xml" 2>&1 | tee evidence/uid.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b1-uid-service-lab-${{ github.run_id }}
+          path: evidence/
