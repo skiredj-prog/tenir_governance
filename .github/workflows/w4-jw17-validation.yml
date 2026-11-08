@@ -1,0 +1,59 @@
+name: W4 verifier and JW17 evidence inventory
+on:
+  push:
+    branches: [audit/w4-jw17-f407-validation]
+permissions:
+  contents: read
+jobs:
+  verifier-and-inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out validation harness
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          ref: f4072116404d403c82c5ae1acf2622e9e66af9a5
+          path: sut
+          persist-credentials: false
+      - name: Check out REG W4 verifier
+        uses: actions/checkout@v4
+        with:
+          repository: skiredj-prog/reg-conformance
+          ref: 9eeee967579b4da9ffd6d8c77663f0f20fdf7fff
+          path: reg
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Record exact subjects and dependencies
+        run: |
+          set -euo pipefail
+          test "$(git -C sut rev-parse HEAD)" = f4072116404d403c82c5ae1acf2622e9e66af9a5
+          test "$(git -C reg rev-parse HEAD)" = 9eeee967579b4da9ffd6d8c77663f0f20fdf7fff
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/harness-sha.txt
+          git -C sut rev-parse HEAD | tee evidence/sut-sha.txt
+          git -C reg rev-parse HEAD | tee evidence/reg-sha.txt
+          python -m pip install -r reg/proof01_w4/requirements-verifier.txt
+          python -m pip check | tee evidence/pip-check.txt
+          python -m pip freeze > evidence/dependencies.txt
+      - name: Run W4 verifier unit and fixture suite
+        run: |
+          set -euo pipefail
+          cd reg
+          python -B -m unittest discover -s proof01_w4/tests -v 2>&1 | tee ../evidence/w4-tests.log
+      - name: Inventory candidate evidence without promoting historical data
+        run: |
+          set -euo pipefail
+          python -c "import json,pathlib; p=pathlib.Path('sut/qualification/jw13/manifest.json'); j=json.loads(p.read_text()); print('Historical JW13 subject:',j['subject_sha']); print('Candidate:', 'f4072116404d403c82c5ae1acf2622e9e66af9a5'); print('Subject match:',j['subject_sha']=='f4072116404d403c82c5ae1acf2622e9e66af9a5'); print('Native integrated W4 verification: NOT RUN - candidate-specific bundle, deployment digest, topology and independent pins required')" | tee evidence/subject-inventory.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: w4-jw17-verifier-inventory-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 30
