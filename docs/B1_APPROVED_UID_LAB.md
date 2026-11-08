@@ -1,0 +1,38 @@
+# B1 signed-approval UID laboratory
+
+This is an opt-in, Linux-only synthetic experiment. The UID boundary and a
+valid signature do not establish that the signer's decision is correct, that
+the deployed issuer was independent, or that any external provider performed
+an effect. The service has no real-provider option and must not be used for
+production. B1, B2, integration and production remain HOLD.
+
+An external issuer signs the exact operation key, evaluation ID, idempotency
+key, canonical command hash, audience, approval ID, nonce, issuer key ID and
+validity period. The writer pins the configured Ed25519 public key in its
+private SQLite store, verifies the signature and persists an append-only binding
+before invoking the synthetic positive path. Reuse of an approval ID, nonce,
+operation or idempotency key for a different signed body is refused. Exact
+replay follows the existing UNKNOWN behavior. The writer must run with a private
+umask and trusted paths and be isolated from workers by Linux UIDs.
+
+## Transaction and recovery boundary
+
+The approval-binding transaction commits **before** the native permit and I8
+reservation, which are followed by outbox creation and a pre-send intent. These
+are separate transactions. A crash can leave an approval bound without a
+reservation; exact retry while the approval remains valid may continue. No
+atomic all-or-nothing claim is made across approval, budget, outbox and an
+external provider. After an ambiguous send, no automatic resend or second
+external effect is asserted.
+
+Trust-key installation is refused on a store already containing positive
+operations, and a pinned key change is refused. Key rotation and revocation,
+clock manipulation, administrator/same-writer-UID compromise, system service
+management, source integrity, secure key custody and legacy production paths
+remain unresolved. The original unapproved experimental service still exists;
+the environment must not expose or start it as a production authority.
+
+Moving to a real provider requires a trusted policy issuer, a single reviewed
+integrated authority, transaction/recovery design, real credential and network
+isolation, exhaustive writer and connector inventory, provider-specific
+idempotency/reconciliation and independent end-to-end validation.

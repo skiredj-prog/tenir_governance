@@ -1,0 +1,76 @@
+name: B1 signed approval UID laboratory
+on:
+  push:
+    branches: [fix/b1-signed-approval-uid]
+  pull_request:
+    paths:
+      - w2_integration/b1_approved_positive_uid_service.py
+      - w2_integration/test_b1_approved_uid_protocol.py
+      - tests/test_b1_approved_uid_linux.py
+      - .github/workflows/b1-approved-uid.yml
+permissions:
+  contents: read
+jobs:
+  signed-approval:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            sep: ':'
+          - os: windows-latest
+            sep: ';'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      TENIR_ENV: test
+      HOST_SCOPE: single-host
+      PYTHONPATH: ${{ github.workspace }}${{ matrix.sep }}${{ github.workspace }}/w2_integration
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install and record exact source
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/sha.txt
+          python -m pip install -e '.[test,ep02]'
+          python -m pip check
+          python -m pip freeze > evidence/dependencies.txt
+      - name: Signed-approval and parent regressions
+        run: |
+          set -euo pipefail
+          python -m pytest -q -o addopts= w2_integration/test_b1_approved_uid_protocol.py w2_integration/test_positive_uid_protocol.py w2_integration/test_b1_untrusted_verifier.py w2_integration/test_positive_process_exit_fence.py --junitxml=evidence/approval.xml
+      - name: Stage trusted source for UID test
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /run/tenir-approval-source/tests
+          sudo cp -a tenir_governance w2_integration /run/tenir-approval-source/
+          sudo cp tests/test_b1_approved_uid_linux.py /run/tenir-approval-source/tests/
+          sudo chown -R root:root /run/tenir-approval-source
+          sudo find /run/tenir-approval-source -type d -exec chmod 755 {} +
+          sudo find /run/tenir-approval-source -type f -exec chmod 444 {} +
+          diff -rq tenir_governance /run/tenir-approval-source/tenir_governance
+          diff -rq w2_integration /run/tenir-approval-source/w2_integration
+      - name: Verify independent signer and distinct Linux UIDs
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo -E env PATH="$PATH" PYTHONPATH=/run/tenir-approval-source:/run/tenir-approval-source/w2_integration PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TENIR_ENV=test HOST_SCOPE=single-host python -m pytest -q -rs -o addopts= /run/tenir-approval-source/tests/test_b1_approved_uid_linux.py --junitxml="$PWD/evidence/uid.xml" 2>&1 | tee evidence/uid.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b1-signed-approval-${{ matrix.os }}-${{ github.run_id }}
+          path: evidence/
