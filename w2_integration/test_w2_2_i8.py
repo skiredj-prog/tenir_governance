@@ -1,15 +1,18 @@
 """W2.2 Tranche 2: I8 sequencing contract tests"""
 import tempfile, os
+from contextlib import ExitStack
 from w2_2a_authority import NativeAuthorityGate
 from i8_ledger import I8Ledger
 from lab_s1_bridge import RC01Lab
 from w2_2_i8_sequencer import I8Sequencer
 
 def test_pre_admit_no_reservation():
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, ExitStack() as cleanup:
         i8 = I8Ledger(db_path=os.path.join(d, "i8.db"))
+        cleanup.callback(i8.conn.close)
         auth = NativeAuthorityGate()
         rc01 = RC01Lab(db_path=os.path.join(d, "rc01.db"))
+        cleanup.callback(rc01.conn.close)
         seq = I8Sequencer(i8, auth, rc01)
         seq.pre_admit("op1", "eval1", "hash1")
         assert i8.reservation_count("op1") == 0
@@ -17,10 +20,12 @@ def test_pre_admit_no_reservation():
         print("pre-admit no reservation: PASS")
 
 def test_refusal_no_reservation():
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, ExitStack() as cleanup:
         i8 = I8Ledger(db_path=os.path.join(d, "i8.db"))
+        cleanup.callback(i8.conn.close)
         auth = NativeAuthorityGate()
         rc01 = RC01Lab(db_path=os.path.join(d, "rc01.db"))
+        cleanup.callback(rc01.conn.close)
         seq = I8Sequencer(i8, auth, rc01)
         seq.pre_admit("op1", "eval1", "hash1")
         result = seq.try_reserve_and_dispatch("op1", "hash1")
@@ -36,10 +41,12 @@ def test_no_auto_release_on_uncertain():
     print("no auto-release on uncertain: DOCUMENTED")
 
 def test_causal_binding_on_pre_admit():
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, ExitStack() as cleanup:
         i8 = I8Ledger(db_path=os.path.join(d, "i8.db"))
+        cleanup.callback(i8.conn.close)
         auth = NativeAuthorityGate()
         rc01 = RC01Lab(db_path=os.path.join(d, "rc01.db"))
+        cleanup.callback(rc01.conn.close)
         seq = I8Sequencer(i8, auth, rc01)
         grant, binding = seq.pre_admit("op1", "eval1", "hash1", "idem1")
         assert binding["operation_id"] == "op1"
@@ -51,10 +58,12 @@ def test_causal_binding_on_pre_admit():
         print("causal binding on pre-admit: PASS")
 
 def test_binding_survives_refusal():
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, ExitStack() as cleanup:
         i8 = I8Ledger(db_path=os.path.join(d, "i8.db"))
+        cleanup.callback(i8.conn.close)
         auth = NativeAuthorityGate()
         rc01 = RC01Lab(db_path=os.path.join(d, "rc01.db"))
+        cleanup.callback(rc01.conn.close)
         seq = I8Sequencer(i8, auth, rc01)
         seq.pre_admit("op1", "eval1", "hash1")
         result = seq.try_reserve_and_dispatch("op1", "hash1")

@@ -1,44 +1,42 @@
-"""W2.2 positive contract tests"""
+"""W2 positive invariants migrated to native claims, not a legacy authorization bypass."""
+from contextlib import ExitStack
+import multiprocessing
 import os
-import sqlite3
+from pathlib import Path
+import signal
 import tempfile
-from datetime import datetime, timezone, timedelta
-from w2_2_positive_g4a import PositiveG4A
-from w2_2a_authority import NativeAuthorityGate
+
+import pytest
+
 from i8_ledger import I8Ledger
 from lab_s1_bridge import RC01Lab
+from native_positive_g4a import NativePositiveG4A
 from proof_provider import ProofProvider
+from w2_2_positive_g4a import PositiveG4A
+from w2_2a_authority import NativeAuthorityGate
+from w2_regression_support import RESOURCE, command, event_count, native_lab, reservation
 
 
-def _stack(d):
-    i8 = I8Ledger(db_path=os.path.join(d, "i8.db"))
-    rc01 = RC01Lab(db_path=os.path.join(d, "rc01.db"))
-    provider = ProofProvider(db_path=os.path.join(d, "p.db"))
-    g4a = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
-    return i8, rc01, provider, g4a
+def _admit(lab, op, payload):
+    return lab.auth.admit_reserve_issue(op, "eval", payload, resource_id=RESOURCE)
+
+
+def _dispatch(lab, op, payload, key=None):
+    return lab.provider.dispatch_authorized(lab.auth, op, key or "idem-" + op, payload)
 
 
 def test_positive_sequence():
-    with tempfile.TemporaryDirectory() as d:
-        i8, rc01, provider, g4a = _stack(d)
-        payload = {"scope": {"account": "a", "amount_minor": 100, "currency": "EUR"}, "action_type": "transfer"}
-        permit = g4a.admit_and_reserve("op-pos", "eval1", payload)
-        assert i8.reservation_count("op-pos") == 1
-        assert rc01.get_state("op-pos") == "RESERVED"
-        assert permit.signature
-        receipt = g4a.consume_and_dispatch("op-pos", payload, "idem-pos")
-        assert receipt["effect_status"] == "EXECUTED"
-        assert provider.execute_count("op-pos") == 1
-        assert rc01.get_state("op-pos") == "DISPATCHING"
-        # Durable consumption survives a new process on the same DB
-        g4a2 = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
-        try:
-            g4a2.consume_and_dispatch("op-pos", payload, "idem-pos-2")
-            raise AssertionError("consumed permit must not dispatch again")
-        except RuntimeError as e:
-            assert "consumed" in str(e)
-        assert provider.execute_count("op-pos") == 1
-        print("positive sequence + durable consumption: PASS")
+    with tempfile.TemporaryDirectory() as d, native_lab(d) as lab:
+        payload = command()
+        gate = NativePositiveG4A(lab.auth)
+        grant = gate.evaluate_and_grant("op-pos", "eval1", payload, resource_id=RESOURCE)
+        assert grant["signature"]
+        assert grant["historical_execution_authorized"] is False
+        assert reservation(lab, "op-pos")["state"] == "RESERVED"
+        result = gate.dispatch_to_b3("op-pos", "idem-pos", payload, grant, lab.provider)
+        assert result["receipt"]["effect_status"] == "EXECUTED"
+        assert lab.provider.verify_receipt(result["receipt"])
+        assert lab.provider.execute_count("op-pos") == 1
 
 
 def test_historical_still_refused():
@@ -46,301 +44,285 @@ def test_historical_still_refused():
     gate.issue("op-old", "eval1", "h")
     ok, reason = gate.authorize_dispatch("op-old", "h")
     assert not ok and reason == "execution_not_authorized"
-    print("historical path still refused: PASS")
 
 
 def test_hash_mismatch_on_positive():
-    with tempfile.TemporaryDirectory() as d:
-        _, _, provider, g4a = _stack(d)
-        g4a.admit_and_reserve("op1", "eval1", {"amount": 100})
-        try:
-            g4a.consume_and_dispatch("op1", {"amount": 200}, "idem1")
-            raise AssertionError("should have refused hash mismatch")
-        except RuntimeError as e:
-            assert "mismatch" in str(e)
-        assert provider.execute_count("op1") == 0
-        print("hash mismatch on positive path: PASS")
+    with tempfile.TemporaryDirectory() as d, native_lab(d) as lab:
+        _admit(lab, "op1", command(100))
+        with pytest.raises(RuntimeError, match="no valid unconsumed permit"):
+            _dispatch(lab, "op1", command(200))
+        assert lab.provider.execute_count("op1") == 0
+        assert event_count(lab, "op1", "dispatch_claimed") == 0
 
 
 def test_expired_permit_refused():
-    with tempfile.TemporaryDirectory() as d:
-        _, _, provider, g4a = _stack(d)
-        payload = {"amount": 100}
-        g4a.admit_and_reserve("op-exp", "eval1", payload)
-        past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
-        g4a.conn.execute("UPDATE permits SET expires_at = ? WHERE operation_id = ?", (past, "op-exp"))
-        g4a.conn.commit()
-        try:
-            g4a.consume_and_dispatch("op-exp", payload, "idem-exp")
-            raise AssertionError("expired permit must be refused")
-        except RuntimeError as e:
-            assert "expired" in str(e)
-        assert provider.execute_count("op-exp") == 0
-        row = sqlite3.connect(os.path.join(d, "permits.db")).execute(
-            "SELECT consumed FROM permits WHERE operation_id = ?", ("op-exp",)
-        ).fetchone()
-        assert row[0] == 0
-        print("expired permit refused: PASS")
+    with tempfile.TemporaryDirectory() as d, native_lab(d) as lab:
+        payload = command()
+        _admit(lab, "op-exp", payload)
+        with lab.backend._connection() as db:
+            db.execute("UPDATE w2_positive_v1_permits SET expires_at='2020-01-01T00:00:00+00:00' WHERE operation_key='op-exp'")
+        with pytest.raises(RuntimeError, match="permit expired"):
+            _dispatch(lab, "op-exp", payload)
+        assert lab.provider.execute_count("op-exp") == 0
+        with lab.backend._connection() as db:
+            row = db.execute("SELECT consumed, nonce_status FROM w2_positive_v1_permits WHERE operation_key='op-exp'").fetchone()
+            assert row["consumed"] == 0 and row["nonce_status"] == "ISSUED"
 
 
 def test_contradictory_reissue_refused():
-    with tempfile.TemporaryDirectory() as d:
-        _, _, _, g4a = _stack(d)
-        g4a.admit_and_reserve("op-re", "eval1", {"amount": 100})
-        try:
-            g4a.admit_and_reserve("op-re", "eval1", {"amount": 999})
-            raise AssertionError("contradictory reissue must be refused")
-        except RuntimeError as e:
-            assert "contradictory" in str(e)
-        print("contradictory reissue refused: PASS")
+    with tempfile.TemporaryDirectory() as d, native_lab(d) as lab:
+        original = _admit(lab, "op-re", command())
+        with pytest.raises(RuntimeError, match="contradictory"):
+            _admit(lab, "op-re", command(999))
+        assert reservation(lab, "op-re")["reservation_id"] == original["reservation_id"]
+        assert event_count(lab, "op-re", "permit_issued_after_reservation") == 1
 
 
 def test_key_survives_restart_and_dispatch():
     with tempfile.TemporaryDirectory() as d:
-        i8, rc01, provider, g4a = _stack(d)
-        payload = {"amount": 50}
-        g4a.admit_and_reserve("op-k", "eval", payload)
-        key_id = g4a.key_id
-        g4a2 = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
-        assert g4a2.key_id == key_id
-        receipt = g4a2.consume_and_dispatch("op-k", payload, "idem-k")
-        assert receipt["effect_status"] == "EXECUTED"
-        assert provider.execute_count("op-k") == 1
-        print("key survives restart: PASS")
+        with native_lab(d) as lab:
+            gate = NativePositiveG4A(lab.auth)
+            payload = command(50)
+            grant = gate.evaluate_and_grant("op-k", "eval", payload, resource_id=RESOURCE)
+            key_id = lab.auth.key_id
+        with native_lab(d) as lab:
+            assert lab.auth.key_id == key_id
+            assert lab.auth.key_custody == "EXTERNAL_HEX"
+            result = NativePositiveG4A(lab.auth).dispatch_to_b3("op-k", "idem-k", payload, grant, lab.provider)
+            assert result["receipt"]["effect_status"] == "EXECUTED"
+            assert lab.provider.execute_count("op-k") == 1
+            with pytest.raises(RuntimeError, match="already consumed"):
+                NativePositiveG4A(lab.auth).dispatch_to_b3("op-k", "idem-new", payload, grant, lab.provider)
+            assert lab.provider.execute_count("op-k") == 1
 
 
 def test_orphan_reservation_held_not_abandoned():
-    with tempfile.TemporaryDirectory() as d:
-        i8 = I8Ledger(db_path=os.path.join(d, "i8.db"))
-        rc01 = RC01Lab(db_path=os.path.join(d, "rc01.db"))
-        provider = ProofProvider(db_path=os.path.join(d, "p.db"))
-        i8.reserve("op-or", 100)
-        rc01.transition("op-or", "RESERVED", "crash_before_permit")
-        g4a = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
-        assert i8.reservation_count("op-or") == 1
-        hold = g4a.conn.execute(
-            "SELECT reason FROM recovery_holds WHERE operation_id = ?", ("op-or",)
-        ).fetchone()
-        assert hold["reason"] == "reservation_without_permit_not_abandoned"
-        print("orphan reservation held: PASS")
+    with tempfile.TemporaryDirectory() as d, native_lab(d) as lab:
+        reserved = lab.backend.reserve("op-or", 100, RESOURCE)
+        assert reserved.status == "RESERVED"
+        with pytest.raises(RuntimeError, match="historical I8 reservation"):
+            _admit(lab, "op-or", command())
+        assert reservation(lab, "op-or")["state"] == "RESERVED"
+        with lab.backend._connection() as db:
+            assert db.execute("SELECT COUNT(*) FROM reservations WHERE idempotency_key='op-or'").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_permits WHERE operation_key='op-or'").fetchone()[0] == 0
+        assert lab.provider.execute_count("op-or") == 0
 
 
 def test_crash_after_claim_repairs_once():
     with tempfile.TemporaryDirectory() as d:
-        i8, rc01, provider, g4a = _stack(d)
-        payload = {"amount": 40}
-        g4a.admit_and_reserve("op-c", "eval", payload)
-        g4a.conn.execute(
-            """UPDATE permits
-               SET consumed = 1, dispatch_claim = 1, idempotency_key = ?, payload_json = ?
-               WHERE operation_id = 'op-c'""",
-            ("idem-c", '{"amount":40}'),
-        )
-        g4a.conn.commit()
-        assert rc01.get_state("op-c") == "RESERVED"
-        assert provider.execute_count("op-c") == 0
-        g4a2 = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
-        assert rc01.get_state("op-c") == "DISPATCHING"
-        assert provider.execute_count("op-c") == 1
-        g4a3 = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
-        assert provider.execute_count("op-c") == 1
-        assert g4a2.key_custody == "LAB_CLEARTEXT_SQLITE"
-        assert g4a3.key_id == g4a.key_id
-        print("crash after claim repaired once: PASS")
-
-
-def _claim(g4a, op_id, idem, payload_json):
-    g4a.conn.execute(
-        """UPDATE permits
-           SET consumed = 1, dispatch_claim = 1, idempotency_key = ?, payload_json = ?
-           WHERE operation_id = ?""",
-        (idem, payload_json, op_id),
-    )
-    g4a.conn.commit()
+        payload = command(40)
+        with native_lab(d) as lab:
+            _admit(lab, "op-c", payload)
+            claim = lab.auth.consume_and_claim("op-c", payload, "idem-op-c")
+            assert claim["status"] == "PENDING"
+            assert lab.provider.execute_count("op-c") == 0
+        with native_lab(d) as lab:
+            assert lab.provider.execute_count("op-c") == 0
+            result = _dispatch(lab, "op-c", payload)
+            assert result["status"] == "CONFIRMED"
+            assert result["claim"]["execution_id"] == claim["execution_id"]
+            assert result["claim"]["claim_token"] == claim["claim_token"]
+        with native_lab(d) as lab:
+            result2 = _dispatch(lab, "op-c", payload)
+            assert result2["receipt"] == result["receipt"]
+            assert lab.provider.execute_count("op-c") == 1
+            assert event_count(lab, "op-c", "dispatch_send_granted") == 1
+            assert event_count(lab, "op-c", "dispatch_confirmed") == 1
 
 
 def test_altered_claim_does_not_dispatch():
-    with tempfile.TemporaryDirectory() as d:
-        i8, rc01, provider, g4a = _stack(d)
-        g4a.admit_and_reserve("op-bad", "eval", {"amount": 40})
-        _claim(g4a, "op-bad", "idem-bad", '{"amount":40}')
-        g4a.conn.execute("UPDATE permits SET signature = ? WHERE operation_id = 'op-bad'", (b"altered",))
-        g4a.conn.commit()
-        g4a2 = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
-        assert provider.execute_count("op-bad") == 0
-        assert rc01.get_state("op-bad") == "RESERVED"
-        reason = g4a2.conn.execute(
-            "SELECT reason FROM recovery_holds WHERE operation_id = 'op-bad'"
-        ).fetchone()["reason"]
-        assert reason == "dispatch_claim_signature_invalid"
-        print("altered claim refused: PASS")
+    with tempfile.TemporaryDirectory() as d, native_lab(d) as lab:
+        payload = command(40)
+        _admit(lab, "op-bad", payload)
+        with lab.backend._connection() as db:
+            db.execute("UPDATE w2_positive_v1_permits SET signature=? WHERE operation_key='op-bad'", (b"altered",))
+        with pytest.raises(RuntimeError, match="permit signature invalid"):
+            _dispatch(lab, "op-bad", payload)
+        assert lab.provider.execute_count("op-bad") == 0
+        assert reservation(lab, "op-bad")["state"] == "RESERVED"
 
 
 def test_claim_without_reservation_does_not_dispatch():
-    with tempfile.TemporaryDirectory() as d:
-        i8, rc01, provider, g4a = _stack(d)
-        g4a.admit_and_reserve("op-nr", "eval", {"amount": 40})
-        _claim(g4a, "op-nr", "idem-nr", '{"amount":40}')
-        i8.abandon_pre_dispatch("op-nr")
-        g4a2 = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
-        assert provider.execute_count("op-nr") == 0
-        reason = g4a2.conn.execute(
-            "SELECT reason FROM recovery_holds WHERE operation_id = 'op-nr'"
-        ).fetchone()["reason"]
-        assert reason == "dispatch_claim_without_reservation"
-        print("claim without reservation refused: PASS")
+    with tempfile.TemporaryDirectory() as d, native_lab(d) as lab:
+        payload = command(40)
+        _admit(lab, "op-nr", payload)
+        with lab.backend._connection() as db:
+            db.execute("UPDATE w2_positive_v1_capacity SET reserved=0 WHERE operation_key='op-nr'")
+        with pytest.raises(RuntimeError, match="no native reservation"):
+            _dispatch(lab, "op-nr", payload)
+        assert lab.provider.execute_count("op-nr") == 0
+        assert event_count(lab, "op-nr", "dispatch_claimed") == 0
 
 
 def test_expired_consumed_claim_still_replays():
+    # An existing effect may be reconciled after expiry; expiry must never
+    # authorize a first send. The separate pending-claim test below covers that.
     with tempfile.TemporaryDirectory() as d:
-        i8, rc01, provider, g4a = _stack(d)
-        payload = {"amount": 40}
-        permit = g4a.admit_and_reserve("op-ex", "eval", payload)
-        past = "2020-01-01T00:00:00+00:00"
-        body = g4a._body(
-            permit.permit_id, "op-ex", "eval", permit.request_hash,
-            permit.reservation_id, permit.issued_at, past,
-        )
-        signature = g4a._sign(body)
-        g4a.conn.execute(
-            """UPDATE permits
-               SET expires_at = ?, signature = ?, consumed = 1, dispatch_claim = 1,
-                   idempotency_key = ?, payload_json = ?
-               WHERE operation_id = 'op-ex'""",
-            (past, signature, "idem-ex", '{"amount":40}'),
-        )
-        g4a.conn.commit()
-        PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
-        assert provider.execute_count("op-ex") == 1
-        assert rc01.get_state("op-ex") == "DISPATCHING"
-        print("expired consumed claim replays: PASS")
+        payload = command(40)
+        with native_lab(d) as lab:
+            _admit(lab, "op-ex", payload)
+            original = _dispatch(lab, "op-ex", payload)
+            with lab.backend._connection() as db:
+                db.execute("UPDATE w2_positive_v1_permits SET expires_at='2020-01-01T00:00:00+00:00' WHERE operation_key='op-ex'")
+        with native_lab(d) as lab:
+            replay = _dispatch(lab, "op-ex", payload)
+            assert replay["status"] == "CONFIRMED"
+            assert replay["receipt"] == original["receipt"]
+            assert replay["claim"]["claim_token"] == original["claim"]["claim_token"]
+            assert lab.provider.execute_count("op-ex") == 1
+            assert event_count(lab, "op-ex", "dispatch_send_granted") == 1
+
+
+def test_expired_pending_claim_cannot_first_send():
+    with tempfile.TemporaryDirectory() as d, native_lab(d) as lab:
+        payload = command(40)
+        _admit(lab, "op-exp-pending", payload)
+        claim = lab.auth.consume_and_claim("op-exp-pending", payload, "idem-op-exp-pending")
+        with lab.backend._connection() as db:
+            db.execute("UPDATE w2_positive_v1_permits SET expires_at='2020-01-01T00:00:00+00:00' WHERE operation_key='op-exp-pending'")
+        result = _dispatch(lab, "op-exp-pending", payload)
+        assert result["status"] == "HOLD" and result["reason"] == "send right expired"
+        assert result["claim"]["claim_token"] == claim["claim_token"]
+        assert lab.provider.execute_count("op-exp-pending") == 0
+        assert reservation(lab, "op-exp-pending")["state"] == "RESERVED"
 
 
 def test_intent_completed_after_restart():
+    # Native admission is atomic: crash after reservation+permit commit, before
+    # the separate positive grant. Recovery must reuse the same reservation.
     with tempfile.TemporaryDirectory() as d:
-        i8, rc01, provider, g4a = _stack(d)
-        payload = {"amount": 70}
-        from w2_2b_canonical import request_hash
-        rh = request_hash(payload)
-        now = "2026-10-28T00:00:00+00:00"
-        g4a.conn.execute(
-            """INSERT INTO permits
-               (permit_id, operation_id, evaluation_id, request_hash, reservation_id,
-                issued_at, expires_at, consumed, signature, key_id, status)
-               VALUES ('permit-op-int', 'op-int', 'eval', ?, 'res-op-int', ?, ?, 0, NULL, ?, 'intent')""",
-            (rh, now, now, g4a.key_id),
-        )
-        g4a.conn.commit()
-        i8.reserve("op-int", 70)
-        rc01.transition("op-int", "RESERVED", "crash_before_issue")
-        g4a2 = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
-        row = g4a2.conn.execute("SELECT status, signature FROM permits WHERE operation_id='op-int'").fetchone()
-        assert row["status"] == "issued" and row["signature"]
-        receipt = g4a2.consume_and_dispatch("op-int", payload, "idem-int")
-        assert receipt["effect_status"] == "EXECUTED"
-        print("intent completed after restart: PASS")
-
+        payload = command(70)
+        with native_lab(d) as lab:
+            issued = _admit(lab, "op-int", payload)
+        with native_lab(d) as lab:
+            gate = NativePositiveG4A(lab.auth)
+            grant = gate.evaluate_and_grant("op-int", "eval", payload, resource_id=RESOURCE)
+            assert grant["reservation_id"] == issued["reservation_id"]
+            assert grant["permit_id"] == issued["permit_id"]
+            assert event_count(lab, "op-int", "permit_issued_after_reservation") == 1
+            result = gate.dispatch_to_b3("op-int", "idem-int", payload, grant, lab.provider)
+            assert result["receipt"]["effect_status"] == "EXECUTED"
+            assert lab.provider.execute_count("op-int") == 1
 
 
 def test_key_id_mismatch_refused():
+    with tempfile.TemporaryDirectory() as d, native_lab(d) as lab:
+        payload = command(40)
+        _admit(lab, "op-kid", payload)
+        with lab.backend._connection() as db:
+            db.execute("UPDATE w2_positive_v1_permits SET key_id=? WHERE operation_key='op-kid'", ("0" * 64,))
+        with pytest.raises(RuntimeError, match="key_id mismatch"):
+            _dispatch(lab, "op-kid", payload)
+        assert lab.provider.execute_count("op-kid") == 0
+        assert reservation(lab, "op-kid")["state"] == "RESERVED"
+
+
+def _claim_and_die(path, method):
+    with native_lab(path) as lab:
+        claim = lab.auth.consume_and_claim("op-kill", command(40), "idem-op-kill")
+        Path(path, "claim-checkpoint").write_text(claim["execution_id"], encoding="utf-8")
+        if method == "sigkill":
+            os.kill(os.getpid(), signal.SIGKILL)
+        os._exit(86)
+
+
+@pytest.mark.parametrize("method", ["os_exit", pytest.param("sigkill", marks=pytest.mark.skipif(os.name != "posix", reason="SIGKILL requires POSIX"))])
+def test_sigkill_after_claim_recovers_once(method):
     with tempfile.TemporaryDirectory() as d:
-        i8, rc01, provider, g4a = _stack(d)
-        g4a.admit_and_reserve("op-kid", "eval", {"amount": 40})
-        _claim(g4a, "op-kid", "idem-kid", '{"amount":40}')
-        g4a.conn.execute("UPDATE permits SET key_id = ? WHERE operation_id = 'op-kid'", ("0" * 64,))
-        g4a.conn.commit()
-        g4a2 = PositiveG4A(i8, rc01, provider, permit_db=os.path.join(d, "permits.db"))
-        assert provider.execute_count("op-kid") == 0
-        assert rc01.get_state("op-kid") == "RESERVED"
-        reason = g4a2.conn.execute(
-            "SELECT reason FROM recovery_holds WHERE operation_id = 'op-kid'"
-        ).fetchone()["reason"]
-        assert reason == "dispatch_claim_unauthenticated"
-        print("key_id mismatch refused: PASS")
+        with native_lab(d) as lab:
+            _admit(lab, "op-kill", command(40))
+        worker = multiprocessing.get_context("spawn").Process(target=_claim_and_die, args=(d, method))
+        worker.start()
+        try:
+            worker.join(30)
+            assert not worker.is_alive()
+            assert worker.exitcode == (-signal.SIGKILL if method == "sigkill" else 86)
+            execution_id = Path(d, "claim-checkpoint").read_text(encoding="utf-8")
+            with native_lab(d) as lab:
+                assert lab.provider.execute_count("op-kill") == 0
+                first = _dispatch(lab, "op-kill", command(40))
+                assert first["status"] == "CONFIRMED"
+                assert first["claim"]["execution_id"] == execution_id
+            with native_lab(d) as lab:
+                replay = _dispatch(lab, "op-kill", command(40))
+                assert replay["receipt"] == first["receipt"]
+                assert lab.provider.execute_count("op-kill") == 1
+                assert event_count(lab, "op-kill", "dispatch_send_granted") == 1
+        finally:
+            if worker.is_alive():
+                worker.terminate()
+            worker.join(10)
 
 
-def test_sigkill_after_claim_recovers_once():
-    import multiprocessing
-    with tempfile.TemporaryDirectory() as d:
-        i8, rc01, provider, g4a = _stack(d)
-        payload = {"amount": 40}
-        g4a.admit_and_reserve("op-kill", "eval", payload)
-        i8.conn.close()
-        rc01.conn.close()
-        provider.conn.close()
-        g4a.conn.close()
-
-        def child(path):
-            os.environ["W2_CRASH_AFTER_CLAIM"] = "1"
-            ci8 = I8Ledger(db_path=os.path.join(path, "i8.db"))
-            crc = RC01Lab(db_path=os.path.join(path, "rc01.db"))
-            cp = ProofProvider(db_path=os.path.join(path, "p.db"))
-            cg = PositiveG4A(ci8, crc, cp, permit_db=os.path.join(path, "permits.db"))
-            cg.consume_and_dispatch("op-kill", {"amount": 40}, "idem-kill")
-
-        proc = multiprocessing.Process(target=child, args=(d,))
-        proc.start()
-        proc.join(10)
-        assert not proc.is_alive()
-        assert proc.exitcode != 0
-        i8b = I8Ledger(db_path=os.path.join(d, "i8.db"))
-        rc01b = RC01Lab(db_path=os.path.join(d, "rc01.db"))
-        providerb = ProofProvider(db_path=os.path.join(d, "p.db"))
-        assert providerb.execute_count("op-kill") == 0
-        PositiveG4A(i8b, rc01b, providerb, permit_db=os.path.join(d, "permits.db"))
-        assert providerb.execute_count("op-kill") == 1
-        assert rc01b.get_state("op-kill") == "DISPATCHING"
-        PositiveG4A(i8b, rc01b, providerb, permit_db=os.path.join(d, "permits.db"))
-        assert providerb.execute_count("op-kill") == 1
-        print("SIGKILL after claim recovers once: PASS")
+def _consume_worker(path, key, ready, start, results):
+    with native_lab(path) as lab:
+        ready.put(key)
+        if not start.wait(30):
+            raise RuntimeError("consume race start not observed")
+        try:
+            result = _dispatch(lab, "op-race", command(40), key)
+            results.put(("ok", result["status"]))
+        except RuntimeError as exc:
+            results.put(("refused", str(exc)))
 
 
 def test_concurrent_consume_one_effect():
-    import multiprocessing
     with tempfile.TemporaryDirectory() as d:
-        i8, rc01, provider, g4a = _stack(d)
-        g4a.admit_and_reserve("op-race", "eval", {"amount": 40})
-        i8.conn.close()
-        rc01.conn.close()
-        provider.conn.close()
-        g4a.conn.close()
-        q = multiprocessing.Queue()
+        with native_lab(d) as lab:
+            _admit(lab, "op-race", command(40))
+        ctx = multiprocessing.get_context("spawn")
+        ready, results, start = ctx.Queue(), ctx.Queue(), ctx.Event()
+        workers = [ctx.Process(target=_consume_worker, args=(d, key, ready, start, results)) for key in ("idem-a", "idem-b")]
+        for worker in workers:
+            worker.start()
+        try:
+            assert sorted([ready.get(timeout=30), ready.get(timeout=30)]) == ["idem-a", "idem-b"]
+            start.set()
+            outcomes = [results.get(timeout=30), results.get(timeout=30)]
+            for worker in workers:
+                worker.join(10)
+                assert worker.exitcode == 0
+            assert outcomes.count(("ok", "CONFIRMED")) == 1
+            assert outcomes.count(("refused", "idempotency key conflict")) == 1
+            with native_lab(d) as lab:
+                assert lab.provider.execute_count("op-race") == 1
+                assert event_count(lab, "op-race", "dispatch_claimed") == 1
+                assert event_count(lab, "op-race", "dispatch_send_granted") == 1
+        finally:
+            start.set()
+            for worker in workers:
+                if worker.is_alive():
+                    worker.terminate()
+                worker.join(10)
+            ready.close()
+            results.close()
 
-        def worker(path, idem, queue):
-            try:
-                wi8 = I8Ledger(db_path=os.path.join(path, "i8.db"))
-                wrc = RC01Lab(db_path=os.path.join(path, "rc01.db"))
-                wp = ProofProvider(db_path=os.path.join(path, "p.db"))
-                wg = PositiveG4A(wi8, wrc, wp, permit_db=os.path.join(path, "permits.db"))
-                wg.consume_and_dispatch("op-race", {"amount": 40}, idem)
-                queue.put("ok")
-            except Exception as exc:
-                queue.put(type(exc).__name__)
 
-        p1 = multiprocessing.Process(target=worker, args=(d, "idem-a", q))
-        p2 = multiprocessing.Process(target=worker, args=(d, "idem-b", q))
-        p1.start(); p2.start()
-        p1.join(10); p2.join(10)
-        results = [q.get(timeout=5), q.get(timeout=5)]
-        providerb = ProofProvider(db_path=os.path.join(d, "p.db"))
-        assert providerb.execute_count("op-race") == 1
-        assert results.count("ok") == 1
-        print(f"concurrent consume one effect: PASS {results}")
-
-if __name__ == "__main__":
-    test_positive_sequence()
-    test_historical_still_refused()
-    test_hash_mismatch_on_positive()
-    test_expired_permit_refused()
-    test_contradictory_reissue_refused()
-    test_key_survives_restart_and_dispatch()
-    test_orphan_reservation_held_not_abandoned()
-    test_intent_completed_after_restart()
-    test_crash_after_claim_repairs_once()
-    test_altered_claim_does_not_dispatch()
-    test_claim_without_reservation_does_not_dispatch()
-    test_expired_consumed_claim_still_replays()
-    test_key_id_mismatch_refused()
-    test_sigkill_after_claim_recovers_once()
-    test_concurrent_consume_one_effect()
-    print("Positive contract tests: PASS")
+def test_legacy_positive_dispatch_and_restart_cannot_execute_without_native_claim():
+    with tempfile.TemporaryDirectory() as d, ExitStack() as cleanup:
+        i8 = I8Ledger(os.path.join(d, "i8.db"))
+        rc01 = RC01Lab(os.path.join(d, "rc01.db"))
+        provider = ProofProvider(os.path.join(d, "provider.db"))
+        for obj in (i8, rc01, provider):
+            cleanup.callback(obj.conn.close)
+        gate = PositiveG4A(i8, rc01, provider, os.path.join(d, "legacy-permits.db"))
+        cleanup.callback(gate.conn.close)
+        gate.admit_and_reserve("op-legacy", "eval", {"amount": 40})
+        with pytest.raises(RuntimeError, match="authenticated kernel claim required"):
+            gate.consume_and_dispatch("op-legacy", {"amount": 40}, "idem-legacy")
+        assert provider.execute_count("op-legacy") == 0
+        assert i8.reservation_count("op-legacy") == 1
+        assert i8.net_settlement_count("op-legacy") == 0
+        # Constructor recovery of the legacy persisted claim must also refuse.
+        gate.conn.execute("UPDATE permits SET consumed=1, dispatch_claim=1, idempotency_key=?, payload_json=? WHERE operation_id=?",
+                          ("idem-legacy", '{"amount":40}', "op-legacy"))
+        gate.conn.commit()
+        recovered = PositiveG4A.__new__(PositiveG4A)
+        try:
+            with pytest.raises(RuntimeError, match="authenticated kernel claim required"):
+                recovered.__init__(i8, rc01, provider, os.path.join(d, "legacy-permits.db"))
+        finally:
+            if hasattr(recovered, "conn"):
+                recovered.conn.close()
+        assert provider.execute_count("op-legacy") == 0

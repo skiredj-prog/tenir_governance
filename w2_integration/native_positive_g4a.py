@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import secrets
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from cryptography.exceptions import InvalidSignature
@@ -72,17 +73,22 @@ class NativePositiveG4A:
             raise RuntimeError("positive G4-A key changed since grant")
 
     def evaluate_and_grant(
-        self, operation_key: str, evaluation_id: str, payload: dict, *, resource_id: str, _admit_hook=None,
+        self, operation_key: str, evaluation_id: str, payload: dict, *, resource_id: str,
+        dual_grant_id: str | None = None, _admit_hook=None,
     ) -> dict:
         self._require_external_key()
         command = snapshot_command(payload)
         issued = self.authority.admit_reserve_issue(
-            operation_key, evaluation_id, command, resource_id=resource_id, _admit_hook=_admit_hook,
+            operation_key, evaluation_id, command, resource_id=resource_id,
+            dual_grant_id=dual_grant_id, _admit_hook=_admit_hook,
         )
         if issued["request_hash"] != canon_request_hash(command):
             raise RuntimeError("grant request_hash diverges from evaluation")
         with self.authority._write("positive_g4a_grant") as db:
             self._require_same_key(db)
+            self.authority._require_b1_dual_binding(
+                db, operation_key, operation_key, command, require_live=True,
+            )
             permit = db.execute(
                 "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,),
             ).fetchone()
@@ -178,7 +184,8 @@ class NativePositiveG4A:
         return {**body, "signature": signature, "causal": self._causal(body)}
 
     def dispatch_to_b3(
-        self, operation_key: str, idempotency_key: str, payload: dict, grant: dict, provider,
+        self, operation_key: str, idempotency_key: str, payload: dict, grant: dict, provider, *,
+        _send_guard=None, _send_hook=None,
     ) -> dict:
         command = snapshot_command(payload)
         self._require_grant(operation_key, command, grant)
@@ -196,7 +203,17 @@ class NativePositiveG4A:
             self.authority._accepted_grant_id = None
         if claim.get("claimed") is not True:
             raise RuntimeError("positive grant did not produce a claim")
-        with self.authority._write("positive_g4a_consume") as db:
+        # The trusted optional guard ends before provider I/O; an emergency lock
+        # does not wait for an already-started provider call to finish.
+        with (_send_guard() if _send_guard is not None else nullcontext()), self.authority._write("positive_g4a_consume") as db:
+            # ``consume_and_claim`` is an earlier transaction. Recheck the
+            # durable B1 binding in the transaction which irreversibly grants
+            # this path its one send right, immediately before provider I/O.
+            self.authority._require_b1_dual_binding(
+                db, operation_key, idempotency_key, command, require_live=True,
+            )
+            if _send_hook is not None:
+                _send_hook(db)
             updated = db.execute(
                 "UPDATE w2_positive_g4a_v1_grants SET consumed=1 "
                 "WHERE grant_id=? AND operation_key=? AND consumed=0",

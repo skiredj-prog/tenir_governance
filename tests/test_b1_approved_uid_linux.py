@@ -67,7 +67,7 @@ def _client(base):
             print(json.dumps({"ok": False}))
 
 
-def test_worker_requires_independent_signature_and_exact_binding():
+def test_legacy_signed_service_refuses_even_a_valid_independent_approval():
     if sys.platform != "linux" or os.geteuid() != 0:
         pytest.skip("requires disposable Linux root controller and setuid")
     from b1_approved_positive_uid_service import canonical_approval
@@ -112,12 +112,19 @@ def test_worker_requires_independent_signature_and_exact_binding():
             assert not send(WORKER, request)["ok"]
             assert not send(WORKER, {**valid, "approval": {**approval, "signature": "00" * 64}})["ok"]
             assert not send(OTHER, valid)["ok"]
-            assert send(WORKER, valid)["receipt"]["status"] == "EXECUTED"
-            assert send(WORKER, valid)["receipt"]["status"] == "UNKNOWN"
+            # An independent signature is no longer an execution authority.
+            # Positive cross-UID execution is covered by the separate dual
+            # authority laboratory, which also requires a Governor receipt.
+            assert not send(WORKER, valid)["ok"]
+            assert not send(WORKER, valid)["ok"]
             assert not send(WORKER, {**valid, "command": {**command, "amount": 8}})["ok"]
             assert server.wait(timeout=20) == 0, server.stderr.read()
             with sqlite3.connect(str(base / "state/synthetic-provider.sqlite3")) as db:
-                assert db.execute("SELECT COUNT(*) FROM effects").fetchone()[0] == 1
+                assert db.execute("SELECT COUNT(*) FROM effects").fetchone()[0] == 0
+            with sqlite3.connect(str(base / "state/budget/consensus.sqlite3")) as db:
+                assert db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] == 0
+                assert db.execute("SELECT COUNT(*) FROM b1_approved_requests").fetchone()[0] == 0
+                assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_outbox").fetchone()[0] == 0
         finally:
             if server.poll() is None:
                 server.kill()

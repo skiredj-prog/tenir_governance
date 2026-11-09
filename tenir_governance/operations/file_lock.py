@@ -30,7 +30,7 @@ def _thread_lock_for(path: str):
         return _thread_locks.setdefault(key, threading.RLock())
 
 
-def acquire_file_lock(path: str):
+def acquire_file_lock(path: str, *, blocking: bool = True):
     """Open and exclusively lock a stable lock file until its handle closes.
 
     POSIX uses ``flock``. Windows uses a one-byte ``msvcrt`` range lock.
@@ -39,7 +39,8 @@ def acquire_file_lock(path: str):
     """
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     process_lock = _thread_lock_for(path)
-    process_lock.acquire()
+    if not process_lock.acquire(blocking=blocking):
+        raise BlockingIOError("local file lock is busy")
     if os.name == "nt":
         import msvcrt
 
@@ -51,7 +52,7 @@ def acquire_file_lock(path: str):
                 handle.write(b"\0")
                 handle.flush()
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
             return _LockedHandle(handle, process_lock)
         except BaseException:
             if handle is not None:
@@ -66,7 +67,7 @@ def acquire_file_lock(path: str):
     handle = None
     try:
         handle = open(path, "a+b")
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         return _LockedHandle(handle, process_lock)
     except BaseException:
         if handle is not None:

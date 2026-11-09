@@ -19,18 +19,24 @@ from tenir_governance.operations.experimental_g4a_uid_service import (
     ExperimentalUidG4AService, _checked_directory,
 )
 from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
-from w2_2b_canonical import request_hash
-from w2_integration.native_dispatch_command import snapshot_command
 
 
 def _identifier(value):
+    """Shared strict identifier check used by the dual-authority successor."""
     if not isinstance(value, str) or not value or len(value) > 256 or "\x00" in value:
         raise ValueError("invalid identifier")
     return value
 
 
 class ExperimentalPositiveUidService(ExperimentalUidG4AService):
-    """Exposes only native positive laboratory operations to selected UIDs."""
+    """Retired native-only UID endpoint for the synthetic positive laboratory.
+
+    UID separation and a native permit do not establish Governor adjudication
+    or an independent approval.  The endpoint remains importable so an older
+    deployed caller fails closed instead of silently selecting a different
+    transport.  Positive laboratory execution must use
+    :class:`b1_dual_authority.DualApprovedUidService`.
+    """
 
     def __init__(self, state_dir, socket_dir, *, worker_uids):
         if sys.platform != "linux" or not hasattr(socket, "SO_PEERCRED"):
@@ -76,27 +82,6 @@ class ExperimentalPositiveUidService(ExperimentalUidG4AService):
             self.provider.conn.close()
 
     def _dispatch(self, obj):
-        if not isinstance(obj, dict) or obj.get("schema") != "tenir.positive.uid-lab.v1":
-            raise ValueError("invalid request")
-        if obj.get("action") != "submit" or set(obj) != {
-            "schema", "action", "operation_key", "evaluation_id", "idempotency_key", "command"
-        }:
-            raise ValueError("unsupported request")
-        operation = _identifier(obj["operation_key"])
-        evaluation = _identifier(obj["evaluation_id"])
-        idempotency = _identifier(obj["idempotency_key"])
-        command = snapshot_command(obj["command"])
-        with self.authority._tx() as db:
-            prior = db.execute(
-                "SELECT operation_key, idempotency_key, request_hash, status FROM w2_positive_v1_outbox "
-                "WHERE operation_key=? OR idempotency_key=?",
-                (operation, idempotency),
-            ).fetchone()
-        if prior and (prior["operation_key"] != operation or prior["idempotency_key"] != idempotency
-                      or prior["request_hash"] != request_hash(command)):
-            raise ValueError("operation identity conflict")
-        grant = self.gate.evaluate_and_grant(operation, evaluation, command, resource_id=command["resource_id"])
-        if prior and prior["status"] != "PENDING":
-            return {"status": prior["status"], "synthetic": True, "execution_authorized": False}
-        result = self.gate.dispatch_to_b3(operation, idempotency, command, grant, self.provider)
-        return {"status": result["status"], "synthetic": True, "execution_authorized": False}
+        raise RuntimeError(
+            "legacy native UID service disabled: Governor adjudication and independent approval required"
+        )
