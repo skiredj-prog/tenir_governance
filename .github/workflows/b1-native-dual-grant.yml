@@ -1,0 +1,72 @@
+name: B1 native dual-grant laboratory
+on:
+  push:
+    branches: [fix/b11-native-dual-grant]
+  pull_request:
+    paths:
+      - w2_integration/b1_native_dual_grant.py
+      - w2_integration/native_positive_permit.py
+      - w2_integration/native_positive_g4a.py
+      - w2_integration/b1_approved_positive_uid_service.py
+      - w2_integration/b1_dual_authority.py
+      - w2_integration/b1_effects_lab.py
+      - w2_integration/test_b11_native_dual_grant.py
+      - scripts/verify_b11_native_dual_mutation.py
+      - docs/B1_1_NATIVE_DUAL_GRANT.md
+      - docs/B1_1_LEGACY_UID_RETIREMENT.md
+      - docs/B1_APPROVED_UID_LAB.md
+      - docs/B1_DUAL_AUTHORITY_LAB.md
+      - docs/B1_HTTP_STRIPE_CONTRACT_LAB.md
+      - .github/workflows/b1-native-dual-grant.yml
+permissions:
+  contents: read
+jobs:
+  native-dual-grant:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TENIR_ENV: test
+      HOST_SCOPE: single-host
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/w2_integration
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install and record exact source
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/sha.txt
+          python -m pip install -e '.[api,test,raft,ep02]'
+          python -m pip check
+          python -m pip freeze > evidence/dependencies.txt
+          python -m compileall -q w2_integration tenir_governance tenir_kernel
+          git diff --check
+      - name: Run B1.1-B boundary and inherited B1 regressions
+        run: |
+          set -euo pipefail
+          python -m pytest -q -rx -o addopts= \
+            w2_integration/test_b11_native_dual_grant.py \
+            w2_integration/test_b1_dual_authority.py \
+            w2_integration/test_b1_effect_contracts.py \
+            w2_integration/test_b1_generic_provider_fence.py \
+            w2_integration/test_native_dispatch_adapter.py \
+            w2_integration/test_jw09_positive_g4a.py \
+            w2_integration/test_native_positive.py \
+            --junitxml=evidence/regression.xml 2>&1 | tee evidence/regression.log
+      - name: Demonstrate B1.1-B admission mutation is detected
+        run: |
+          set -euo pipefail
+          python scripts/verify_b11_native_dual_mutation.py evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b1-native-dual-grant-${{ github.run_id }}
+          path: evidence/

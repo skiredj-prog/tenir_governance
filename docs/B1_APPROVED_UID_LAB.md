@@ -18,15 +18,19 @@ umask and trusted paths and be isolated from workers by Linux UIDs.
 
 ## Transaction and recovery boundary
 
-Approval binding, native permit issuance and I8 reservation commit together.
-The later positive grant, native outbox creation, witness and pre-send intent
-remain separate operations or transactions. A crash after admission can leave
-a bound approval and reservation without an outbox; exact retry while the
-approval remains valid can continue. No atomic all-or-nothing claim is made
-across approval, budget, grant, witness, outbox and an external provider. After
-an ambiguous send, no automatic resend or second external effect is asserted.
-An orphaned approval binding left by the earlier two-transaction prototype is
-refused for operator review; it is not silently converted into a new permit.
+A verified dual-proof record is stored append-only before admission. The
+subsequent admission transaction revalidates that record and commits the
+approval binding, native permit, I8 reservation and permit link together.
+These are distinct transactions; a crash between them leaves an unused proof
+record, not an authorization to dispatch. The later positive grant, native
+outbox creation, witness and pre-send intent remain separate operations or
+transactions. A crash after admission can leave a bound approval and
+reservation without an outbox; exact retry while the approval remains valid
+can continue. No atomic all-or-nothing claim is made across approval, budget,
+grant, witness, outbox and an external provider. After an ambiguous send, no
+automatic resend or second external effect is asserted. An orphaned approval
+binding left by the earlier two-transaction prototype is refused for operator
+review; it is not silently converted into a new permit.
 
 Trust-key installation is refused on a store already containing positive
 operations, and a pinned key change is refused. Key rotation and revocation,

@@ -53,8 +53,9 @@ admission or send still requires unexpired dual authorization.
 
 ## Send and outcome rules
 
-Before sending, the service revalidates the Governor receipt, independent
-approval, record and shared quarantine; it consumes the native claim and
+Before sending on this HTTP laboratory path, the service revalidates the
+Governor receipt, independent approval, record and shared quarantine; it
+consumes the native claim and
 atomically records a one-time send election with the HTTP outbox's UNKNOWN
 state. Provider I/O occurs after that commit and outside the quarantine gate.
 Repeated calls, concurrent threads/processes and process restart cannot elect

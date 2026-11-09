@@ -28,19 +28,13 @@ mutation inventory.
 The tests do not establish protection from a writer-UID compromise, privileged
 SQL, older binaries, a different deployed service, or a remote host.
 
-## Remaining B1.1 work
+## Relation to B1.1-B
 
-The following public laboratory APIs still accept a native-only authorization
-and therefore remain outside this closure:
-
-- `NativePositiveG4A.evaluate_and_grant()` and `dispatch_to_b3()`;
-- `KernelClaimProofProvider.dispatch_authorized()`;
-- `NativeClaimedDispatchAdapter.dispatch()`.
-
-The next B1.1 slice must bind a Governor receipt and independent-approval hash
-to operation, idempotency key, payload hash and quarantine epoch in the native
-authority transaction. It must recheck that durable binding before admission
-and before send. A caller-provided boolean or callback is insufficient.
+B1.1-A retired only the historical UID socket paths. B1.1-B separately adds a
+durable dual-grant check to named native laboratory paths when the store has a
+complete B1 trust profile; see [B1.1 native dual grant](B1_1_NATIVE_DUAL_GRANT.md).
+It does not change the B1.1-A evidence boundary or establish closure for
+generic connectors, older binaries, privileged SQL, other hosts or production.
 
 Generic core Governor and connector APIs, B2 witness/custody, G4-A integration,
 multi-host behavior and production readiness are not claimed by this change.

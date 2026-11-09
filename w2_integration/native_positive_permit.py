@@ -16,6 +16,7 @@ import os
 import sqlite3
 import secrets
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
+from tenir_governance.operations.payload_binding import canonical_payload_hash
+from b1_native_dual_grant import (
+    APPROVAL_FIELDS,
+    DUAL_GRANT_SCHEMA,
+    GOVERNOR_RECEIPT_FIELDS,
+    canonical_b1,
+    digest_b1,
+)
 from independent_witness import IndependentWitness
 from w2_2b_canonical import request_hash as canon_request_hash
 from w2_integration.native_dispatch_command import COMMAND_SCHEMA, snapshot_command, snapshot_payload
@@ -164,6 +173,36 @@ class NativePositivePermitAuthority:
                   witness_hash TEXT,
                   provider_receipt_json TEXT
                 );
+                CREATE TABLE IF NOT EXISTS b1_native_dual_grants (
+                  dual_grant_id TEXT PRIMARY KEY,
+                  operation_key TEXT NOT NULL UNIQUE,
+                  idempotency_key TEXT NOT NULL UNIQUE,
+                  evaluation_id TEXT NOT NULL,
+                  command_hash TEXT NOT NULL,
+                  envelope_hash TEXT NOT NULL UNIQUE,
+                  approval_id TEXT NOT NULL UNIQUE,
+                  approval_nonce TEXT NOT NULL UNIQUE,
+                  approval_hash TEXT NOT NULL,
+                  approval_body_json TEXT NOT NULL,
+                  approval_signature TEXT NOT NULL,
+                  approval_key_id TEXT NOT NULL,
+                  governor_receipt_hash TEXT NOT NULL,
+                  governor_receipt_json TEXT NOT NULL,
+                  governor_key_id TEXT NOT NULL,
+                  audience TEXT NOT NULL,
+                  expires_at INTEGER NOT NULL,
+                  quarantine_epoch TEXT NOT NULL,
+                  policy_context_hash TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  schema_id TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS b1_native_dual_permit_links (
+                  dual_grant_id TEXT PRIMARY KEY,
+                  operation_key TEXT NOT NULL UNIQUE,
+                  permit_id TEXT NOT NULL UNIQUE,
+                  reservation_id TEXT NOT NULL UNIQUE,
+                  command_hash TEXT NOT NULL
+                );
             """)
             self._add_column(db, "w2_positive_v1_capacity", "reservation_id", "TEXT")
             self._add_column(db, "w2_positive_v1_capacity", "resource_id", "TEXT")
@@ -205,6 +244,26 @@ class NativePositivePermitAuthority:
                 BEFORE DELETE ON w2_positive_v1_events
                 BEGIN
                   SELECT RAISE(ABORT, 'positive authority events are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS b1_native_dual_grants_no_update
+                BEFORE UPDATE ON b1_native_dual_grants
+                BEGIN
+                  SELECT RAISE(ABORT, 'B1 native dual grant is append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS b1_native_dual_grants_no_delete
+                BEFORE DELETE ON b1_native_dual_grants
+                BEGIN
+                  SELECT RAISE(ABORT, 'B1 native dual grant is append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS b1_native_dual_permit_links_no_update
+                BEFORE UPDATE ON b1_native_dual_permit_links
+                BEGIN
+                  SELECT RAISE(ABORT, 'B1 native dual permit link is append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS b1_native_dual_permit_links_no_delete
+                BEFORE DELETE ON b1_native_dual_permit_links
+                BEGIN
+                  SELECT RAISE(ABORT, 'B1 native dual permit link is append-only');
                 END;
             """)
         self._load_key()
@@ -354,9 +413,357 @@ class NativePositivePermitAuthority:
             "scope": "experimental-positive-v1",
         }
 
+    @staticmethod
+    def _b1_profile_enabled(db) -> bool:
+        """Return whether this store has opted into the B1 dual-proof profile.
+
+        A generic W2 laboratory has no B1 trust material and keeps its existing
+        experimental semantics.  Once *any* B1 trust table is present, a
+        partial profile is an error rather than a route back to native-only
+        admission.
+        """
+        required = {
+            "b1_approval_trust",
+            "b1_governor_trust",
+            "b1_governor_issuer_trust",
+            "b1_governor_receipts",
+            "b1_approved_requests",
+        }
+        names = {
+            row["name"] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        configured = names & required
+        if not configured:
+            return False
+        if configured != required:
+            raise RuntimeError("B1 dual trust profile is incomplete")
+        return True
+
+    @staticmethod
+    def _require_text(value, name: str) -> str:
+        if not isinstance(value, str) or not value or len(value) > 512 or "\x00" in value:
+            raise RuntimeError(f"B1 {name} required")
+        return value
+
+    def _b1_trust(self, db) -> dict:
+        """Load and cross-check the durable B1 trust pins under the writer lock."""
+        if not self._b1_profile_enabled(db):
+            raise RuntimeError("B1 dual trust profile required")
+        approval = db.execute(
+            "SELECT key_id, public_key FROM b1_approval_trust WHERE singleton=1"
+        ).fetchone()
+        governor = db.execute(
+            "SELECT public_key, decisions, policy_context_hash FROM b1_governor_trust "
+            "WHERE singleton=1"
+        ).fetchone()
+        issuer = db.execute(
+            "SELECT public_key FROM b1_governor_issuer_trust WHERE singleton=1"
+        ).fetchone()
+        if not approval or not governor or not issuer:
+            raise RuntimeError("B1 dual trust pin missing")
+        approval_key = bytes(approval["public_key"])
+        governor_key = bytes(governor["public_key"])
+        issuer_key = bytes(issuer["public_key"])
+        if (len(approval_key) != 32 or len(governor_key) != 32
+                or issuer_key != governor_key or approval_key == governor_key):
+            raise RuntimeError("B1 dual trust pin integrity failure")
+        if approval["key_id"] != hashlib.sha256(approval_key).hexdigest():
+            raise RuntimeError("B1 independent key identifier mismatch")
+        try:
+            decisions = frozenset(json.loads(governor["decisions"]))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("B1 Governor trust key or policy changed") from exc
+        if not decisions or not decisions <= {"PASS", "FLAG"}:
+            raise RuntimeError("B1 Governor trust key or policy changed")
+        context_hash = governor["policy_context_hash"]
+        if (not isinstance(context_hash, str) or len(context_hash) != 64
+                or any(char not in "0123456789abcdef" for char in context_hash)):
+            raise RuntimeError("B1 Governor policy context invalid")
+        return {
+            "approval_key": approval_key,
+            "approval_key_id": approval["key_id"],
+            "governor_key": governor_key,
+            "governor_key_id": hashlib.sha256(governor_key).hexdigest(),
+            "decisions": decisions,
+            "policy_context_hash": context_hash,
+        }
+
+    def _validate_b1_dual_envelope(self, db, envelope: dict) -> dict:
+        """Validate both signed proofs against SQLite-pinned B1 trust.
+
+        The caller supplies bytes to verify, not a verdict.  The resulting
+        record is later rechecked by admission, claim and send transactions.
+        """
+        trust = self._b1_trust(db)
+        if not isinstance(envelope, dict) or set(envelope) != {"request", "governor_receipt"}:
+            raise RuntimeError("complete B1 dual proof envelope required")
+        request = snapshot_payload(envelope["request"])
+        expected_request_fields = {
+            "schema", "action", "operation_key", "evaluation_id", "idempotency_key", "command", "approval",
+        }
+        if (set(request) != expected_request_fields
+                or request["schema"] != "tenir.positive.approved.uid-lab.v1"
+                or request["action"] != "submit"):
+            raise RuntimeError("B1 signed request malformed")
+        operation = self._require_text(request["operation_key"], "operation")
+        evaluation = self._require_text(request["evaluation_id"], "evaluation")
+        idempotency = self._require_text(request["idempotency_key"], "idempotency")
+        if operation != idempotency:
+            raise RuntimeError("B1 approval idempotency must equal operation")
+        command = snapshot_command(request["command"])
+        command_hash = canon_request_hash(command)
+        approval = request["approval"]
+        if not isinstance(approval, dict) or set(approval) != APPROVAL_FIELDS | {"signature"}:
+            raise RuntimeError("B1 independent approval malformed")
+        approval_body = {name: approval[name] for name in APPROVAL_FIELDS}
+        for name in ("approval_id", "nonce", "operation_key", "evaluation_id", "idempotency_key"):
+            self._require_text(approval_body[name], "approval " + name)
+        now = int(time.time())
+        if (approval_body["schema"] != "tenir.b1.approval.v1"
+                or approval_body["audience"] != "positive-uid-laboratory"
+                or approval_body["key_id"] != trust["approval_key_id"]
+                or approval_body["operation_key"] != operation
+                or approval_body["evaluation_id"] != evaluation
+                or approval_body["idempotency_key"] != idempotency
+                or approval_body["request_hash"] != command_hash
+                or type(approval_body["issued_at"]) is not int
+                or type(approval_body["expires_at"]) is not int
+                or approval_body["issued_at"] > now + 30
+                or approval_body["expires_at"] <= now
+                or approval_body["expires_at"] <= approval_body["issued_at"]
+                or approval_body["expires_at"] - approval_body["issued_at"] > 86400):
+            raise RuntimeError("B1 independent approval binding or validity refused")
+        try:
+            approval_signature = approval["signature"]
+            if not isinstance(approval_signature, str) or len(approval_signature) != 128:
+                raise ValueError("invalid signature")
+            Ed25519PublicKey.from_public_bytes(trust["approval_key"]).verify(
+                bytes.fromhex(approval_signature), canonical_b1(approval_body)
+            )
+        except (InvalidSignature, TypeError, ValueError) as exc:
+            raise RuntimeError("B1 independent approval signature refused") from exc
+
+        receipt = envelope["governor_receipt"]
+        if not isinstance(receipt, dict) or set(receipt) != GOVERNOR_RECEIPT_FIELDS | {"signature"}:
+            raise RuntimeError("B1 Governor receipt malformed")
+        receipt_body = {name: receipt[name] for name in GOVERNOR_RECEIPT_FIELDS}
+        request_hash = canonical_payload_hash(request)
+        if (receipt_body["schema"] != "tenir.b1.governor-receipt.v1"
+                or receipt_body["audience"] != "positive-uid-laboratory"
+                or receipt_body["operation_key"] != operation
+                or receipt_body["evaluation_id"] != evaluation
+                or receipt_body["request_hash"] != request_hash
+                or receipt_body["decision"] not in trust["decisions"]
+                or receipt_body["expires_at"] != approval_body["expires_at"]
+                or receipt_body["policy_context_hash"] != trust["policy_context_hash"]
+                or receipt_body["key_id"] != trust["governor_key_id"]
+                or not isinstance(receipt_body["quarantine_epoch"], str)
+                or not receipt_body["quarantine_epoch"]):
+            raise RuntimeError("B1 Governor receipt binding refused")
+        try:
+            receipt_signature = receipt["signature"]
+            if not isinstance(receipt_signature, str) or len(receipt_signature) != 128:
+                raise ValueError("invalid signature")
+            Ed25519PublicKey.from_public_bytes(trust["governor_key"]).verify(
+                bytes.fromhex(receipt_signature), canonical_b1(receipt_body)
+            )
+        except (InvalidSignature, TypeError, ValueError) as exc:
+            raise RuntimeError("B1 Governor receipt signature refused") from exc
+        persisted_receipt = db.execute(
+            "SELECT request_hash, receipt_json FROM b1_governor_receipts WHERE operation_key=?",
+            (operation,),
+        ).fetchone()
+        if not persisted_receipt:
+            raise RuntimeError("B1 Governor receipt not durably recorded")
+        try:
+            stored_receipt = json.loads(persisted_receipt["receipt_json"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("B1 stored Governor receipt invalid") from exc
+        if (persisted_receipt["request_hash"] != request_hash
+                or stored_receipt != receipt):
+            raise RuntimeError("B1 stored Governor receipt diverges")
+
+        envelope_hash = digest_b1({"request": request, "governor_receipt": receipt})
+        return {
+            "dual_grant_id": "dual-" + envelope_hash,
+            "operation_key": operation,
+            "idempotency_key": idempotency,
+            "evaluation_id": evaluation,
+            "command_hash": command_hash,
+            "envelope_hash": envelope_hash,
+            "approval_id": approval_body["approval_id"],
+            "approval_nonce": approval_body["nonce"],
+            "approval_hash": digest_b1(approval_body),
+            "approval_body_json": canonical_b1(approval_body).decode("utf-8"),
+            "approval_signature": approval_signature,
+            "approval_key_id": trust["approval_key_id"],
+            "governor_receipt_hash": digest_b1(receipt_body),
+            "governor_receipt_json": canonical_b1(receipt).decode("utf-8"),
+            "governor_key_id": trust["governor_key_id"],
+            "audience": receipt_body["audience"],
+            "expires_at": approval_body["expires_at"],
+            "quarantine_epoch": receipt_body["quarantine_epoch"],
+            "policy_context_hash": trust["policy_context_hash"],
+            "schema_id": DUAL_GRANT_SCHEMA,
+        }
+
+    def bind_b1_dual_envelope(self, envelope: dict) -> dict:
+        """Durably bind verified Governor and independent proofs for B1.
+
+        It is safe to replay the *identical* envelope.  A substituted proof,
+        key, command or identity conflicts before an I8 reservation exists.
+        """
+        with self._write("b1_native_dual_bind") as db:
+            proof = self._validate_b1_dual_envelope(db, envelope)
+            matches = db.execute(
+                "SELECT * FROM b1_native_dual_grants WHERE operation_key=? OR idempotency_key=? "
+                "OR approval_id=? OR approval_nonce=?",
+                (proof["operation_key"], proof["idempotency_key"], proof["approval_id"], proof["approval_nonce"]),
+            ).fetchall()
+            if matches:
+                if len(matches) != 1:
+                    raise RuntimeError("B1 dual proof identity conflict")
+                existing = dict(matches[0])
+                if any(existing[name] != proof[name] for name in proof):
+                    raise RuntimeError("B1 dual proof identity conflict")
+                return proof
+            db.execute(
+                """INSERT INTO b1_native_dual_grants
+                   (dual_grant_id, operation_key, idempotency_key, evaluation_id,
+                    command_hash, envelope_hash, approval_id, approval_nonce,
+                    approval_hash, approval_body_json, approval_signature,
+                    approval_key_id, governor_receipt_hash, governor_receipt_json,
+                    governor_key_id, audience, expires_at, quarantine_epoch,
+                    policy_context_hash, created_at, schema_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    proof["dual_grant_id"], proof["operation_key"], proof["idempotency_key"],
+                    proof["evaluation_id"], proof["command_hash"], proof["envelope_hash"],
+                    proof["approval_id"], proof["approval_nonce"], proof["approval_hash"],
+                    proof["approval_body_json"], proof["approval_signature"],
+                    proof["approval_key_id"], proof["governor_receipt_hash"],
+                    proof["governor_receipt_json"], proof["governor_key_id"],
+                    proof["audience"], proof["expires_at"], proof["quarantine_epoch"],
+                    proof["policy_context_hash"], datetime.now(timezone.utc).isoformat(),
+                    proof["schema_id"],
+                ),
+            )
+            return proof
+
+    def _require_b1_current_trust(self, db, row):
+        trust = self._b1_trust(db)
+        try:
+            decision = json.loads(row["governor_receipt_json"])["decision"]
+        except (TypeError, ValueError, KeyError) as exc:
+            raise RuntimeError("B1 stored Governor decision invalid") from exc
+        if (row["approval_key_id"] != trust["approval_key_id"]
+                or row["governor_key_id"] != trust["governor_key_id"]
+                or row["policy_context_hash"] != trust["policy_context_hash"]
+                or decision not in trust["decisions"]):
+            raise RuntimeError("B1 dual grant trust changed")
+
+    def _require_b1_dual_admission(self, db, dual_grant_id, operation_key, evaluation_id, payload):
+        """Require the durable proof before any B1 I8 write or extension hook."""
+        if not self._b1_profile_enabled(db):
+            return None
+        if not isinstance(dual_grant_id, str) or not dual_grant_id:
+            raise RuntimeError("durable B1 dual grant required before native admission")
+        row = db.execute(
+            "SELECT * FROM b1_native_dual_grants WHERE dual_grant_id=?", (dual_grant_id,)
+        ).fetchone()
+        command_hash = canon_request_hash(payload)
+        if (not row or row["schema_id"] != DUAL_GRANT_SCHEMA
+                or row["operation_key"] != operation_key
+                or row["idempotency_key"] != operation_key
+                or row["evaluation_id"] != evaluation_id
+                or row["command_hash"] != command_hash
+                or row["expires_at"] <= int(time.time())):
+            raise RuntimeError("durable B1 dual grant does not authorize native admission")
+        self._require_b1_current_trust(db, row)
+        existing = db.execute(
+            "SELECT * FROM b1_approved_requests WHERE approval_id=? OR nonce=? "
+            "OR operation_key=? OR idempotency_key=?",
+            (row["approval_id"], row["approval_nonce"], operation_key, operation_key),
+        ).fetchall()
+        if existing:
+            if (len(existing) != 1 or existing[0]["approval_id"] != row["approval_id"]
+                    or existing[0]["nonce"] != row["approval_nonce"]
+                    or existing[0]["operation_key"] != operation_key
+                    or existing[0]["idempotency_key"] != operation_key
+                    or existing[0]["body_hash"] != row["approval_hash"]
+                    or existing[0]["body_json"] != row["approval_body_json"]
+                    or existing[0]["signature"] != row["approval_signature"]):
+                raise RuntimeError("B1 durable approval binding conflict")
+            if not db.execute(
+                "SELECT 1 FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,),
+            ).fetchone():
+                raise RuntimeError("orphaned approval binding requires review")
+        else:
+            db.execute(
+                "INSERT INTO b1_approved_requests VALUES(?,?,?,?,?,?,?)",
+                (
+                    row["approval_id"], row["approval_nonce"], operation_key, operation_key,
+                    row["approval_hash"], row["approval_body_json"], row["approval_signature"],
+                ),
+            )
+        return row
+
+    def _link_b1_dual_permit(self, db, dual, permit_id, reservation_id):
+        if dual is None:
+            return
+        row = db.execute(
+            "SELECT * FROM b1_native_dual_permit_links WHERE dual_grant_id=? OR operation_key=?",
+            (dual["dual_grant_id"], dual["operation_key"]),
+        ).fetchone()
+        expected = {
+            "dual_grant_id": dual["dual_grant_id"],
+            "operation_key": dual["operation_key"],
+            "permit_id": permit_id,
+            "reservation_id": reservation_id,
+            "command_hash": dual["command_hash"],
+        }
+        if row:
+            if any(row[name] != value for name, value in expected.items()):
+                raise RuntimeError("B1 dual permit link conflict")
+            return
+        db.execute(
+            "INSERT INTO b1_native_dual_permit_links VALUES(?,?,?,?,?)",
+            tuple(expected[name] for name in (
+                "dual_grant_id", "operation_key", "permit_id", "reservation_id", "command_hash",
+            )),
+        )
+
+    def _require_b1_dual_binding(self, db, operation_key, idempotency_key, payload, *, require_live: bool):
+        """Revalidate the durable B1 link before claim verification or send."""
+        if not self._b1_profile_enabled(db):
+            return None
+        row = db.execute(
+            """SELECT g.*, l.permit_id AS linked_permit_id, l.reservation_id AS linked_reservation_id
+               FROM b1_native_dual_grants g
+               JOIN b1_native_dual_permit_links l ON l.dual_grant_id=g.dual_grant_id
+               WHERE g.operation_key=? AND g.idempotency_key=?""",
+            (operation_key, idempotency_key),
+        ).fetchone()
+        if (not row or row["schema_id"] != DUAL_GRANT_SCHEMA
+                or row["command_hash"] != canon_request_hash(payload)):
+            raise RuntimeError("durable B1 dual grant missing or mismatched")
+        if require_live and row["expires_at"] <= int(time.time()):
+            raise RuntimeError("durable B1 dual grant expired before send")
+        permit = db.execute(
+            "SELECT permit_id, reservation_id FROM w2_positive_v1_permits WHERE operation_key=?",
+            (operation_key,),
+        ).fetchone()
+        if (not permit or permit["permit_id"] != row["linked_permit_id"]
+                or permit["reservation_id"] != row["linked_reservation_id"]):
+            raise RuntimeError("durable B1 dual grant permit link invalid")
+        self._require_b1_current_trust(db, row)
+        return row
+
     def admit_reserve_issue(
         self, operation_key: str, evaluation_id: str, payload: dict,
-        amount=None, *, resource_id: str, _admit_hook=None,
+        amount=None, *, resource_id: str, dual_grant_id: str | None = None, _admit_hook=None,
     ) -> dict:
         """Atomically reserve native I8 capacity and issue its bound positive permit.
 
@@ -394,6 +801,9 @@ class NativePositivePermitAuthority:
         signature = self.private_key.sign(_canonical(body))
         try:
             with self._write("positive_admit") as db:
+                dual = self._require_b1_dual_admission(
+                    db, dual_grant_id, operation_key, evaluation_id, payload,
+                )
                 if _admit_hook is not None:
                     _admit_hook(db)
                 existing = db.execute(
@@ -419,6 +829,23 @@ class NativePositivePermitAuthority:
                             or self.backend._amount(reservation["amount"]) != normalized_amount
                             or reservation["state"] not in ("RESERVED", "COMMITTED")):
                         raise RuntimeError("contradictory or incomplete native I8 permit")
+                    # A profile-enabled store must not retrofit a freshly
+                    # supplied proof onto a permit that predates the dual
+                    # boundary.  That would turn a legacy reservation into a
+                    # dispatchable B1 operation after the fact.  New permits
+                    # receive their link below in this very transaction;
+                    # replayed permits must already have the exact link.
+                    if dual is not None:
+                        linked = db.execute(
+                            "SELECT dual_grant_id, operation_key, permit_id, reservation_id, command_hash "
+                            "FROM b1_native_dual_permit_links WHERE permit_id=?",
+                            (existing["permit_id"],),
+                        ).fetchone()
+                        if not linked:
+                            raise RuntimeError("unlinked B1 permit requires review")
+                    self._link_b1_dual_permit(
+                        db, dual, existing["permit_id"], existing["reservation_id"],
+                    )
                     return dict(existing)
                 historical = db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('reservations','experimental_native_operations')"
@@ -466,6 +893,7 @@ class NativePositivePermitAuthority:
                     "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) VALUES (?, ?, ?, ?)",
                     (operation_key, "permit_issued_after_reservation", issued_at, reservation_id),
                 )
+                self._link_b1_dual_permit(db, dual, permit_id, reservation_id)
         except sqlite3.IntegrityError as exc:
             raise RuntimeError("exclusive authority refused") from exc
         return {"permit_id": permit_id, "operation_key": operation_key, "request_hash": request_hash,
@@ -486,6 +914,10 @@ class NativePositivePermitAuthority:
                     "FROM w2_positive_v1_outbox WHERE operation_key=? OR idempotency_key=?",
                     (operation_key, idempotency_key),
                 ).fetchone()
+                self._require_b1_dual_binding(
+                    db, operation_key, idempotency_key, payload,
+                    require_live=not replay or replay["status"] == "PENDING",
+                )
                 review_latched = db.execute(
                     "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? "
                     "AND event='dispatch_review' LIMIT 1", (operation_key,),
@@ -685,11 +1117,18 @@ class NativePositivePermitAuthority:
         now = datetime.now(timezone.utc).isoformat()
         with self._write("grant_send_right") as db:
             row = db.execute(
-                "SELECT operation_key, status, claim_token FROM w2_positive_v1_outbox "
+                "SELECT operation_key, idempotency_key, payload_json, status, claim_token FROM w2_positive_v1_outbox "
                 "WHERE execution_id=?", (execution_id,),
             ).fetchone()
             if not row or row["claim_token"] != token:
                 raise RuntimeError("dispatch claim does not own outbox row")
+            try:
+                command = json.loads(row["payload_json"])
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("native outbox payload invalid") from exc
+            self._require_b1_dual_binding(
+                db, row["operation_key"], row["idempotency_key"], command, require_live=True,
+            )
             if db.execute(
                 "SELECT 1 FROM w2_positive_v1_events WHERE operation_key=? "
                 "AND event='dispatch_review' LIMIT 1", (row["operation_key"],),
@@ -1025,6 +1464,7 @@ class NativePositivePermitAuthority:
             "tables": [
                 "w2_positive_v1_capacity", "w2_positive_v1_permits",
                 "w2_positive_v1_outbox", "w2_positive_v1_events",
+                "b1_native_dual_grants", "b1_native_dual_permit_links",
                 "resources", "reservations",
             ],
             "i8_backend": "SQLiteConsensusBackend",
@@ -1063,6 +1503,9 @@ class NativePositivePermitAuthority:
                     return False
                 if row["request_hash"] != canon_request_hash(payload):
                     return False
+                self._require_b1_dual_binding(
+                    db, operation_key, idempotency_key, payload, require_live=True,
+                )
                 self._require_native_i8(db, operation_key, payload, allow_committed=False)
                 has_grants = db.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' "
