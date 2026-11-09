@@ -78,6 +78,16 @@ class NativePositivePermitAuthority:
         self._provider_live_sends = {}
         self.verifiable_recovery = verifiable_recovery
         self.external_anchor = None
+        # JW-10: optional cold-restart anti-rollback gate attached to the
+        # native admission and send paths. None preserves prior behaviour.
+        self._cold_restart_gate = None
+        self._cold_restart_subject = None
+        self._cold_restart_min_generation = 1
+        # JW-10: optional external monotone publisher. When attached, native
+        # commits that change the durable state re-anchor it (extend-only), so
+        # a gated admit->claim->send runs end-to-end with no manual republish.
+        self._cold_restart_publisher = None
+        self._last_anchor_publication = None
         self._b1_quarantine_frames = threading.local()
         # JW-10: check any existing kernel custody pin BEFORE schema writes,
         # key generation or accepting a caller-provided witness object.
@@ -296,6 +306,84 @@ class NativePositivePermitAuthority:
 
     def check_anchor(self, anchor, subject: str) -> None:
         anchor.require_not_behind(subject, self.local_witness_revision(subject))
+
+    def attach_cold_restart_anchor_gate(self, gate, *, subject: str,
+                                        min_generation: int = 1,
+                                        publisher=None) -> None:
+        """Attach an independent cold-restart anti-rollback gate to native paths.
+
+        Once attached, ``admit_reserve_issue`` and ``grant_send_right`` refuse
+        to proceed unless the committed Kernel+Witness state still matches the
+        separately trusted CURRENT anchor read by ``gate``. This converts the
+        standalone ``ExternalColdRestartAnchorGate`` verifier into an enforced
+        precondition for native operations.
+
+        **Bounded, not closed.** The on-disk fingerprint is computed on the
+        committed, quiescent state *before* the native write transaction opens;
+        it is NOT an atomic cross-database snapshot taken with the write. The
+        gate therefore proves the committed state matched the external current
+        anchor at check time, not that the operation about to be written is
+        anchored. A stale/compromised reader that replays a validly-signed old
+        checkpoint is still accepted (signature alone is not freshness). Full
+        enforcement requires a genuinely external, live monotone authority.
+        """
+        if not callable(getattr(gate, "verify_cold_restart", None)):
+            raise TypeError("cold-restart anchor gate must expose verify_cold_restart")
+        if not isinstance(subject, str) or not subject:
+            raise ValueError("cold-restart anchor subject required")
+        if type(min_generation) is not int or min_generation < 1:
+            raise ValueError("cold-restart min_generation must be a positive int")
+        self._cold_restart_gate = gate
+        self._cold_restart_subject = subject
+        self._cold_restart_min_generation = min_generation
+        self._cold_restart_publisher = publisher
+
+    def detach_cold_restart_anchor_gate(self) -> None:
+        self._cold_restart_gate = None
+        self._cold_restart_subject = None
+        self._cold_restart_min_generation = 1
+        self._cold_restart_publisher = None
+
+    def _enforce_cold_restart_anchor(self, operation: str):
+        """Fail closed on native paths when the attached anchor gate HOLDs.
+
+        No-op when no gate is attached, so unconfigured laboratories keep their
+        prior semantics. The ``ExternalAnchorHold`` raised by the gate (missing,
+        forged, stale, mismatching or rolled-back checkpoint, or reader outage)
+        is re-raised tagged with the refused native ``operation``.
+        """
+        gate = self._cold_restart_gate
+        if gate is None:
+            return None
+        try:
+            return gate.verify_cold_restart(
+                subject=self._cold_restart_subject,
+                kernel_db=self.db_path,
+                witness_db=self.witness.db_path,
+                min_generation=self._cold_restart_min_generation,
+            )
+        except Exception as exc:
+            # Keep the gate's original message (tests match on it) and name the
+            # native operation that is being refused.
+            raise type(exc)(f"{operation}: {exc}") from exc
+
+    def _publish_cold_restart_anchor_after_commit(self, operation: str):
+        """Re-anchor the committed state after a native write (extend-only).
+
+        No-op without an attached publisher. The publication is store-derived
+        and idempotent: an unchanged state is a no-op, a Kernel-only change in
+        the same Witness epoch advances the Kernel digest, and a new Witness
+        checkpoint extends the chain. A publication HOLD (anti-downgrade, fork,
+        equivocation) is a genuine anomaly and is allowed to propagate.
+        """
+        publisher = self._cold_restart_publisher
+        if publisher is None:
+            return None
+        from w2_integration.cold_restart_anchor_publisher import publish_cold_restart_anchor
+        self._last_anchor_publication = publish_cold_restart_anchor(
+            self, publisher, subject=self._cold_restart_subject,
+        )
+        return self._last_anchor_publication
 
     def _tx(self):
         """Autocommit connection for schema and reads. Not a write transaction."""
@@ -642,7 +730,16 @@ class NativePositivePermitAuthority:
 
         It is safe to replay the *identical* envelope.  A substituted proof,
         key, command or identity conflicts before an I8 reservation exists.
+
+        JW-10: a new bind mutates durable Kernel state, so it appends an event
+        to the append-only ``w2_positive_v1_events`` log **in the same
+        transaction** and re-anchors after commit. Without that event the
+        bind would change the Kernel digest while minting no ordering mark,
+        which the external monotone anchor cannot distinguish from a rollback.
         """
+        # Gate the write on the cold-restart anchor like the other native paths.
+        self._enforce_cold_restart_anchor("b1_native_dual_bind")
+        inserted = False
         with self._write("b1_native_dual_bind") as db:
             proof = self._validate_b1_dual_envelope(db, envelope)
             matches = db.execute(
@@ -656,29 +753,38 @@ class NativePositivePermitAuthority:
                 existing = dict(matches[0])
                 if any(existing[name] != proof[name] for name in proof):
                     raise RuntimeError("approval binding conflict: B1 dual proof identity mismatch")
-                return proof
-            db.execute(
-                """INSERT INTO b1_native_dual_grants
-                   (dual_grant_id, operation_key, idempotency_key, evaluation_id,
-                    command_hash, envelope_hash, approval_id, approval_nonce,
-                    approval_hash, approval_body_json, approval_signature,
-                    approval_key_id, governor_receipt_hash, governor_receipt_json,
-                    governor_key_id, audience, expires_at, quarantine_epoch,
-                    policy_context_hash, created_at, schema_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    proof["dual_grant_id"], proof["operation_key"], proof["idempotency_key"],
-                    proof["evaluation_id"], proof["command_hash"], proof["envelope_hash"],
-                    proof["approval_id"], proof["approval_nonce"], proof["approval_hash"],
-                    proof["approval_body_json"], proof["approval_signature"],
-                    proof["approval_key_id"], proof["governor_receipt_hash"],
-                    proof["governor_receipt_json"], proof["governor_key_id"],
-                    proof["audience"], proof["expires_at"], proof["quarantine_epoch"],
-                    proof["policy_context_hash"], datetime.now(timezone.utc).isoformat(),
-                    proof["schema_id"],
-                ),
-            )
-            return proof
+            else:
+                db.execute(
+                    """INSERT INTO b1_native_dual_grants
+                       (dual_grant_id, operation_key, idempotency_key, evaluation_id,
+                        command_hash, envelope_hash, approval_id, approval_nonce,
+                        approval_hash, approval_body_json, approval_signature,
+                        approval_key_id, governor_receipt_hash, governor_receipt_json,
+                        governor_key_id, audience, expires_at, quarantine_epoch,
+                        policy_context_hash, created_at, schema_id)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        proof["dual_grant_id"], proof["operation_key"], proof["idempotency_key"],
+                        proof["evaluation_id"], proof["command_hash"], proof["envelope_hash"],
+                        proof["approval_id"], proof["approval_nonce"], proof["approval_hash"],
+                        proof["approval_body_json"], proof["approval_signature"],
+                        proof["approval_key_id"], proof["governor_receipt_hash"],
+                        proof["governor_receipt_json"], proof["governor_key_id"],
+                        proof["audience"], proof["expires_at"], proof["quarantine_epoch"],
+                        proof["policy_context_hash"], datetime.now(timezone.utc).isoformat(),
+                        proof["schema_id"],
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) "
+                    "VALUES (?, 'b1_dual_grant_bound', ?, ?)",
+                    (proof["operation_key"], datetime.now(timezone.utc).isoformat(),
+                     proof["dual_grant_id"]),
+                )
+                inserted = True
+        if inserted:
+            self._publish_cold_restart_anchor_after_commit("b1_native_dual_bind")
+        return proof
 
     def _require_b1_current_trust(self, db, row):
         trust = self._b1_trust(db)
@@ -803,6 +909,9 @@ class NativePositivePermitAuthority:
         composes trusted writer-side checks with the same SQLite transaction;
         it is not a security boundary against code running as the writer.
         """
+        # JW-10: enforce the cold-restart anti-rollback gate on admission, in a
+        # quiescent read before the writer transaction opens. HOLD propagates.
+        self._enforce_cold_restart_anchor("positive_admit")
         payload = snapshot_payload(payload)
         if payload.get("schema") == COMMAND_SCHEMA:
             payload = snapshot_command(payload)
@@ -927,6 +1036,9 @@ class NativePositivePermitAuthority:
                 self._link_b1_dual_permit(db, dual, permit_id, reservation_id)
         except sqlite3.IntegrityError as exc:
             raise RuntimeError("exclusive authority refused") from exc
+        # JW-10: re-anchor the committed admission (Kernel-only progress within
+        # the current Witness epoch) so the next gated step does not HOLD.
+        self._publish_cold_restart_anchor_after_commit("positive_admit")
         return {"permit_id": permit_id, "operation_key": operation_key, "request_hash": request_hash,
                 "reservation_id": reservation_id, "resource_id": resource_id,
                 "amount": str(normalized_amount), "schema": PERMIT_SCHEMA,
@@ -939,11 +1051,22 @@ class NativePositivePermitAuthority:
         deadline = time.monotonic() + 0.5
         while True:
             try:
-                return self._consume_and_claim_once(operation_key, payload, idempotency_key)
+                result = self._consume_and_claim_once(operation_key, payload, idempotency_key)
+                break
             except QuarantineGateBusy:
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.01)
+        # JW-10: a new claim minted a fresh Witness checkpoint (revision += 1).
+        # A real process kill here, after the local Kernel+Witness commits but
+        # before the external anchor is extended, leaves the next gated op in
+        # HOLD until extend-only recovery republishes.
+        if (result.get("claimed") and not result.get("replayed")
+                and os.environ.get("W2_CRASH_BEFORE_ANCHOR_PUBLICATION") == "1"):
+            os._exit(1)
+        if result.get("claimed") and not result.get("replayed"):
+            self._publish_cold_restart_anchor_after_commit("positive_claim")
+        return result
 
     def _consume_and_claim_once(self, operation_key: str, payload: dict, idempotency_key: str) -> dict:
         request_hash = canon_request_hash(payload)
@@ -1146,6 +1269,22 @@ class NativePositivePermitAuthority:
             return "REVIEW_AFTER_GRANT" if granted else "HOLD"
 
     def grant_send_right(self, claim: dict, *, _send_hook=None) -> str:
+        """Gate (JW-10), elect a single sender, then re-anchor on grant.
+
+        The anti-rollback gate runs before the writer transaction; the election
+        decision is the append-only ``dispatch_send_granted`` event; and a
+        ``GRANTED`` outcome re-anchors the committed state (extend-only) so a
+        subsequent gated step does not HOLD.
+        """
+        # JW-10: enforce the cold-restart anti-rollback gate on the send path,
+        # in a quiescent read before the writer transaction opens.
+        self._enforce_cold_restart_anchor("grant_send_right")
+        outcome = self._grant_send_right_locked(claim, _send_hook=_send_hook)
+        if outcome == "GRANTED":
+            self._publish_cold_restart_anchor_after_commit("grant_send_right")
+        return outcome
+
+    def _grant_send_right_locked(self, claim: dict, *, _send_hook=None) -> str:
         """Give exactly one caller the right to send this claim.
 
         The decision is the append-only ``dispatch_send_granted`` event, taken
@@ -1362,6 +1501,22 @@ class NativePositivePermitAuthority:
             return False
 
     def mark_dispatch_confirmed(self, claim: dict, receipt: dict) -> str:
+        """Gate the settlement on the cold-restart anchor, then confirm.
+
+        Settlement commits the I8 reservation, so the anti-rollback gate extends
+        to it: a rolled-back Kernel/Witness is refused before the effect is
+        settled, and a successful settlement re-anchors (extend-only). The
+        review/latch/unknown reconciliation paths are deliberately NOT gated --
+        they must be able to freeze a dubious dispatch even on a stale anchor --
+        so they rely on the Witness/outbox/receipt guards instead.
+        """
+        self._enforce_cold_restart_anchor("mark_dispatch_confirmed")
+        outcome = self._mark_dispatch_confirmed_locked(claim, receipt)
+        if outcome == "CONFIRMED":
+            self._publish_cold_restart_anchor_after_commit("mark_dispatch_confirmed")
+        return outcome
+
+    def _mark_dispatch_confirmed_locked(self, claim: dict, receipt: dict) -> str:
         """Persist only a receipt matching the exact pending/unknown native claim."""
         if not isinstance(claim, dict) or not isinstance(receipt, dict):
             raise RuntimeError("claim and provider receipt required")
