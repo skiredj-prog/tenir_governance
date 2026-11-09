@@ -1,8 +1,9 @@
 """JW-10: the cold-restart anti-rollback gate ENFORCED on native paths.
 
 These tests exercise ``NativePositivePermitAuthority.attach_cold_restart_anchor_gate``
-so the anchor check actually gates native admission and send, rather than being
-a standalone verifier. They prove the positive enforcement, the anti-rollback
+so the anchor check actually gates native admission and send, and — with a
+publisher attached — a gated admit -> claim -> send runs end-to-end with no
+manual republication. They prove positive enforcement, the anti-rollback
 refusal against a LIVE monotone reader, and — mandatory — the documented
 negative freshness control: a stale/compromised reader replaying a validly
 signed OLD checkpoint is ACCEPTED on the native path, because a signature alone
@@ -31,7 +32,7 @@ from w2_integration.cold_restart_anchor_publisher import (
 SUBJECT = "lab:cold-restart"
 PAYLOAD = {
     "schema": "tenir-dispatch-command/v1",
-    "resource_id": "lab:budget", "amount": 7, "action_type": "payment",
+    "resource_id": "lab:budget", "amount": 3, "action_type": "payment",
     "agent_id": "lab-agent", "metadata": {"recipient": "lab-no-effect"},
 }
 
@@ -61,15 +62,16 @@ def _keys(monkeypatch):
 
 def _new_authority(tmp_path):
     backend = SQLiteConsensusBackend(str(tmp_path / "kernel"))
-    assert backend.register_resource("lab:budget", 20) == "REGISTERED"
+    assert backend.register_resource("lab:budget", 90) == "REGISTERED"
     return backend, NativePositivePermitAuthority(backend, verifiable_recovery=True)
 
 
-def _publish_current(publisher, authority, generation):
-    result = publish_cold_restart_anchor(
-        authority, publisher, subject=SUBJECT, generation=generation)
-    assert result.outcome in (PublicationOutcome.APPLIED, PublicationOutcome.IDEMPOTENT)
-    return result
+def _bootstrap(authority, publisher):
+    """Establish a Witness revision-1 chain and anchor it, before gating."""
+    authority.admit_reserve_issue("op0", "eval", PAYLOAD, resource_id="lab:budget")
+    authority.consume_and_claim("op0", PAYLOAD, "op0-idem")
+    result = publish_cold_restart_anchor(authority, publisher, subject=SUBJECT)
+    assert result.outcome is PublicationOutcome.APPLIED and result.generation == 1
 
 
 def _gate(publisher, *, topology=TOPOLOGY_ID):
@@ -78,45 +80,44 @@ def _gate(publisher, *, topology=TOPOLOGY_ID):
         required_topology=topology)
 
 
-def test_native_admission_and_send_pass_when_anchor_is_current(tmp_path, monkeypatch):
+def test_gated_admit_claim_send_runs_end_to_end_without_manual_republish(tmp_path, monkeypatch):
     _keys(monkeypatch)
     backend, authority = _new_authority(tmp_path)
     publisher = MonotoneAnchorAuthority()
-    # Anchor the quiescent pre-admission state, then enforce the gate.
-    _publish_current(publisher, authority, generation=1)
-    authority.attach_cold_restart_anchor_gate(_gate(publisher), subject=SUBJECT)
+    _bootstrap(authority, publisher)
+    authority.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
 
-    permit = authority.admit_reserve_issue(
-        "op", "eval", PAYLOAD, resource_id="lab:budget")
-    assert permit["permit_id"] == "permit-op"
-
-    claim = authority.consume_and_claim("op", PAYLOAD, "idem")
+    permit = authority.admit_reserve_issue("op1", "eval", PAYLOAD, resource_id="lab:budget")
+    assert permit["permit_id"] == "permit-op1"
+    claim = authority.consume_and_claim("op1", PAYLOAD, "op1-idem")
     assert claim["claimed"]
-    # Re-publish the post-claim committed state so the send-path gate matches.
-    _publish_current(publisher, authority, generation=2)
+    # No manual publish between claim and send: the native paths re-anchor.
     assert authority.grant_send_right(claim) == "GRANTED"
+    assert authority._last_anchor_publication.outcome in (
+        PublicationOutcome.APPLIED, PublicationOutcome.IDEMPOTENT)
 
 
 def test_native_admission_refused_after_joint_rollback_with_live_reader(tmp_path, monkeypatch):
     _keys(monkeypatch)
     backend, authority = _new_authority(tmp_path)
     publisher = MonotoneAnchorAuthority()
-    pre_kernel = tmp_path / "pre_kernel.sqlite3"
-    pre_witness = tmp_path / "pre_witness.sqlite3"
-    _snapshot(backend._database_path, pre_kernel)
-    _snapshot(authority.witness.db_path, pre_witness)
+    _bootstrap(authority, publisher)
+    rev1_kernel = tmp_path / "rev1_kernel.sqlite3"
+    rev1_witness = tmp_path / "rev1_witness.sqlite3"
+    _snapshot(backend._database_path, rev1_kernel)
+    _snapshot(authority.witness.db_path, rev1_witness)
 
-    _publish_current(publisher, authority, generation=1)
-    authority.attach_cold_restart_anchor_gate(_gate(publisher), subject=SUBJECT)
-    authority.admit_reserve_issue("op", "eval", PAYLOAD, resource_id="lab:budget")
-    authority.consume_and_claim("op", PAYLOAD, "idem")
-    # LIVE monotone authority advances to the post-claim generation/fingerprint.
-    _publish_current(publisher, authority, generation=2)
+    authority.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+    # Advance one full gated flow; the live authority advances with it.
+    authority.admit_reserve_issue("op1", "eval", PAYLOAD, resource_id="lab:budget")
+    authority.consume_and_claim("op1", PAYLOAD, "op1-idem")
 
-    # Attacker restores BOTH stores to the pre-claim state. The live reader
-    # still holds generation 2 with the NEWER fingerprint.
-    _snapshot(pre_kernel, backend._database_path)
-    _snapshot(pre_witness, authority.witness.db_path)
+    # Attacker restores BOTH stores to the revision-1 state; the live reader
+    # still holds the newer checkpoint.
+    _snapshot(rev1_kernel, backend._database_path)
+    _snapshot(rev1_witness, authority.witness.db_path)
     restarted = NativePositivePermitAuthority(backend, verifiable_recovery=True)
     restarted.attach_cold_restart_anchor_gate(_gate(publisher), subject=SUBJECT)
     with pytest.raises(ExternalAnchorHold, match="rollback or drift"):
@@ -135,31 +136,30 @@ def test_native_paths_accept_stale_reader_replay_is_a_freshness_gap(tmp_path, mo
     _keys(monkeypatch)
     backend, authority = _new_authority(tmp_path)
     publisher = MonotoneAnchorAuthority()
-    pre_kernel = tmp_path / "pre_kernel.sqlite3"
-    pre_witness = tmp_path / "pre_witness.sqlite3"
-    _snapshot(backend._database_path, pre_kernel)
-    _snapshot(authority.witness.db_path, pre_witness)
+    _bootstrap(authority, publisher)
+    stale_envelope = publisher.read_current(SUBJECT)  # validly signed revision 1
+    rev1_kernel = tmp_path / "rev1_kernel.sqlite3"
+    rev1_witness = tmp_path / "rev1_witness.sqlite3"
+    _snapshot(backend._database_path, rev1_kernel)
+    _snapshot(authority.witness.db_path, rev1_witness)
 
-    # Capture a validly signed OLD (generation 1) envelope bound to the
-    # pre-claim state, then advance the live authority to generation 2.
-    stale_envelope = _publish_current(publisher, authority, generation=1).envelope
-    authority.admit_reserve_issue("op", "eval", PAYLOAD, resource_id="lab:budget")
-    authority.consume_and_claim("op", PAYLOAD, "idem")
-    _publish_current(publisher, authority, generation=2)
+    authority.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+    authority.admit_reserve_issue("op1", "eval", PAYLOAD, resource_id="lab:budget")
+    authority.consume_and_claim("op1", PAYLOAD, "op1-idem")
 
-    # Joint rollback to the pre-claim state.
-    _snapshot(pre_kernel, backend._database_path)
-    _snapshot(pre_witness, authority.witness.db_path)
+    # Joint rollback to revision 1.
+    _snapshot(rev1_kernel, backend._database_path)
+    _snapshot(rev1_witness, authority.witness.db_path)
     restarted = NativePositivePermitAuthority(backend, verifiable_recovery=True)
 
-    # A LIVE reader (generation 2) would HOLD: control assertion.
+    # Control: a LIVE reader HOLDs.
     restarted.attach_cold_restart_anchor_gate(_gate(publisher), subject=SUBJECT)
     with pytest.raises(ExternalAnchorHold, match="rollback or drift"):
         restarted.admit_reserve_issue("op2", "eval", PAYLOAD, resource_id="lab:budget")
 
-    # A STALE reader replaying the signed generation-1 checkpoint is ACCEPTED,
-    # because its digests match the rolled-back stores. The native admission
-    # proceeds — freshness was NOT established by the signature alone.
+    # A STALE reader replaying the signed revision-1 checkpoint is ACCEPTED,
+    # because its digests match the rolled-back stores: rollback UNDETECTED.
     stale_gate = ExternalColdRestartAnchorGate(
         reader=_ReplayReader(stale_envelope),
         trusted_public_key=publisher.public_key_bytes,
@@ -167,7 +167,7 @@ def test_native_paths_accept_stale_reader_replay_is_a_freshness_gap(tmp_path, mo
     restarted.attach_cold_restart_anchor_gate(stale_gate, subject=SUBJECT)
     accepted = restarted.admit_reserve_issue(
         "op2", "eval", PAYLOAD, resource_id="lab:budget")
-    assert accepted["permit_id"] == "permit-op2"  # rollback undetected: KNOWN GAP
+    assert accepted["permit_id"] == "permit-op2"  # KNOWN GAP: signature != freshness
 
 
 def test_native_path_holds_on_reader_outage(tmp_path, monkeypatch):
@@ -196,8 +196,8 @@ def test_prod_candidate_topology_remains_unverified(tmp_path, monkeypatch):
     _keys(monkeypatch)
     backend, authority = _new_authority(tmp_path)
     publisher = MonotoneAnchorAuthority()
-    _publish_current(publisher, authority, generation=1)
+    _bootstrap(authority, publisher)
     prod_gate = _gate(publisher, topology="LAB-TENIR-GOV-PROD-CANDIDATE-09")
     authority.attach_cold_restart_anchor_gate(prod_gate, subject=SUBJECT)
     with pytest.raises(ExternalAnchorHold, match="identity, topology"):
-        authority.admit_reserve_issue("op", "eval", PAYLOAD, resource_id="lab:budget")
+        authority.admit_reserve_issue("op1", "eval", PAYLOAD, resource_id="lab:budget")

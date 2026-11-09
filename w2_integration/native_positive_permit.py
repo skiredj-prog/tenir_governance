@@ -83,6 +83,11 @@ class NativePositivePermitAuthority:
         self._cold_restart_gate = None
         self._cold_restart_subject = None
         self._cold_restart_min_generation = 1
+        # JW-10: optional external monotone publisher. When attached, native
+        # commits that change the durable state re-anchor it (extend-only), so
+        # a gated admit->claim->send runs end-to-end with no manual republish.
+        self._cold_restart_publisher = None
+        self._last_anchor_publication = None
         self._b1_quarantine_frames = threading.local()
         # JW-10: check any existing kernel custody pin BEFORE schema writes,
         # key generation or accepting a caller-provided witness object.
@@ -303,7 +308,8 @@ class NativePositivePermitAuthority:
         anchor.require_not_behind(subject, self.local_witness_revision(subject))
 
     def attach_cold_restart_anchor_gate(self, gate, *, subject: str,
-                                        min_generation: int = 1) -> None:
+                                        min_generation: int = 1,
+                                        publisher=None) -> None:
         """Attach an independent cold-restart anti-rollback gate to native paths.
 
         Once attached, ``admit_reserve_issue`` and ``grant_send_right`` refuse
@@ -330,11 +336,13 @@ class NativePositivePermitAuthority:
         self._cold_restart_gate = gate
         self._cold_restart_subject = subject
         self._cold_restart_min_generation = min_generation
+        self._cold_restart_publisher = publisher
 
     def detach_cold_restart_anchor_gate(self) -> None:
         self._cold_restart_gate = None
         self._cold_restart_subject = None
         self._cold_restart_min_generation = 1
+        self._cold_restart_publisher = None
 
     def _enforce_cold_restart_anchor(self, operation: str):
         """Fail closed on native paths when the attached anchor gate HOLDs.
@@ -342,17 +350,40 @@ class NativePositivePermitAuthority:
         No-op when no gate is attached, so unconfigured laboratories keep their
         prior semantics. The ``ExternalAnchorHold`` raised by the gate (missing,
         forged, stale, mismatching or rolled-back checkpoint, or reader outage)
-        propagates unchanged and refuses the native operation.
+        is re-raised tagged with the refused native ``operation``.
         """
         gate = self._cold_restart_gate
         if gate is None:
             return None
-        return gate.verify_cold_restart(
-            subject=self._cold_restart_subject,
-            kernel_db=self.db_path,
-            witness_db=self.witness.db_path,
-            min_generation=self._cold_restart_min_generation,
+        try:
+            return gate.verify_cold_restart(
+                subject=self._cold_restart_subject,
+                kernel_db=self.db_path,
+                witness_db=self.witness.db_path,
+                min_generation=self._cold_restart_min_generation,
+            )
+        except Exception as exc:
+            # Keep the gate's original message (tests match on it) and name the
+            # native operation that is being refused.
+            raise type(exc)(f"{operation}: {exc}") from exc
+
+    def _publish_cold_restart_anchor_after_commit(self, operation: str):
+        """Re-anchor the committed state after a native write (extend-only).
+
+        No-op without an attached publisher. The publication is store-derived
+        and idempotent: an unchanged state is a no-op, a Kernel-only change in
+        the same Witness epoch advances the Kernel digest, and a new Witness
+        checkpoint extends the chain. A publication HOLD (anti-downgrade, fork,
+        equivocation) is a genuine anomaly and is allowed to propagate.
+        """
+        publisher = self._cold_restart_publisher
+        if publisher is None:
+            return None
+        from cold_restart_anchor_publisher import publish_cold_restart_anchor
+        self._last_anchor_publication = publish_cold_restart_anchor(
+            self, publisher, subject=self._cold_restart_subject,
         )
+        return self._last_anchor_publication
 
     def _tx(self):
         """Autocommit connection for schema and reads. Not a write transaction."""
@@ -987,6 +1018,9 @@ class NativePositivePermitAuthority:
                 self._link_b1_dual_permit(db, dual, permit_id, reservation_id)
         except sqlite3.IntegrityError as exc:
             raise RuntimeError("exclusive authority refused") from exc
+        # JW-10: re-anchor the committed admission (Kernel-only progress within
+        # the current Witness epoch) so the next gated step does not HOLD.
+        self._publish_cold_restart_anchor_after_commit("positive_admit")
         return {"permit_id": permit_id, "operation_key": operation_key, "request_hash": request_hash,
                 "reservation_id": reservation_id, "resource_id": resource_id,
                 "amount": str(normalized_amount), "schema": PERMIT_SCHEMA,
@@ -999,11 +1033,22 @@ class NativePositivePermitAuthority:
         deadline = time.monotonic() + 0.5
         while True:
             try:
-                return self._consume_and_claim_once(operation_key, payload, idempotency_key)
+                result = self._consume_and_claim_once(operation_key, payload, idempotency_key)
+                break
             except QuarantineGateBusy:
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.01)
+        # JW-10: a new claim minted a fresh Witness checkpoint (revision += 1).
+        # A real process kill here, after the local Kernel+Witness commits but
+        # before the external anchor is extended, leaves the next gated op in
+        # HOLD until extend-only recovery republishes.
+        if (result.get("claimed") and not result.get("replayed")
+                and os.environ.get("W2_CRASH_BEFORE_ANCHOR_PUBLICATION") == "1"):
+            os._exit(1)
+        if result.get("claimed") and not result.get("replayed"):
+            self._publish_cold_restart_anchor_after_commit("positive_claim")
+        return result
 
     def _consume_and_claim_once(self, operation_key: str, payload: dict, idempotency_key: str) -> dict:
         request_hash = canon_request_hash(payload)
@@ -1206,6 +1251,22 @@ class NativePositivePermitAuthority:
             return "REVIEW_AFTER_GRANT" if granted else "HOLD"
 
     def grant_send_right(self, claim: dict, *, _send_hook=None) -> str:
+        """Gate (JW-10), elect a single sender, then re-anchor on grant.
+
+        The anti-rollback gate runs before the writer transaction; the election
+        decision is the append-only ``dispatch_send_granted`` event; and a
+        ``GRANTED`` outcome re-anchors the committed state (extend-only) so a
+        subsequent gated step does not HOLD.
+        """
+        # JW-10: enforce the cold-restart anti-rollback gate on the send path,
+        # in a quiescent read before the writer transaction opens.
+        self._enforce_cold_restart_anchor("grant_send_right")
+        outcome = self._grant_send_right_locked(claim, _send_hook=_send_hook)
+        if outcome == "GRANTED":
+            self._publish_cold_restart_anchor_after_commit("grant_send_right")
+        return outcome
+
+    def _grant_send_right_locked(self, claim: dict, *, _send_hook=None) -> str:
         """Give exactly one caller the right to send this claim.
 
         The decision is the append-only ``dispatch_send_granted`` event, taken
@@ -1218,9 +1279,6 @@ class NativePositivePermitAuthority:
         token = claim.get("claim_token")
         if not execution_id or not token:
             raise RuntimeError("dispatch claim identity missing")
-        # JW-10: enforce the cold-restart anti-rollback gate on the send path,
-        # in a quiescent read before the writer transaction opens.
-        self._enforce_cold_restart_anchor("grant_send_right")
         now = datetime.now(timezone.utc).isoformat()
         with self._write("grant_send_right") as db:
             row = db.execute(

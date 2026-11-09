@@ -101,16 +101,19 @@ def test_attached_anchor_gate_now_refuses_the_previously_undetected_rollback(
              "metadata":{"recipient":"lab-no-effect"}}
     subject="lab:joint"
     publisher=MonotoneAnchorAuthority()
-    pre_kernel=tmp_path/"pre_kernel.sqlite3"; pre_witness=tmp_path/"pre_witness.sqlite3"
-    _snapshot(backend._database_path,pre_kernel)
-    _snapshot(native.witness.db_path,pre_witness)
-    stale=publish_cold_restart_anchor(native,publisher,subject=subject,generation=1).envelope
+    # Establish a revision-1 chain and anchor it, then snapshot that state.
+    native.admit_reserve_issue("lab:boot","lab:eval",payload,resource_id="lab:budget")
+    native.consume_and_claim("lab:boot",payload,"lab:boot-idem")
+    stale=publish_cold_restart_anchor(native,publisher,subject=subject).envelope
+    rev1_kernel=tmp_path/"rev1_kernel.sqlite3"; rev1_witness=tmp_path/"rev1_witness.sqlite3"
+    _snapshot(backend._database_path,rev1_kernel)
+    _snapshot(native.witness.db_path,rev1_witness)
     native.admit_reserve_issue("lab:rollback","lab:eval",payload,resource_id="lab:budget")
     native.consume_and_claim("lab:rollback",payload,"lab:rollback-idem")
-    publish_cold_restart_anchor(native,publisher,subject=subject,generation=2)
+    publish_cold_restart_anchor(native,publisher,subject=subject)
 
-    _snapshot(pre_kernel,backend._database_path)
-    _snapshot(pre_witness,native.witness.db_path)
+    _snapshot(rev1_kernel,backend._database_path)
+    _snapshot(rev1_witness,native.witness.db_path)
     restarted=NativePositivePermitAuthority(backend,verifiable_recovery=True)
     live_gate=ExternalColdRestartAnchorGate(
         reader=publisher,trusted_public_key=publisher.public_key_bytes,
