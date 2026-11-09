@@ -470,7 +470,7 @@ class NativePositivePermitAuthority:
                 or issuer_key != governor_key or approval_key == governor_key):
             raise RuntimeError("B1 dual trust pin integrity failure")
         if approval["key_id"] != hashlib.sha256(approval_key).hexdigest():
-            raise RuntimeError("B1 independent key identifier mismatch")
+            raise RuntimeError("approval trust key changed: B1 independent key identifier mismatch")
         try:
             decisions = frozenset(json.loads(governor["decisions"]))
         except (TypeError, ValueError) as exc:
@@ -624,10 +624,10 @@ class NativePositivePermitAuthority:
             ).fetchall()
             if matches:
                 if len(matches) != 1:
-                    raise RuntimeError("B1 dual proof identity conflict")
+                    raise RuntimeError("approval binding conflict: B1 dual proof identity mismatch")
                 existing = dict(matches[0])
                 if any(existing[name] != proof[name] for name in proof):
-                    raise RuntimeError("B1 dual proof identity conflict")
+                    raise RuntimeError("approval binding conflict: B1 dual proof identity mismatch")
                 return proof
             db.execute(
                 """INSERT INTO b1_native_dual_grants
@@ -842,7 +842,7 @@ class NativePositivePermitAuthority:
                             (existing["permit_id"],),
                         ).fetchone()
                         if not linked:
-                            raise RuntimeError("unlinked B1 permit requires review")
+                            raise RuntimeError("unapproved existing permit: unlinked B1 permit requires review")
                     self._link_b1_dual_permit(
                         db, dual, existing["permit_id"], existing["reservation_id"],
                     )

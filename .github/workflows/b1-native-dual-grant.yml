@@ -11,6 +11,7 @@ on:
       - w2_integration/b1_dual_authority.py
       - w2_integration/b1_effects_lab.py
       - w2_integration/test_b11_native_dual_grant.py
+      - w2_integration/test_b1_approved_uid_protocol.py
       - scripts/verify_b11_native_dual_mutation.py
       - docs/B1_1_NATIVE_DUAL_GRANT.md
       - docs/B1_1_LEGACY_UID_RETIREMENT.md
@@ -54,6 +55,7 @@ jobs:
           set -euo pipefail
           python -m pytest -q -rx -o addopts= \
             w2_integration/test_b11_native_dual_grant.py \
+            w2_integration/test_b1_approved_uid_protocol.py \
             w2_integration/test_b1_dual_authority.py \
             w2_integration/test_b1_effect_contracts.py \
             w2_integration/test_b1_generic_provider_fence.py \
