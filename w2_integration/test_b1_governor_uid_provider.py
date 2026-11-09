@@ -72,7 +72,7 @@ def integrated_lab(tmp_path, monkeypatch):
     service.provider.conn.close()
 
 
-def test_governor_to_signed_synthetic_service_stays_unknown(integrated_lab):
+def test_governor_to_legacy_signed_service_fails_closed(integrated_lab):
     governor, backend, service, proxy, calls, request_for = integrated_lab
     passage = Passage(agent_id="alice", action_type="payment", amount=7, idempotency_key="lab:governor")
     signed = request_for(passage.idempotency_key)
@@ -85,10 +85,20 @@ def test_governor_to_signed_synthetic_service_stays_unknown(integrated_lab):
                                            metadata=envelope)
     assert result["operation_state"] == OperationState.UNKNOWN.value, result
     assert governor.registry.get(passage.idempotency_key).state == OperationState.UNKNOWN
-    assert service.provider.execute_count(passage.idempotency_key) == 1
-    assert backend.get_state("budget").reserved == 7
+    assert service.provider.execute_count(passage.idempotency_key) == 0
+    assert backend.get_state("budget").reserved == 0
     assert len(calls) == 1
     assert proxy.reconcile(passage.idempotency_key).outcome == ProviderOutcome.UNKNOWN
+
+
+def test_legacy_internal_admission_cannot_be_called_without_governor_context(integrated_lab):
+    """The shared implementation is also fail-closed when reached directly."""
+    _, backend, service, _, _, request_for = integrated_lab
+    request = request_for("lab:internal-bypass")
+    with pytest.raises(RuntimeError, match="Governor verification context required"):
+        service._dispatch_after_governor_verification(request)
+    assert service.provider.execute_count("lab:internal-bypass") == 0
+    assert backend.get_state("budget").reserved == 0
 
 
 @pytest.mark.parametrize("field", ["amount", "action_type", "agent_id", "idempotency", "resource"])
@@ -194,20 +204,16 @@ def test_governor_stays_unknown_if_independent_signature_is_forged(integrated_la
     assert backend.get_state("budget").reserved == 0
 
 
-def test_characterize_signed_direct_service_bypasses_governor_quarantine(integrated_lab):
-    governor, _, service, _, _, request_for = integrated_lab
+def test_legacy_signed_direct_service_refuses_before_governor_quarantine_bypass(integrated_lab):
+    governor, backend, service, _, _, request_for = integrated_lab
     key = "lab:direct-quarantine"
     governor.registry.set_quarantine(True, locked_by="lab", incident_id="lab-incident")
     assert governor.registry.quarantine_is_active()
     assert governor.registry.get(key) is None
-    assert service._dispatch(request_for(key))["status"] == "EXECUTED"
-    assert service.provider.execute_count(key) == 1
-
-
-@pytest.mark.xfail(strict=True, reason="B1 blocker: signed service does not verify Governor adjudication or its quarantine")
-def test_signed_direct_service_should_not_bypass_governor_quarantine(integrated_lab):
-    governor, _, service, _, _, request_for = integrated_lab
-    key = "lab:direct-quarantine"
-    governor.registry.set_quarantine(True, locked_by="lab", incident_id="lab-incident")
-    service._dispatch(request_for(key))
+    with pytest.raises(RuntimeError, match="legacy signed service disabled"):
+        service._dispatch(request_for(key))
     assert service.provider.execute_count(key) == 0
+    assert backend.get_state("budget").reserved == 0
+    with backend._connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM b1_approved_requests").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_outbox").fetchone()[0] == 0

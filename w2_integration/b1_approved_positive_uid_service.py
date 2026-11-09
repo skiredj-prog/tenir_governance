@@ -29,7 +29,14 @@ def canonical_approval(body):
 
 
 class ApprovedPositiveUidService(ExperimentalPositiveUidService):
-    """Opt-in synthetic service gated by an independently supplied approval key."""
+    """Retired single-approval endpoint for the synthetic UID laboratory.
+
+    The endpoint remains importable so an installed older caller fails closed
+    instead of silently selecting a different transport.  It is intentionally
+    not an execution authority: an independent approval alone does not attest
+    to Governor adjudication or to the current quarantine epoch.  New callers
+    must use :class:`DualApprovedUidService`.
+    """
 
     def _admission_guard(self):
         return nullcontext()
@@ -78,6 +85,22 @@ class ApprovedPositiveUidService(ExperimentalPositiveUidService):
         self._approval_key_id = key_id
 
     def _dispatch(self, obj):
+        raise RuntimeError(
+            "legacy signed service disabled: Governor adjudication and independent approval required"
+        )
+
+    def _dispatch_after_governor_verification(self, obj):
+        """Perform the former admission/send sequence after the dual service
+        has verified a Governor receipt and installed its guarded context.
+
+        This private method is not a protocol endpoint.  Keeping the logic in
+        one place prevents the dual path from drifting from the native atomic
+        approval/I8 implementation while the public legacy endpoint stays
+        fail-closed.
+        """
+        context = getattr(getattr(self, "_governor_context", None), "request", None)
+        if context is None:
+            raise RuntimeError("Governor verification context required")
         if (not isinstance(obj, dict) or obj.get("schema") != "tenir.positive.approved.uid-lab.v1"
                 or obj.get("action") != "submit" or set(obj) != {
                     "schema", "action", "operation_key", "evaluation_id", "idempotency_key", "command", "approval"

@@ -327,4 +327,4 @@ class DualApprovedUidService(ApprovedPositiveUidService):
 
     def _dispatch(self, obj):
         with self.checked_request(obj) as request:
-            return super()._dispatch(request)
+            return super()._dispatch_after_governor_verification(request)

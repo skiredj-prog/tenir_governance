@@ -118,7 +118,7 @@ def _base(prefix, owner):
 
 
 @pytest.mark.parametrize("mode", ["governor", "bypass-quarantine"])
-def test_governor_and_direct_worker_behavior_against_separate_uid_service(mode):
+def test_legacy_signed_service_refuses_governor_proxy_and_direct_worker(mode):
     if sys.platform != "linux" or os.geteuid() != 0:
         pytest.skip("requires disposable Linux root controller and setuid")
     from b1_approved_positive_uid_service import canonical_approval
@@ -162,13 +162,16 @@ def test_governor_and_direct_worker_behavior_against_separate_uid_service(mode):
                 assert response["state"] == "unknown"
                 assert not response["executed"]
             else:
-                # Deliberately proves the blocker, not an acceptable property.
                 assert response["quarantine_active"] is True
                 assert response["record_exists"] is False
-                assert response["response"]["receipt"]["status"] == "EXECUTED"
+                assert response["response"]["ok"] is False
             assert server.wait(timeout=20) == 0, server.stderr.read()
             with sqlite3.connect(str(base / "state/synthetic-provider.sqlite3")) as db:
-                assert db.execute("SELECT COUNT(*) FROM effects").fetchone()[0] == 1
+                assert db.execute("SELECT COUNT(*) FROM effects").fetchone()[0] == 0
+            with sqlite3.connect(str(base / "state/budget/consensus.sqlite3")) as db:
+                assert db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] == 0
+                assert db.execute("SELECT COUNT(*) FROM b1_approved_requests").fetchone()[0] == 0
+                assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_outbox").fetchone()[0] == 0
         finally:
             if server.poll() is None:
                 server.kill()
