@@ -100,7 +100,7 @@ def _client(base, action):
             print(json.dumps({"ok": False}))
 
 
-def test_positive_service_uid_boundary_and_replay():
+def test_legacy_native_uid_service_refuses_before_any_effect():
     if sys.platform != "linux" or os.geteuid() != 0:
         pytest.skip("requires disposable Linux root controller and setuid")
     with tempfile.TemporaryDirectory(prefix="tenir-positive-uid-", dir="/run") as name:
@@ -130,22 +130,25 @@ def test_positive_service_uid_boundary_and_replay():
             assert call(WORKER, "state-write")["denied"]
             assert not call(OTHER, "submit")["ok"]
             assert not call(WORKER, "direct-claim")["ok"]
-            first = call(WORKER, "submit")
-            assert first == {"ok": True, "receipt": {"status": "EXECUTED", "synthetic": True, "execution_authorized": False}}
-            replay = call(WORKER, "submit")
-            assert replay == {"ok": True, "receipt": {"status": "UNKNOWN", "synthetic": True, "execution_authorized": False}}
+            # UID separation plus a native permit is not a Governor decision.
+            # The positive cross-UID path is covered by the dual-authority
+            # service, never by this retired endpoint.
+            assert not call(WORKER, "submit")["ok"]
+            assert not call(WORKER, "submit")["ok"]
             assert not call(WORKER, "changed")["ok"]
             assert server.wait(timeout=20) == 0, server.stderr.read()
             with sqlite3.connect(str(base / "state/synthetic-provider.sqlite3")) as db:
-                assert db.execute("SELECT COUNT(*) FROM effects").fetchone()[0] == 1
+                assert db.execute("SELECT COUNT(*) FROM effects").fetchone()[0] == 0
+            with sqlite3.connect(str(base / "state/budget/consensus.sqlite3")) as db:
+                assert db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] == 0
+                assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_outbox").fetchone()[0] == 0
         finally:
             if server.poll() is None:
                 server.kill()
                 server.wait()
 
 
-@pytest.mark.parametrize("crash_point,expected_effects", [("before-effect", 0), ("after-effect", 1)])
-def test_positive_uid_service_crash_does_not_resend(crash_point, expected_effects):
+def test_retired_native_uid_service_never_reaches_a_crashable_provider():
     if sys.platform != "linux" or os.geteuid() != 0:
         pytest.skip("requires disposable Linux root controller and setuid")
     with tempfile.TemporaryDirectory(prefix="tenir-positive-crash-", dir="/run") as name:
@@ -172,18 +175,15 @@ def test_positive_uid_service_crash_does_not_resend(crash_point, expected_effect
             result = subprocess.run([sys.executable, actor, "submit", str(base)], preexec_fn=_identity(WORKER),
                                     env=worker_env, capture_output=True, text=True, timeout=20, check=True)
             return json.loads(result.stdout)
-        server = launch({"UID_POSITIVE_CRASH": crash_point})
+        server = launch({"UID_POSITIVE_CRASH": "after-effect", "UID_POSITIVE_SERVE_COUNT": "1"})
         try:
             assert not submit()["ok"]
-            assert server.wait(timeout=20) == 86
-            stale = base / "socket/positive-lab.sock"
-            assert stale.lstat().st_uid == WRITER
-            stale.unlink()  # trusted controller, only after confirming writer exit
-            server = launch({"UID_POSITIVE_REOPEN": "1", "UID_POSITIVE_SERVE_COUNT": "1"})
-            assert submit() == {"ok": True, "receipt": {"status": "UNKNOWN", "synthetic": True, "execution_authorized": False}}
             assert server.wait(timeout=20) == 0, server.stderr.read()
             with sqlite3.connect(str(base / "state/synthetic-provider.sqlite3")) as db:
-                assert db.execute("SELECT COUNT(*) FROM effects").fetchone()[0] == expected_effects
+                assert db.execute("SELECT COUNT(*) FROM effects").fetchone()[0] == 0
+            with sqlite3.connect(str(base / "state/budget/consensus.sqlite3")) as db:
+                assert db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] == 0
+                assert db.execute("SELECT COUNT(*) FROM w2_positive_v1_outbox").fetchone()[0] == 0
         finally:
             if server.poll() is None:
                 server.kill()

@@ -78,19 +78,20 @@ is outside this lab's protection. Multiple hosts are unsupported.
 
 ## Legacy paths and interpretation of CI
 
-The older `ApprovedPositiveUidService`, `ExperimentalPositiveUidService`,
-cooperative Governor proxy and historical `StripeProvider.execute()` remain
-separate interfaces. They are not upgraded or certified by this experiment.
-The strict XFAIL in `test_b1_governor_uid_provider.py` continues to record the
-old service's Governor/quarantine bypass. Its green workflow status is NOT
-B1 acceptance. A broader local campaign also found failures in historical
-`test_w2_*` scripts: several still expect unclaimed `ProofProvider` execution,
-which the hardened provider now refuses, and some leave SQLite connections open
-on Windows. They are retained without weakening assertions or enabling
-unclaimed execution. The workflow runs the full suite after the UID campaign
-and must report these failures rather than suppressing them. No deployment may
-treat that older service as equivalent to
-the dual-authority service or place real provider credentials in workers.
+The older `ApprovedPositiveUidService` and
+`ExperimentalPositiveUidService` socket endpoints are retired fail-closed;
+they cannot execute from an independent approval or a native-only UID request.
+The signed-endpoint regressions assert zero approval bindings, I8 reservations
+and outbox rows; the native-only endpoint regressions assert zero provider
+effects, I8 reservations and outbox rows. The cooperative Governor proxy and
+historical `StripeProvider.execute()` remain separate interfaces and are not
+upgraded or certified by this experiment. Green CI is not B1 system acceptance.
+
+The W2 migration now preserves the historical assertions while refusing
+unclaimed execution and closing the owned SQLite handles that previously failed
+on Windows. These results do not authorize a deployment to treat any remaining
+legacy or generic connector as equivalent to the dual-authority service, nor
+to place real provider credentials in workers.
 
 The new suite covers missing/forged proofs, pinned context, exact replay,
 receipt append-only behavior, expiry before send, quarantine between claim

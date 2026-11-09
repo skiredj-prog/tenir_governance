@@ -131,11 +131,13 @@ Acceptance wording, only after same-SHA validation:
 with zero observed mock requests and no new reservation or pending send;
 pre-existing reservations are retained.”**
 
-Do not write “all paths are closed.” The old signed UID service's
-Governor/quarantine bypass remains a strict XFAIL. Register line #8
-(Governor isolation) remains refuted/open. Credentials, privileged writers,
-direct SQL, older binaries, global B1, B2 and production are not qualified by
-this PR. `I8Sequencer`, `LabS1AuthorizationBoundary` and
-`run_integrated_candidate` are not additional entries in the eight-point
-mutation inventory; their separate legacy tests do not expand its claim.
+Do not write “all paths are closed.” This document records the bounded W2
+evidence at its original candidate SHA. Subsequent B1 changes retired the
+signed and native-only UID endpoints; that later result is documented in
+`B1_1_LEGACY_UID_RETIREMENT.md` and does not enlarge this eight-entrypoint
+inventory. Credentials, privileged writers, direct SQL, older binaries,
+global B1, B2 and production are not qualified by this PR. `I8Sequencer`,
+`LabS1AuthorizationBoundary` and `run_integrated_candidate` are not additional
+entries in the eight-point mutation inventory; their separate legacy tests do
+not expand its claim.
 No main merge, deployment, tag or publication is implied.
