@@ -292,6 +292,17 @@ class MonotoneAnchorAuthority:
                         PublicationOutcome.IDEMPOTENT, subject, revision,
                         kernel_sha256, witness_sha256,
                         current["envelope"], head_fingerprint)
+                # Not idempotent, yet the append-only Kernel event log did not
+                # grow: a Kernel change that minted no event. Nothing orders
+                # such a change, so a rollback is indistinguishable from
+                # progress -- refuse it as a Kernel equivocation. Every native
+                # writer that mutates durable state appends an event, so this
+                # branch is reachable only by an unanchored/event-less mutation
+                # (see bind_b1_dual_envelope, which now appends one).
+                if kernel_count == cur_kernel_count:
+                    raise AnchorEquivocation(
+                        "external monotone anchor: Kernel digest changed with no new "
+                        "event at an unchanged event position: HOLD")
             envelope = self._sign(payload)
             self._current[subject] = {
                 "envelope": envelope,

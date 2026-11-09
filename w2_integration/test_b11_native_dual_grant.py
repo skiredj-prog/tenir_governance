@@ -7,9 +7,19 @@ an outbox claim.
 """
 from copy import deepcopy
 import os
+import sqlite3
 
 import httpx
 import pytest
+
+from w2_integration.external_cold_restart_anchor import (
+    ExternalColdRestartAnchorGate,
+    ExternalAnchorHold,
+)
+from w2_integration.cold_restart_anchor_publisher import (
+    MonotoneAnchorAuthority,
+    publish_cold_restart_anchor,
+)
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
@@ -583,3 +593,95 @@ def test_native_profile_rechecks_expiry_at_each_boundary(native_system, monkeypa
             authority.grant_send_right(claim)
     assert world.posts == []
     assert _native_state(backend) == before
+
+
+# --- JW-10 Finding 4: bind self-anchors; realistic B1-profile + gate flow -----
+
+_CR_SUBJECT = "lab:b1-cold-restart"
+
+
+def _cr_snap(src, dst):
+    with sqlite3.connect(str(src)) as s, sqlite3.connect(str(dst)) as d:
+        s.backup(d)
+
+
+def _cr_attach(authority, publisher, subject=_CR_SUBJECT):
+    gate = ExternalColdRestartAnchorGate(
+        reader=publisher, trusted_public_key=publisher.public_key_bytes,
+        required_topology=authority.topology_id)
+    authority.attach_cold_restart_anchor_gate(
+        gate, subject=subject, publisher=publisher)
+
+
+def _cr_full_op(authority, service, independent, action):
+    """Approve -> bind -> admit -> claim a full B1 op; return the claim."""
+    wire = _approved(service, independent, action)
+    envelope = _envelope(service, wire)
+    request = envelope["request"]
+    dual = authority.bind_b1_dual_envelope(envelope)
+    authority.admit_reserve_issue(
+        request["operation_key"], request["evaluation_id"], request["command"],
+        resource_id=request["command"]["resource_id"], dual_grant_id=dual["dual_grant_id"])
+    return authority.consume_and_claim(
+        request["operation_key"], request["command"], request["idempotency_key"])
+
+
+def test_b1_profile_with_gate_binds_admits_claims_sends_without_manual_republish(native_system):
+    """Realistic configuration: B1 dual-grant profile + cold-restart gate +
+    publisher. A full bind -> admit -> claim -> send runs end to end with no
+    manual republication, because bind (like admit/claim/send) self-anchors.
+
+    The Governor-receipt write happens during approval (a separate writer on
+    the shared store), so it is anchored before the gate is enforced."""
+    service, independent, world, backend = native_system
+    authority = service.authority
+    publisher = MonotoneAnchorAuthority()
+    _cr_full_op(authority, service, independent, "stripe_charge")  # bootstrap
+    # Approve op_b (writes its Governor receipt) BEFORE anchoring and gating.
+    wire = _approved(service, independent, "generic_http_call")
+    envelope = _envelope(service, wire)
+    request = envelope["request"]
+    assert publish_cold_restart_anchor(
+        authority, publisher, subject=_CR_SUBJECT).generation >= 1
+    _cr_attach(authority, publisher)
+
+    dual = authority.bind_b1_dual_envelope(envelope)          # gated, self-anchors
+    authority.admit_reserve_issue(                            # gated, self-anchors
+        request["operation_key"], request["evaluation_id"], request["command"],
+        resource_id=request["command"]["resource_id"], dual_grant_id=dual["dual_grant_id"])
+    claim = authority.consume_and_claim(                      # self-anchors
+        request["operation_key"], request["command"], request["idempotency_key"])
+    assert claim["claimed"]
+    assert authority.grant_send_right(claim) == "GRANTED"     # gated, self-anchors
+    assert world.posts == []
+
+
+def test_b1_bind_kernel_rollback_is_refused_end_to_end(native_system, tmp_path):
+    """A bind changes the Kernel; restoring ONLY the Kernel to its pre-bind state
+    must not pass the gate nor extend-only recovery (Finding 4, realistic)."""
+    service, independent, world, backend = native_system
+    authority = service.authority
+    publisher = MonotoneAnchorAuthority()
+    _cr_full_op(authority, service, independent, "stripe_charge")
+    # Approve op_b first (receipt write), then anchor the pre-bind state.
+    wire = _approved(service, independent, "generic_http_call")
+    envelope = _envelope(service, wire)
+    assert publish_cold_restart_anchor(
+        authority, publisher, subject=_CR_SUBJECT).generation >= 1
+    pre_bind_kernel = tmp_path / "pre_bind_kernel.sqlite3"
+    _cr_snap(backend._database_path, pre_bind_kernel)
+    _cr_attach(authority, publisher)
+
+    authority.bind_b1_dual_envelope(envelope)  # self-anchors (appends an event)
+
+    # Restore ONLY the Kernel to the pre-bind state; Witness untouched.
+    _cr_snap(pre_bind_kernel, backend._database_path)
+    restarted = NativePositivePermitAuthority(backend)
+    _cr_attach(restarted, publisher)
+    # The gate refuses the next gated bind (committed Kernel drifted from anchor).
+    with pytest.raises(ExternalAnchorHold, match="rollback or drift"):
+        restarted.bind_b1_dual_envelope(deepcopy(envelope))
+    # And extend-only recovery cannot launder the rolled-back Kernel.
+    with pytest.raises(ExternalAnchorHold, match="anti-downgrade|no new event"):
+        publish_cold_restart_anchor(restarted, publisher, subject=_CR_SUBJECT)
+    assert world.posts == []

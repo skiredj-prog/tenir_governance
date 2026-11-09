@@ -730,7 +730,16 @@ class NativePositivePermitAuthority:
 
         It is safe to replay the *identical* envelope.  A substituted proof,
         key, command or identity conflicts before an I8 reservation exists.
+
+        JW-10: a new bind mutates durable Kernel state, so it appends an event
+        to the append-only ``w2_positive_v1_events`` log **in the same
+        transaction** and re-anchors after commit. Without that event the
+        bind would change the Kernel digest while minting no ordering mark,
+        which the external monotone anchor cannot distinguish from a rollback.
         """
+        # Gate the write on the cold-restart anchor like the other native paths.
+        self._enforce_cold_restart_anchor("b1_native_dual_bind")
+        inserted = False
         with self._write("b1_native_dual_bind") as db:
             proof = self._validate_b1_dual_envelope(db, envelope)
             matches = db.execute(
@@ -744,29 +753,38 @@ class NativePositivePermitAuthority:
                 existing = dict(matches[0])
                 if any(existing[name] != proof[name] for name in proof):
                     raise RuntimeError("approval binding conflict: B1 dual proof identity mismatch")
-                return proof
-            db.execute(
-                """INSERT INTO b1_native_dual_grants
-                   (dual_grant_id, operation_key, idempotency_key, evaluation_id,
-                    command_hash, envelope_hash, approval_id, approval_nonce,
-                    approval_hash, approval_body_json, approval_signature,
-                    approval_key_id, governor_receipt_hash, governor_receipt_json,
-                    governor_key_id, audience, expires_at, quarantine_epoch,
-                    policy_context_hash, created_at, schema_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    proof["dual_grant_id"], proof["operation_key"], proof["idempotency_key"],
-                    proof["evaluation_id"], proof["command_hash"], proof["envelope_hash"],
-                    proof["approval_id"], proof["approval_nonce"], proof["approval_hash"],
-                    proof["approval_body_json"], proof["approval_signature"],
-                    proof["approval_key_id"], proof["governor_receipt_hash"],
-                    proof["governor_receipt_json"], proof["governor_key_id"],
-                    proof["audience"], proof["expires_at"], proof["quarantine_epoch"],
-                    proof["policy_context_hash"], datetime.now(timezone.utc).isoformat(),
-                    proof["schema_id"],
-                ),
-            )
-            return proof
+            else:
+                db.execute(
+                    """INSERT INTO b1_native_dual_grants
+                       (dual_grant_id, operation_key, idempotency_key, evaluation_id,
+                        command_hash, envelope_hash, approval_id, approval_nonce,
+                        approval_hash, approval_body_json, approval_signature,
+                        approval_key_id, governor_receipt_hash, governor_receipt_json,
+                        governor_key_id, audience, expires_at, quarantine_epoch,
+                        policy_context_hash, created_at, schema_id)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        proof["dual_grant_id"], proof["operation_key"], proof["idempotency_key"],
+                        proof["evaluation_id"], proof["command_hash"], proof["envelope_hash"],
+                        proof["approval_id"], proof["approval_nonce"], proof["approval_hash"],
+                        proof["approval_body_json"], proof["approval_signature"],
+                        proof["approval_key_id"], proof["governor_receipt_hash"],
+                        proof["governor_receipt_json"], proof["governor_key_id"],
+                        proof["audience"], proof["expires_at"], proof["quarantine_epoch"],
+                        proof["policy_context_hash"], datetime.now(timezone.utc).isoformat(),
+                        proof["schema_id"],
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO w2_positive_v1_events (operation_key, event, at, detail) "
+                    "VALUES (?, 'b1_dual_grant_bound', ?, ?)",
+                    (proof["operation_key"], datetime.now(timezone.utc).isoformat(),
+                     proof["dual_grant_id"]),
+                )
+                inserted = True
+        if inserted:
+            self._publish_cold_restart_anchor_after_commit("b1_native_dual_bind")
+        return proof
 
     def _require_b1_current_trust(self, db, row):
         trust = self._b1_trust(db)

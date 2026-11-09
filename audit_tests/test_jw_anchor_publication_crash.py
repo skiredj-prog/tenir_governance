@@ -173,6 +173,23 @@ def test_kernel_only_rollback_within_same_epoch_is_refused(tmp_path, monkeypatch
         _publish(authority, publisher)
 
 
+def test_event_less_kernel_digest_change_is_refused(tmp_path, monkeypatch):
+    """Finding 4 backstop: a Kernel mutation that mints no event (so the event
+    count/prefix is unchanged) but changes the whole-DB digest must HOLD, not
+    fall through to APPLIED. Nothing orders such a change, so a rollback is
+    indistinguishable from progress."""
+    backend, authority = _authority(tmp_path, monkeypatch)
+    publisher = MonotoneAnchorAuthority()
+    _advance(authority, "op1")
+    assert _publish(authority, publisher).generation == 1
+    # Synthetic event-less Kernel mutation (no w2_positive_v1_events row).
+    with backend._transaction("eventless") as db:
+        db.execute("UPDATE w2_positive_v1_capacity SET resource_id=resource_id||'-x' "
+                   "WHERE operation_key='op1'")
+    with pytest.raises(AnchorEquivocation, match="no new event"):
+        _publish(authority, publisher)
+
+
 def test_kernel_fork_at_same_revision_does_not_extend(tmp_path, monkeypatch):
     backend, authority = _authority(tmp_path, monkeypatch)
     publisher = MonotoneAnchorAuthority()
