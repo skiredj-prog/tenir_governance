@@ -312,9 +312,10 @@ class NativePositivePermitAuthority:
                                         publisher=None) -> None:
         """Attach an independent cold-restart anti-rollback gate to native paths.
 
-        Once attached, ``admit_reserve_issue`` and ``grant_send_right`` refuse
-        to proceed unless the committed Kernel+Witness state still matches the
-        separately trusted CURRENT anchor read by ``gate``. This converts the
+        Once attached, ``admit_reserve_issue``, ``consume_and_claim`` and
+        ``grant_send_right`` refuse to proceed unless the committed
+        Kernel+Witness state matches the separately trusted CURRENT anchor
+        read by ``gate``. This converts the
         standalone ``ExternalColdRestartAnchorGate`` verifier into an enforced
         precondition for native operations.
 
@@ -1051,6 +1052,10 @@ class NativePositivePermitAuthority:
         deadline = time.monotonic() + 0.5
         while True:
             try:
+                # A restored permit must not mint a replacement claim before
+                # the live CURRENT anchor has checked the committed stores.
+                # Recheck after gate contention before retrying the claim.
+                self._enforce_cold_restart_anchor("positive_claim")
                 result = self._consume_and_claim_once(operation_key, payload, idempotency_key)
                 break
             except QuarantineGateBusy:

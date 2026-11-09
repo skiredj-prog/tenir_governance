@@ -124,6 +124,41 @@ def test_native_admission_refused_after_joint_rollback_with_live_reader(tmp_path
         restarted.admit_reserve_issue("op2", "eval", PAYLOAD, resource_id="lab:budget")
 
 
+def test_native_claim_refused_before_mutation_after_joint_rollback(tmp_path, monkeypatch):
+    """A restored, still-pending permit cannot mint a replacement claim first."""
+    _keys(monkeypatch)
+    backend, authority = _new_authority(tmp_path)
+    publisher = MonotoneAnchorAuthority()
+    _bootstrap(authority, publisher)
+    authority.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+    authority.admit_reserve_issue("op1", "eval", PAYLOAD, resource_id="lab:budget")
+    before_claim_kernel = tmp_path / "before_claim_kernel.sqlite3"
+    before_claim_witness = tmp_path / "before_claim_witness.sqlite3"
+    _snapshot(backend._database_path, before_claim_kernel)
+    _snapshot(authority.witness.db_path, before_claim_witness)
+    first = authority.consume_and_claim("op1", PAYLOAD, "op1-idem")
+    assert first["claimed"]
+
+    _snapshot(before_claim_kernel, backend._database_path)
+    _snapshot(before_claim_witness, authority.witness.db_path)
+    restarted = NativePositivePermitAuthority(backend, verifiable_recovery=True)
+    restarted.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+    with pytest.raises(ExternalAnchorHold):
+        restarted.consume_and_claim("op1", PAYLOAD, "op1-idem")
+    with sqlite3.connect(backend._database_path) as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM w2_positive_v1_outbox WHERE operation_key='op1'"
+        ).fetchone()[0] == 0
+        assert db.execute(
+            "SELECT COUNT(*) FROM w2_positive_v1_events "
+            "WHERE operation_key='op1' AND event='dispatch_claimed'"
+        ).fetchone()[0] == 0
+    with sqlite3.connect(authority.witness.db_path) as db:
+        assert db.execute("SELECT MAX(revision) FROM witness_checkpoints").fetchone()[0] == 1
+
+
 def test_native_paths_accept_stale_reader_replay_is_a_freshness_gap(tmp_path, monkeypatch):
     """MANDATORY NEGATIVE CONTROL — documented, never papered over.
 
