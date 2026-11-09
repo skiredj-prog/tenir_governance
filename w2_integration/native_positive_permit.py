@@ -78,6 +78,11 @@ class NativePositivePermitAuthority:
         self._provider_live_sends = {}
         self.verifiable_recovery = verifiable_recovery
         self.external_anchor = None
+        # JW-10: optional cold-restart anti-rollback gate attached to the
+        # native admission and send paths. None preserves prior behaviour.
+        self._cold_restart_gate = None
+        self._cold_restart_subject = None
+        self._cold_restart_min_generation = 1
         self._b1_quarantine_frames = threading.local()
         # JW-10: check any existing kernel custody pin BEFORE schema writes,
         # key generation or accepting a caller-provided witness object.
@@ -296,6 +301,58 @@ class NativePositivePermitAuthority:
 
     def check_anchor(self, anchor, subject: str) -> None:
         anchor.require_not_behind(subject, self.local_witness_revision(subject))
+
+    def attach_cold_restart_anchor_gate(self, gate, *, subject: str,
+                                        min_generation: int = 1) -> None:
+        """Attach an independent cold-restart anti-rollback gate to native paths.
+
+        Once attached, ``admit_reserve_issue`` and ``grant_send_right`` refuse
+        to proceed unless the committed Kernel+Witness state still matches the
+        separately trusted CURRENT anchor read by ``gate``. This converts the
+        standalone ``ExternalColdRestartAnchorGate`` verifier into an enforced
+        precondition for native operations.
+
+        **Bounded, not closed.** The on-disk fingerprint is computed on the
+        committed, quiescent state *before* the native write transaction opens;
+        it is NOT an atomic cross-database snapshot taken with the write. The
+        gate therefore proves the committed state matched the external current
+        anchor at check time, not that the operation about to be written is
+        anchored. A stale/compromised reader that replays a validly-signed old
+        checkpoint is still accepted (signature alone is not freshness). Full
+        enforcement requires a genuinely external, live monotone authority.
+        """
+        if not callable(getattr(gate, "verify_cold_restart", None)):
+            raise TypeError("cold-restart anchor gate must expose verify_cold_restart")
+        if not isinstance(subject, str) or not subject:
+            raise ValueError("cold-restart anchor subject required")
+        if type(min_generation) is not int or min_generation < 1:
+            raise ValueError("cold-restart min_generation must be a positive int")
+        self._cold_restart_gate = gate
+        self._cold_restart_subject = subject
+        self._cold_restart_min_generation = min_generation
+
+    def detach_cold_restart_anchor_gate(self) -> None:
+        self._cold_restart_gate = None
+        self._cold_restart_subject = None
+        self._cold_restart_min_generation = 1
+
+    def _enforce_cold_restart_anchor(self, operation: str):
+        """Fail closed on native paths when the attached anchor gate HOLDs.
+
+        No-op when no gate is attached, so unconfigured laboratories keep their
+        prior semantics. The ``ExternalAnchorHold`` raised by the gate (missing,
+        forged, stale, mismatching or rolled-back checkpoint, or reader outage)
+        propagates unchanged and refuses the native operation.
+        """
+        gate = self._cold_restart_gate
+        if gate is None:
+            return None
+        return gate.verify_cold_restart(
+            subject=self._cold_restart_subject,
+            kernel_db=self.db_path,
+            witness_db=self.witness.db_path,
+            min_generation=self._cold_restart_min_generation,
+        )
 
     def _tx(self):
         """Autocommit connection for schema and reads. Not a write transaction."""
@@ -803,6 +860,9 @@ class NativePositivePermitAuthority:
         composes trusted writer-side checks with the same SQLite transaction;
         it is not a security boundary against code running as the writer.
         """
+        # JW-10: enforce the cold-restart anti-rollback gate on admission, in a
+        # quiescent read before the writer transaction opens. HOLD propagates.
+        self._enforce_cold_restart_anchor("positive_admit")
         payload = snapshot_payload(payload)
         if payload.get("schema") == COMMAND_SCHEMA:
             payload = snapshot_command(payload)
@@ -1158,6 +1218,9 @@ class NativePositivePermitAuthority:
         token = claim.get("claim_token")
         if not execution_id or not token:
             raise RuntimeError("dispatch claim identity missing")
+        # JW-10: enforce the cold-restart anti-rollback gate on the send path,
+        # in a quiescent read before the writer transaction opens.
+        self._enforce_cold_restart_anchor("grant_send_right")
         now = datetime.now(timezone.utc).isoformat()
         with self._write("grant_send_right") as db:
             row = db.execute(
