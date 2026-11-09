@@ -16,8 +16,14 @@ import sqlite3
 from copy import deepcopy
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from tenir_governance.operations.provider import MockProvider, ProviderOutcome
 from tenir_governance.operations.sqlite_backend import SQLiteConsensusBackend
+from w2_integration.native_dispatch_adapter import (
+    Ed25519ConnectorAttestor,
+    NativeClaimedDispatchAdapter,
+)
 from w2_integration.native_positive_permit import NativePositivePermitAuthority, TOPOLOGY_ID
 from w2_integration.external_cold_restart_anchor import (
     ExternalColdRestartAnchorGate,
@@ -277,6 +283,120 @@ def test_settlement_gate_allows_current_state_then_validates_receipt(tmp_path, m
             {"execution_id": "x", "claim_token": "y"}, {"k": "v"})
     assert not isinstance(exc.value, ExternalAnchorHold)
     assert "provider receipt" in str(exc.value)
+
+
+@pytest.mark.parametrize("freeze", ["unknown", "review", "latch"])
+def test_freeze_transition_reanchors_without_reopening_the_frozen_operation(
+    tmp_path, monkeypatch, freeze,
+):
+    """A safety freeze must not strand unrelated native work behind anchor drift."""
+    _keys(monkeypatch)
+    _, authority = _new_authority(tmp_path)
+    publisher = MonotoneAnchorAuthority()
+    _bootstrap(authority, publisher)
+    authority.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+    authority.admit_reserve_issue("op1", "eval", PAYLOAD, resource_id="lab:budget")
+    claim = authority.consume_and_claim("op1", PAYLOAD, "op1-idem")
+    if freeze == "unknown":
+        assert authority.grant_send_right(claim) == "GRANTED"
+        assert authority.mark_dispatch_unknown(claim) == "UNKNOWN"
+        assert authority.consume_and_claim("op1", PAYLOAD, "op1-idem")["replayed"]
+    elif freeze == "review":
+        assert authority.mark_dispatch_review(claim, "provider conflict") == "UNKNOWN"
+        assert authority.requires_manual_review("op1")
+    else:
+        assert authority.latch_review_before_send("op1", "manual hold") == "HOLD"
+        assert authority.requires_manual_review("op1")
+    authority.admit_reserve_issue("op2", "eval", PAYLOAD, resource_id="lab:budget")
+
+
+def test_unknown_remains_durable_if_anchor_publication_fails(tmp_path, monkeypatch):
+    """A post-commit publication outage cannot erase UNKNOWN or re-send."""
+    _keys(monkeypatch)
+    backend, authority = _new_authority(tmp_path)
+    publisher = MonotoneAnchorAuthority()
+    _bootstrap(authority, publisher)
+    authority.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+    authority.admit_reserve_issue("op1", "eval", PAYLOAD, resource_id="lab:budget")
+    claim = authority.consume_and_claim("op1", PAYLOAD, "op1-idem")
+    assert authority.grant_send_right(claim) == "GRANTED"
+    publish = publisher.publish
+    monkeypatch.setattr(publisher, "publish", lambda **_: (_ for _ in ()).throw(OSError("outage")))
+    with pytest.raises(OSError, match="outage"):
+        authority.mark_dispatch_unknown(claim)
+    with sqlite3.connect(backend._database_path) as db:
+        assert db.execute(
+            "SELECT status FROM w2_positive_v1_outbox WHERE operation_key='op1'"
+        ).fetchone()[0] == "UNKNOWN"
+        assert db.execute(
+            "SELECT COUNT(*) FROM w2_positive_v1_events "
+            "WHERE operation_key='op1' AND event='dispatch_send_granted'"
+        ).fetchone()[0] == 1
+    monkeypatch.setattr(publisher, "publish", publish)
+    with pytest.raises(ExternalAnchorHold, match="rollback or drift"):
+        authority.consume_and_claim("op1", PAYLOAD, "op1-idem")
+    assert publish_cold_restart_anchor(
+        authority, publisher, subject=SUBJECT).outcome is PublicationOutcome.APPLIED
+    assert authority.consume_and_claim("op1", PAYLOAD, "op1-idem")["replayed"]
+
+
+def test_gated_timeout_reconciles_without_second_provider_send(tmp_path, monkeypatch):
+    """UNKNOWN can resolve on the normal opt-in path without manual republish."""
+    _keys(monkeypatch)
+    backend = SQLiteConsensusBackend(str(tmp_path / "kernel"))
+    backend.register_resource("lab:budget", 90)
+    attestor = Ed25519ConnectorAttestor(
+        Ed25519PrivateKey.from_private_bytes(bytes(range(96, 128))))
+    authority = NativePositivePermitAuthority(
+        backend, verifiable_recovery=True,
+        trusted_provider_public_key=attestor.public_key_bytes)
+    publisher = MonotoneAnchorAuthority()
+    _bootstrap(authority, publisher)
+    authority.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+    authority.admit_reserve_issue("op1", "eval", PAYLOAD, resource_id="lab:budget")
+    provider = MockProvider(
+        behavior="timeout", reconcile_outcome=ProviderOutcome.CONFIRMED)
+    adapter = NativeClaimedDispatchAdapter(authority, provider, attestor)
+    kwargs = {"action_type": "payment", "amount": 3, "agent_id": "lab-agent",
+              "metadata": PAYLOAD["metadata"]}
+    first = adapter.dispatch("op1", "op1-idem", PAYLOAD, **kwargs)
+    assert first["status"] == "UNKNOWN"
+    assert len(provider.calls) == 1
+    second = adapter.dispatch("op1", "op1-idem", PAYLOAD, **kwargs)
+    assert second["status"] == "CONFIRMED"
+    assert len(provider.calls) == 1
+    assert len(provider.reconcile_calls) == 1
+    with backend._connection() as db:
+        assert db.execute(
+            "SELECT state FROM reservations WHERE idempotency_key='op1'"
+        ).fetchone()[0] == "COMMITTED"
+
+
+def test_rollback_of_anchored_unknown_cannot_be_republished(tmp_path, monkeypatch):
+    """A freeze publication must still reject a restored Kernel prefix."""
+    _keys(monkeypatch)
+    backend, authority = _new_authority(tmp_path)
+    publisher = MonotoneAnchorAuthority()
+    _bootstrap(authority, publisher)
+    authority.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+    authority.admit_reserve_issue("op1", "eval", PAYLOAD, resource_id="lab:budget")
+    claim = authority.consume_and_claim("op1", PAYLOAD, "op1-idem")
+    assert authority.grant_send_right(claim) == "GRANTED"
+    pre_unknown_kernel = tmp_path / "pre_unknown_kernel.sqlite3"
+    _snapshot(backend._database_path, pre_unknown_kernel)
+    assert authority.mark_dispatch_unknown(claim) == "UNKNOWN"
+    _snapshot(pre_unknown_kernel, backend._database_path)
+    restarted = NativePositivePermitAuthority(backend, verifiable_recovery=True)
+    restarted.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+    with pytest.raises(ExternalAnchorHold, match="rollback or drift"):
+        restarted.consume_and_claim("op1", PAYLOAD, "op1-idem")
+    with pytest.raises(ExternalAnchorHold, match="Kernel anti-downgrade"):
+        publish_cold_restart_anchor(restarted, publisher, subject=SUBJECT)
 
 
 def test_native_path_holds_on_reader_outage(tmp_path, monkeypatch):

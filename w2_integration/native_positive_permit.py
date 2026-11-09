@@ -1245,8 +1245,14 @@ class NativePositivePermitAuthority:
         """Freeze an operation before any send right is granted.
 
         A review that arrives after the right was granted is still recorded,
-        but it cannot erase that grant.
+        but it cannot erase that grant. The freeze is written before attempting
+        extend-only anchor publication, so an unavailable anchor cannot undo it.
         """
+        outcome = self._latch_review_before_send_locked(operation_key, reason)
+        self._publish_cold_restart_anchor_after_commit("latch_review_before_send")
+        return outcome
+
+    def _latch_review_before_send_locked(self, operation_key: str, reason: str) -> str:
         if not isinstance(operation_key, str) or not operation_key:
             raise RuntimeError("operation required")
         if not isinstance(reason, str) or not reason.strip():
@@ -1409,7 +1415,18 @@ class NativePositivePermitAuthority:
             return payload
 
     def mark_dispatch_unknown(self, claim: dict) -> str:
-        """Retain a possibly executed dispatch for reconciliation; never clear its key."""
+        """Retain an ambiguous dispatch, then extend the anchor after commit.
+
+        The local UNKNOWN must be durable even if publication cannot complete.
+        A failed publication leaves later positive paths in HOLD until the
+        existing extend-only recovery protocol republishes the committed state.
+        """
+        outcome = self._mark_dispatch_unknown_locked(claim)
+        if outcome == "UNKNOWN":
+            self._publish_cold_restart_anchor_after_commit("mark_dispatch_unknown")
+        return outcome
+
+    def _mark_dispatch_unknown_locked(self, claim: dict) -> str:
         if not isinstance(claim, dict):
             raise RuntimeError("dispatch claim required")
         execution_id = claim.get("execution_id")
@@ -1445,6 +1462,11 @@ class NativePositivePermitAuthority:
 
     def mark_dispatch_review(self, claim: dict, reason: str) -> str:
         """Durably freeze an ambiguous/contradictory provider result for humans."""
+        outcome = self._mark_dispatch_review_locked(claim, reason)
+        self._publish_cold_restart_anchor_after_commit("mark_dispatch_review")
+        return outcome
+
+    def _mark_dispatch_review_locked(self, claim: dict, reason: str) -> str:
         if not isinstance(claim, dict) or not claim.get("execution_id"):
             raise RuntimeError("dispatch claim identity missing")
         if not isinstance(reason, str) or not reason.strip():
