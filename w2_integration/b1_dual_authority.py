@@ -244,7 +244,7 @@ class DualApprovedUidService(ApprovedPositiveUidService):
         data = getattr(self._governor_context, "request", None)
         if data is None:
             raise RuntimeError("Governor proof context missing")
-        context, passage_id, epoch = data
+        context, passage_id, epoch, _envelope = data
         with self.governor_registry.quarantine_guard():
             if context["approval"]["expires_at"] <= int(time.time()):
                 raise RuntimeError("dual approval expired before authorization")
@@ -319,7 +319,12 @@ class DualApprovedUidService(ApprovedPositiveUidService):
             self._governor_public.verify(bytes.fromhex(signature), canonical_approval(body))
         except (InvalidSignature, TypeError, ValueError) as exc:
             raise RuntimeError("Governor receipt signature refused") from exc
-        self._governor_context.request = (request, body["passage_id"], body["quarantine_epoch"])
+        self._governor_context.request = (
+            request,
+            body["passage_id"],
+            body["quarantine_epoch"],
+            {"request": request, "governor_receipt": snapshot_payload(receipt)},
+        )
         try:
             yield request
         finally:

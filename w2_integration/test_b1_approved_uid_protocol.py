@@ -272,9 +272,24 @@ def test_admission_process_exit_preserves_atomic_binding_and_i8(lab, tmp_path, p
         process.join(10)
 
 
-def test_unapproved_preexisting_permit_cannot_be_adopted(lab):
+def test_unapproved_preexisting_permit_cannot_be_adopted(lab, tmp_path):
     backend, service, issuer, req, sign = lab
-    service.authority.admit_reserve_issue("op", "eval", req["command"], resource_id="budget")
+    # Build the legacy image before installing any B1 trust, then restore its
+    # native rows into the migration fixture. The live B1 admission API now
+    # refuses this setup call itself; no check is disabled in the tested path.
+    legacy_backend = SQLiteConsensusBackend(str(tmp_path / "pre-b11-image"))
+    legacy_backend.register_resource("budget", 50)
+    legacy = NativePositivePermitAuthority(legacy_backend)
+    legacy.admit_reserve_issue("op", "eval", req["command"], resource_id="budget")
+    with legacy_backend._connection() as source, service.authority._write("test_restore_legacy_image") as target:
+        for table in ("w2_positive_v1_capacity", "reservations", "w2_positive_v1_permits", "w2_positive_v1_events"):
+            for row in source.execute("SELECT * FROM " + table):
+                columns = tuple(row.keys())
+                target.execute(
+                    "INSERT INTO " + table + " (" + ",".join(columns) + ") VALUES ("
+                    + ",".join("?" for _ in columns) + ")", tuple(row),
+                )
+        target.execute("UPDATE resources SET reserved='7' WHERE resource_id='budget'")
     with pytest.raises(RuntimeError, match="unapproved existing permit"):
         _dispatch(service, issuer, {**req, "approval": sign()})
     with backend._connection() as db:
@@ -322,7 +337,7 @@ def test_expired_replay_is_refused_without_a_second_send(lab, monkeypatch):
     authorized = {**req, "approval": sign()}
     assert _dispatch(service, issuer, authorized)["status"] == "EXECUTED"
     expiry = authorized["approval"]["expires_at"]
-    monkeypatch.setattr("b1_approved_positive_uid_service.time.time", lambda: expiry + 1)
+    monkeypatch.setattr("native_positive_permit.time.time", lambda: expiry + 1)
     with pytest.raises(RuntimeError, match="(expired|validity refused)"):
         _dispatch(service, issuer, authorized)
     assert service.provider.execute_count("op") == 1

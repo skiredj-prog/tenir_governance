@@ -203,6 +203,7 @@ class EffectContractLab:
             return self.status(operation)  # No dispatch, no automatic reconciliation.
         request = envelope["request"]
         with self.gate.checked_request({**request, "governor_receipt": envelope["governor_receipt"]}), self.gate._shared_guard():
+            dual_grant = self.authority.bind_b1_dual_envelope(envelope)
             def enqueue(db):
                 _check_independent(request, self.issuer._independent_public)
                 self.gate._validate_send(db)  # trust/time checked under the writer lock
@@ -217,7 +218,9 @@ class EffectContractLab:
                             request["approval"]["nonce"], wire["authority_context"]["grant_id"]))
             command = request["command"]
             self.authority.admit_reserve_issue(operation, request["evaluation_id"], command,
-                                               resource_id=command["resource_id"], _admit_hook=enqueue)
+                                               resource_id=command["resource_id"],
+                                               dual_grant_id=dual_grant["dual_grant_id"],
+                                               _admit_hook=enqueue)
         return self.status(operation)
 
     def _queued(self, operation):

@@ -73,12 +73,14 @@ class NativePositiveG4A:
             raise RuntimeError("positive G4-A key changed since grant")
 
     def evaluate_and_grant(
-        self, operation_key: str, evaluation_id: str, payload: dict, *, resource_id: str, _admit_hook=None,
+        self, operation_key: str, evaluation_id: str, payload: dict, *, resource_id: str,
+        dual_grant_id: str | None = None, _admit_hook=None,
     ) -> dict:
         self._require_external_key()
         command = snapshot_command(payload)
         issued = self.authority.admit_reserve_issue(
-            operation_key, evaluation_id, command, resource_id=resource_id, _admit_hook=_admit_hook,
+            operation_key, evaluation_id, command, resource_id=resource_id,
+            dual_grant_id=dual_grant_id, _admit_hook=_admit_hook,
         )
         if issued["request_hash"] != canon_request_hash(command):
             raise RuntimeError("grant request_hash diverges from evaluation")
@@ -201,6 +203,12 @@ class NativePositiveG4A:
         # The trusted optional guard ends before provider I/O; an emergency lock
         # does not wait for an already-started provider call to finish.
         with (_send_guard() if _send_guard is not None else nullcontext()), self.authority._write("positive_g4a_consume") as db:
+            # ``consume_and_claim`` is an earlier transaction. Recheck the
+            # durable B1 binding in the transaction which irreversibly grants
+            # this path its one send right, immediately before provider I/O.
+            self.authority._require_b1_dual_binding(
+                db, operation_key, idempotency_key, command, require_live=True,
+            )
             if _send_hook is not None:
                 _send_hook(db)
             updated = db.execute(

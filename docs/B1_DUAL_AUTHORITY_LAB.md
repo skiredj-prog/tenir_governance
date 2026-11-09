@@ -52,6 +52,12 @@ activation. Quarantine does not cancel an effect already authorized. A blocked
 provider call does not hold the gate. Local SQLite/file-lock delays can still
 delay activation; this is not a bounded emergency-response SLA.
 
+This live Governor JSON-quarantine gate applies to the guarded
+`DualApprovedUidService` and HTTP laboratory path. Direct native B1-profile
+enforcement records and validates a signed receipt epoch and pinned trust, but
+does not make the JSON registry and SQLite I8 state one transaction or provide
+a native monotonic quarantine fence.
+
 ## Crash and trust boundaries
 
 The Governor JSON registry, its in-memory budget and the native SQLite I8

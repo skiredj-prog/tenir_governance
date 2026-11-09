@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from contextlib import nullcontext
 
 from cryptography.exceptions import InvalidSignature
@@ -101,6 +100,7 @@ class ApprovedPositiveUidService(ExperimentalPositiveUidService):
         context = getattr(getattr(self, "_governor_context", None), "request", None)
         if context is None:
             raise RuntimeError("Governor verification context required")
+        dual_envelope = context[3]
         if (not isinstance(obj, dict) or obj.get("schema") != "tenir.positive.approved.uid-lab.v1"
                 or obj.get("action") != "submit" or set(obj) != {
                     "schema", "action", "operation_key", "evaluation_id", "idempotency_key", "command", "approval"
@@ -131,51 +131,11 @@ class ApprovedPositiveUidService(ExperimentalPositiveUidService):
             self._approval_public.verify(bytes.fromhex(signature), encoded)
         except (InvalidSignature, ValueError) as exc:
             raise ValueError("approval signature invalid") from exc
-        body_hash = hashlib.sha256(encoded).hexdigest()
-        def bind_approval(db):
-            # BEGIN IMMEDIATE has completed. Recheck trust and time under the
-            # same lock that governs nonce binding and I8 reservation.
-            trust = db.execute("SELECT key_id, public_key FROM b1_approval_trust WHERE singleton=1").fetchone()
-            if (not trust or trust["key_id"] != self._approval_key_id
-                    or bytes(trust["public_key"]) != self._approval_public_bytes):
-                raise RuntimeError("approval trust key changed")
-            now = int(time.time())
-            if issued > now + 30:
-                raise ValueError("approval not yet valid")
-            outboxes = db.execute(
-                "SELECT operation_key, idempotency_key, request_hash, status FROM w2_positive_v1_outbox "
-                "WHERE operation_key=? OR idempotency_key=?", (operation, idempotency),
-            ).fetchall()
-            if len(outboxes) > 1 or (outboxes and (
-                    outboxes[0]["operation_key"] != operation or outboxes[0]["idempotency_key"] != idempotency
-                    or outboxes[0]["request_hash"] != request_hash(command))):
-                raise RuntimeError("approval binding conflict with existing outbox")
-            rows = db.execute(
-                "SELECT * FROM b1_approved_requests WHERE approval_id=? OR nonce=? OR operation_key=? OR idempotency_key=?",
-                (approval_id, nonce, operation, idempotency),
-            ).fetchall()
-            existing_permit = db.execute(
-                "SELECT 1 FROM w2_positive_v1_permits WHERE operation_key=?", (operation,),
-            ).fetchone()
-            if rows:
-                if (len(rows) != 1 or rows[0]["body_hash"] != body_hash
-                        or rows[0]["body_json"] != encoded.decode("utf-8") or rows[0]["signature"] != signature):
-                    raise RuntimeError("approval binding conflict")
-                if not existing_permit:
-                    raise RuntimeError("orphaned approval binding requires review")
-            else:
-                if expires <= now:
-                    raise ValueError("approval expired")
-                if existing_permit:
-                    raise RuntimeError("unapproved existing permit cannot be adopted")
-                db.execute("INSERT INTO b1_approved_requests VALUES(?,?,?,?,?,?,?)",
-                           (approval_id, nonce, operation, idempotency, body_hash, encoded.decode("utf-8"), signature))
-            if expires <= now:
-                if not outboxes or outboxes[0]["status"] == "PENDING":
-                    raise ValueError("approval expired before send")
+        dual_grant = self.authority.bind_b1_dual_envelope(dual_envelope)
         with self._admission_guard():
             grant = self.gate.evaluate_and_grant(
-                operation, evaluation, command, resource_id=command["resource_id"], _admit_hook=bind_approval,
+                operation, evaluation, command, resource_id=command["resource_id"],
+                dual_grant_id=dual_grant["dual_grant_id"],
             )
         with self.authority._tx() as db:
             prior = db.execute("SELECT status FROM w2_positive_v1_outbox WHERE operation_key=?", (operation,)).fetchone()
