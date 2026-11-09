@@ -23,6 +23,7 @@ from tenir_governance.objects import Passage
 from tenir_governance.operations.payload_binding import canonical_payload_hash
 from tenir_governance.operations.registry import OperationState
 from native_positive_permit import NativePositivePermitAuthority
+from b1_native_quarantine import bind_registry
 from w2_2b_canonical import request_hash
 from w2_integration.native_dispatch_command import snapshot_command, snapshot_payload
 
@@ -96,6 +97,7 @@ class GovernorReceiptIssuer:
         self._receipt_authority = receipt_authority
         self._public = _public_bytes(signing_key.public_key())
         with receipt_authority._write("b1_governor_issuer_trust") as db:
+            bind_registry(db, governor.registry)
             db.execute("CREATE TABLE IF NOT EXISTS b1_governor_issuer_trust "
                        "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), public_key BLOB NOT NULL)")
             row = db.execute("SELECT public_key FROM b1_governor_issuer_trust WHERE singleton=1").fetchone()
@@ -221,6 +223,7 @@ class DualApprovedUidService(ApprovedPositiveUidService):
             raise RuntimeError("Governor decisions must be an explicit PASS/FLAG subset")
         decision_json = json.dumps(sorted(decisions), separators=(",", ":"))
         with self.authority._write("b1_governor_trust") as db:
+            bind_registry(db, registry)
             db.execute("CREATE TABLE IF NOT EXISTS b1_governor_trust "
                        "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), public_key BLOB NOT NULL, decisions TEXT NOT NULL, policy_context_hash TEXT NOT NULL)")
             row = db.execute("SELECT public_key, decisions, policy_context_hash FROM b1_governor_trust WHERE singleton=1").fetchone()

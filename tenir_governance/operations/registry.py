@@ -46,6 +46,17 @@ from .payload_binding import EMPTY_PAYLOAD_HASH
 from .file_lock import acquire_file_lock
 
 
+_quarantine_gates_lock = threading.Lock()
+_quarantine_gates = {}
+
+
+def _shared_quarantine_gate(path):
+    # Different registry objects for the same file must share reentrancy.
+    # Include PID so a fork cannot inherit an active parent's gate depth.
+    key = (os.getpid(), os.path.normcase(os.path.abspath(path)))
+    with _quarantine_gates_lock:
+        return _quarantine_gates.setdefault(key, (threading.RLock(), threading.local()))
+
 
 def _verify_quarantine_release(
     verifier, *, authorized_by: str, scope: str, authorization: str,
@@ -469,25 +480,35 @@ class DurableOperationRegistry:
         return bool(self._store_path)
 
     @contextmanager
-    def quarantine_guard(self):
+    def quarantine_guard(self, *, blocking: bool = True):
         """Shared single-host admission/dispatch/quarantine linearization gate.
 
         A separate lock file is used: registry transition APIs also acquire
         their own lock and must not re-enter the same OS flock descriptor.
-        Nested use from the same registry/thread is supported explicitly.
+        Nested use from the same path/thread is supported across instances.
+        A caller already holding SQLite must use blocking=False and roll back
+        on contention, never wait for a gate owner that may need SQLite.
         """
-        with self._quarantine_gate_local:
-            depth = getattr(self._quarantine_gate_depth, "depth", 0)
+        local, depths = (_shared_quarantine_gate(self._store_path) if self._store_path
+                         else (self._quarantine_gate_local, self._quarantine_gate_depth))
+        if not local.acquire(blocking=blocking):
+            raise BlockingIOError("quarantine gate is busy")
+        try:
+            depth = getattr(depths, "depth", 0)
             lease = None
             if depth == 0 and self._store_path:
-                lease = acquire_file_lock(self._store_path + ".quarantine.gate.lock")
-            self._quarantine_gate_depth.depth = depth + 1
+                path = os.path.abspath(self._store_path) + ".quarantine.gate.lock"
+                lease = (acquire_file_lock(path) if blocking
+                         else acquire_file_lock(path, blocking=False))
+            depths.depth = depth + 1
             try:
                 yield
             finally:
-                self._quarantine_gate_depth.depth -= 1
+                depths.depth -= 1
                 if lease is not None:
                     lease.close()
+        finally:
+            local.release()
 
     def _quarantine_path(self) -> str | None:
         return self._store_path + ".quarantine.json" if self._store_path else None
