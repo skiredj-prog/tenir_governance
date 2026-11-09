@@ -1,10 +1,13 @@
 """
-W2.2 — Positive G4-A contract implementation (experimental)
+W2.2 — Historical positive G4-A contract (dispatch and replay disabled)
 G4-A owns admission, I8, signed permit and dispatch claim.
 Permit issued AFTER reservation.
 Consumption + dispatch intent persisted BEFORE B3 call.
 Historical HOLD / execution_authorized=false and local grant remain refused.
 
+Admission helpers retain old database fixtures; they are not Governor authority.
+Dispatch/recovery refuse before writes. Unreachable algorithms are retained for
+migration evidence and guard-removal tests, with no runtime enablement option.
 Experimental only. Not a wiring of historical ExperimentalG4AAuthority.
 """
 from datetime import datetime, timezone, timedelta
@@ -158,7 +161,10 @@ class PositiveG4A:
             self.rc01.transition(op_id, "DISPATCHING", "dispatch_claim_projected")
 
     def _repair_dispatch_claim(self, row):
-        """Replay only an authenticated claim. Expiry after consumption does not block it."""
+        """Refuse automatic replay of historical, non-native claims."""
+        # Old persisted claims are not native capabilities. Do not reinterpret
+        # them or replay them automatically; retain the reservation for review.
+        raise RuntimeError("legacy PositiveG4A recovery disabled: authenticated kernel claim required")
         op_id = row["operation_id"]
         if not self._claim_authenticated(row):
             return
@@ -269,6 +275,8 @@ class PositiveG4A:
         return PositivePermit(row)
 
     def consume_and_dispatch(self, op_id: str, payload: dict, idempotency_key: str):
+        # Refuse before consuming the old permit or projecting DISPATCHING.
+        raise RuntimeError("legacy PositiveG4A dispatch disabled: authenticated kernel claim required")
         rh = canon_request_hash(payload)
         now = datetime.now(timezone.utc).isoformat()
         with self.conn:
