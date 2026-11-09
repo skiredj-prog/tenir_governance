@@ -170,6 +170,36 @@ def test_native_paths_accept_stale_reader_replay_is_a_freshness_gap(tmp_path, mo
     assert accepted["permit_id"] == "permit-op2"  # KNOWN GAP: signature != freshness
 
 
+def test_kernel_only_restore_cannot_launder_a_second_send(tmp_path, monkeypatch):
+    """Finding 3, end-to-end: after a granted send, restoring ONLY the Kernel to
+    its pre-send state must not let a second send through — neither the gate nor
+    extend-only recovery may accept the rolled-back Kernel."""
+    _keys(monkeypatch)
+    backend, authority = _new_authority(tmp_path)
+    publisher = MonotoneAnchorAuthority()
+    _bootstrap(authority, publisher)
+    authority.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+
+    authority.admit_reserve_issue("op1", "eval", PAYLOAD, resource_id="lab:budget")
+    claim = authority.consume_and_claim("op1", PAYLOAD, "op1-idem")
+    pre_send_kernel = tmp_path / "pre_send_kernel.sqlite3"
+    _snapshot(backend._database_path, pre_send_kernel)  # post-claim, pre-send
+    assert authority.grant_send_right(claim) == "GRANTED"
+
+    # Restore ONLY the Kernel to its pre-send state; Witness untouched.
+    _snapshot(pre_send_kernel, backend._database_path)
+    restarted = NativePositivePermitAuthority(backend, verifiable_recovery=True)
+    restarted.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+    # The gate refuses the send outright (committed Kernel drifted from anchor).
+    with pytest.raises(ExternalAnchorHold, match="rollback or drift"):
+        restarted.grant_send_right(claim)
+    # And extend-only recovery cannot launder the rolled-back Kernel either.
+    with pytest.raises(ExternalAnchorHold, match="Kernel anti-downgrade"):
+        publish_cold_restart_anchor(restarted, publisher, subject=SUBJECT)
+
+
 def test_native_path_holds_on_reader_outage(tmp_path, monkeypatch):
     _keys(monkeypatch)
     backend, authority = _new_authority(tmp_path)

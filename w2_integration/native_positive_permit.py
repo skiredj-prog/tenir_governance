@@ -379,7 +379,7 @@ class NativePositivePermitAuthority:
         publisher = self._cold_restart_publisher
         if publisher is None:
             return None
-        from cold_restart_anchor_publisher import publish_cold_restart_anchor
+        from w2_integration.cold_restart_anchor_publisher import publish_cold_restart_anchor
         self._last_anchor_publication = publish_cold_restart_anchor(
             self, publisher, subject=self._cold_restart_subject,
         )

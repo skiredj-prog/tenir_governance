@@ -44,9 +44,11 @@ What it is NOT
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
+from contextlib import closing
 from dataclasses import dataclass
 from enum import Enum
 
@@ -56,7 +58,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from external_cold_restart_anchor import (
+from w2_integration.external_cold_restart_anchor import (
     SCHEMA,
     ExternalAnchorHold,
     sqlite_logical_fingerprint,
@@ -97,7 +99,7 @@ class PublicationResult:
 def _witness_head(witness_db: str) -> tuple[int, str | None]:
     """Return (revision, head snapshot_fingerprint) of the Witness chain head."""
     try:
-        with sqlite3.connect(witness_db) as db:
+        with closing(sqlite3.connect(witness_db)) as db:
             db.row_factory = sqlite3.Row
             has = db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' "
@@ -123,7 +125,7 @@ def _witness_head(witness_db: str) -> tuple[int, str | None]:
 def _witness_fingerprint_at(witness_db: str, revision: int) -> str | None:
     """Return the chain's snapshot_fingerprint at an exact revision, or None."""
     try:
-        with sqlite3.connect(witness_db) as db:
+        with closing(sqlite3.connect(witness_db)) as db:
             db.row_factory = sqlite3.Row
             row = db.execute(
                 "SELECT record_json FROM witness_checkpoints WHERE revision=?",
@@ -137,6 +139,48 @@ def _witness_fingerprint_at(witness_db: str, revision: int) -> str | None:
         return json.loads(row["record_json"])["snapshot_fingerprint"]
     except (TypeError, ValueError, KeyError) as exc:
         raise ExternalAnchorHold("Witness chain record invalid") from exc
+
+
+def _kernel_event_rows(kernel_db: str) -> list[bytes]:
+    """Canonical per-row bytes of the append-only Kernel event log, in id order.
+
+    ``w2_positive_v1_events`` is append-only (its UPDATE/DELETE triggers abort),
+    so this ordered list is a monotone Kernel position. A Kernel-only restore
+    truncates it; a fork diverges its prefix. It is the ordering signal the
+    whole-database digest lacks.
+    """
+    try:
+        with closing(sqlite3.connect(kernel_db)) as db:
+            db.row_factory = sqlite3.Row
+            has = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='w2_positive_v1_events'"
+            ).fetchone()
+            if not has:
+                return []
+            rows = db.execute(
+                "SELECT id, operation_key, event, at, detail "
+                "FROM w2_positive_v1_events ORDER BY id"
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise ExternalAnchorHold("cannot read Kernel event log") from exc
+    return [
+        _canonical({
+            "id": row["id"], "operation_key": row["operation_key"],
+            "event": row["event"], "at": row["at"], "detail": row["detail"],
+        })
+        for row in rows
+    ]
+
+
+def _kernel_prefix_hash(rows: list[bytes], length: int) -> str:
+    """Hash chain over the first ``length`` ordered Kernel event rows."""
+    digest = hashlib.sha256()
+    digest.update(b"TENIR-JW10-KERNEL-EVENT-PREFIX-v1")
+    for row in rows[:length]:
+        digest.update(len(row).to_bytes(8, "big"))
+        digest.update(row)
+    return digest.hexdigest()
 
 
 class MonotoneAnchorAuthority:
@@ -183,6 +227,14 @@ class MonotoneAnchorAuthority:
             * the chain's fingerprint at the anchored revision must still equal
               the anchored Witness head fingerprint (EXTENSION) -> ``APPLIED``;
             * otherwise -> HOLD (does not extend / fork).
+
+        Kernel axis (always, once anchored). Witness checkpoints are minted only
+        on claim, so admit and send are Kernel-only progress within one Witness
+        epoch; the whole-database digest does not order Kernel states. To stop a
+        Kernel-only restore from laundering through the same-revision branch, the
+        append-only Kernel event log must EXTEND the anchored prefix: its length
+        must not shrink and its first ``anchored_count`` rows must hash
+        identically. A shorter or diverging log is HOLD, whatever the revision.
         """
         if not isinstance(subject, str) or not subject:
             raise ExternalAnchorHold("publication subject required")
@@ -193,6 +245,9 @@ class MonotoneAnchorAuthority:
             if (not isinstance(digest, str) or len(digest) != 64
                     or any(char not in _HEX for char in digest)):
                 raise ExternalAnchorHold("publication digest invalid")
+        kernel_rows = _kernel_event_rows(kernel_db)
+        kernel_count = len(kernel_rows)
+        kernel_prefix = _kernel_prefix_hash(kernel_rows, kernel_count)
         payload = {
             "schema": SCHEMA,
             "subject": subject,
@@ -206,6 +261,9 @@ class MonotoneAnchorAuthority:
             if current is not None:
                 cur = current["envelope"]["payload"]
                 cur_head = current["witness_head_fingerprint"]
+                cur_kernel_count = current["kernel_event_count"]
+                cur_kernel_prefix = current["kernel_event_prefix"]
+                # Witness axis.
                 if revision < cur["generation"]:
                     raise ExternalAnchorHold(
                         "external monotone anchor anti-downgrade: HOLD")
@@ -213,24 +271,33 @@ class MonotoneAnchorAuthority:
                     if head_fingerprint != cur_head:
                         raise AnchorEquivocation(
                             "external monotone anchor Witness equivocation at revision")
-                    if (cur["kernel_sha256"] == kernel_sha256
-                            and cur["witness_sha256"] == witness_sha256
-                            and cur["topology_id"] == topology_id):
-                        return PublicationResult(
-                            PublicationOutcome.IDEMPOTENT, subject, revision,
-                            kernel_sha256, witness_sha256,
-                            current["envelope"], head_fingerprint)
-                    # Same Witness epoch, Kernel-only progress: accepted below.
                 else:
                     anchored_at = _witness_fingerprint_at(witness_db, cur["generation"])
                     if anchored_at != cur_head:
                         raise AnchorDoesNotExtend(
                             "external monotone anchor: new state does not extend the "
-                            "anchored checkpoint: HOLD")
+                            "anchored Witness checkpoint: HOLD")
+                # Kernel axis (orders admit/send progress within an epoch).
+                if kernel_count < cur_kernel_count:
+                    raise ExternalAnchorHold(
+                        "external monotone anchor Kernel anti-downgrade: HOLD")
+                if _kernel_prefix_hash(kernel_rows, cur_kernel_count) != cur_kernel_prefix:
+                    raise AnchorDoesNotExtend(
+                        "external monotone anchor: Kernel event log does not extend "
+                        "the anchored prefix: HOLD")
+                if (cur["kernel_sha256"] == kernel_sha256
+                        and cur["witness_sha256"] == witness_sha256
+                        and cur["topology_id"] == topology_id):
+                    return PublicationResult(
+                        PublicationOutcome.IDEMPOTENT, subject, revision,
+                        kernel_sha256, witness_sha256,
+                        current["envelope"], head_fingerprint)
             envelope = self._sign(payload)
             self._current[subject] = {
                 "envelope": envelope,
                 "witness_head_fingerprint": head_fingerprint,
+                "kernel_event_count": kernel_count,
+                "kernel_event_prefix": kernel_prefix,
             }
             return PublicationResult(
                 PublicationOutcome.APPLIED, subject, revision,

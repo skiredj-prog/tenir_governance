@@ -154,6 +154,45 @@ def test_kernel_only_progress_within_same_witness_epoch_is_applied(tmp_path, mon
     assert progressed.kernel_sha256 != first.kernel_sha256
 
 
+def test_kernel_only_rollback_within_same_epoch_is_refused(tmp_path, monkeypatch):
+    """Finding 3: a Kernel-only restore at an unchanged Witness revision must
+    HOLD, not launder through the same-revision branch as fresh progress."""
+    backend, authority = _authority(tmp_path, monkeypatch)
+    publisher = MonotoneAnchorAuthority()
+    _advance(authority, "op1")
+    at_claim_k = tmp_path / "at_claim_k"
+    _snap(backend._database_path, at_claim_k)      # Kernel after claim op1
+    assert _publish(authority, publisher).generation == 1
+    # Kernel-only progress within the same Witness epoch (admit, no claim).
+    authority.admit_reserve_issue("op2", "eval", PAYLOAD, resource_id="lab:budget")
+    assert _publish(authority, publisher).outcome is PublicationOutcome.APPLIED
+
+    # Restore ONLY the Kernel to its post-claim prefix; Witness untouched.
+    _snap(at_claim_k, backend._database_path)
+    with pytest.raises(ExternalAnchorHold, match="Kernel anti-downgrade"):
+        _publish(authority, publisher)
+
+
+def test_kernel_fork_at_same_revision_does_not_extend(tmp_path, monkeypatch):
+    backend, authority = _authority(tmp_path, monkeypatch)
+    publisher = MonotoneAnchorAuthority()
+    _advance(authority, "op1")
+    at_claim_k = tmp_path / "at_claim_k"
+    _snap(backend._database_path, at_claim_k)
+    # Anchor two admits of kernel progress (prefix P + {op2 events}).
+    authority.admit_reserve_issue("op2", "eval", PAYLOAD, resource_id="lab:budget")
+    authority.admit_reserve_issue("op3", "eval", PAYLOAD, resource_id="lab:budget")
+    assert _publish(authority, publisher).outcome is PublicationOutcome.APPLIED
+    # Restore to the post-claim prefix and grow a DIFFERENT kernel tail of the
+    # same length (op-x, op-y) so the event count matches but the prefix forks.
+    _snap(at_claim_k, backend._database_path)
+    forked = NativePositivePermitAuthority(backend, verifiable_recovery=True)
+    forked.admit_reserve_issue("op-x", "eval", PAYLOAD, resource_id="lab:budget")
+    forked.admit_reserve_issue("op-y", "eval", PAYLOAD, resource_id="lab:budget")
+    with pytest.raises(ExternalAnchorHold, match="anti-downgrade|does not extend"):
+        _publish(forked, publisher)
+
+
 def test_crash_before_acceptance_is_unknown_then_recovers_by_extension(tmp_path, monkeypatch):
     _, authority = _authority(tmp_path, monkeypatch)
     publisher = MonotoneAnchorAuthority()
