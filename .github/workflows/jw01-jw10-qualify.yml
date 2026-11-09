@@ -7,8 +7,12 @@ on:
       - 'audit_tests/qualify_jw01_jw10.py'
       - 'audit_tests/test_jw_joint_rollback_limit.py'
       - 'audit_tests/test_jw_external_anchor_gate.py'
+      - 'audit_tests/test_jw_native_anchor_gate_enforced.py'
+      - 'audit_tests/test_jw_anchor_publication_crash.py'
+      - 'audit_tests/test_jw_anchor_publication_kill.py'
       - 'audit_tests/test_jw09_jw10_recovery_custody.py'
       - 'w2_integration/external_cold_restart_anchor.py'
+      - 'w2_integration/cold_restart_anchor_publisher.py'
       - 'w2_integration/independent_witness.py'
       - 'w2_integration/native_positive_permit.py'
       - 'docs/JW10_ANTI_DOWNGRADE_ANCHOR_GATE.md'
@@ -62,6 +66,13 @@ jobs:
               'test_joint_kernel_and_witness_snapshot_restore_is_not_detected_locally']['pass']
           print('JW exact-head candidate: SCOPED_TEST_PASS; GLOBAL HOLD (expected)')
           PY
+      - name: Exercise native anchor gate and publication on exact PR head
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          PYTHONPATH=.:w2_integration python -m pytest -q -ra --strict-markers \
+            audit_tests/test_jw_native_anchor_gate_enforced.py \
+            audit_tests/test_jw_anchor_publication_crash.py \
+            audit_tests/test_jw_anchor_publication_kill.py
       - name: Upload raw qualified scope evidence (not global certification)
         if: always()
         uses: actions/upload-artifact@v4
