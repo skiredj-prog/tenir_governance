@@ -1,0 +1,68 @@
+name: B1 native quarantine fence laboratory
+on:
+  pull_request:
+    paths:
+      - w2_integration/**
+      - tenir_governance/operations/registry.py
+      - tenir_governance/operations/file_lock.py
+      - scripts/verify_b11_quarantine_mutations.py
+      - docs/B1_1_NATIVE_QUARANTINE.md
+      - .github/workflows/b1-native-quarantine.yml
+permissions:
+  contents: read
+jobs:
+  quarantine:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            sep: ':'
+          - os: windows-latest
+            sep: ';'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      TENIR_ENV: test
+      HOST_SCOPE: single-host
+      PYTHONPATH: ${{ github.workspace }}${{ matrix.sep }}${{ github.workspace }}/w2_integration
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install and identify exact source
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/sha.txt
+          python -m pip install -e '.[api,test,raft,ep02]'
+          python -m pip check
+          python -m pip freeze > evidence/dependencies.txt
+          python -m compileall -q w2_integration tenir_governance
+          git diff --check
+      - name: Native quarantine and shared registry regressions
+        run: |
+          set -euo pipefail
+          python -m pytest -q -ra --tb=short -o addopts= \
+            w2_integration/test_b11_native_quarantine.py \
+            w2_integration/test_b11_native_dual_grant.py \
+            w2_integration/test_b1_dual_authority.py \
+            tests/test_quarantine_cross_registry.py \
+            --junitxml=evidence/quarantine.xml 2>&1 | tee evidence/quarantine.log
+      - name: Detect admission, send and final-commit mutants
+        run: python scripts/verify_b11_quarantine_mutations.py evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b1-native-quarantine-${{ matrix.os }}-${{ github.run_id }}
+          path: evidence/

@@ -63,14 +63,17 @@ operation identities. It does not introduce a new signed provider-receipt
 schema. Commit-failure injection covers proof storage, admission and claim;
 the existing HTTP campaign covers process exits and concurrent dispatch.
 
-The Governor registry remains a separately locked JSON store. A direct native
+The B1.1-B baseline leaves the Governor registry in a separately locked JSON store. A direct native
 B1-profile call validates the signed receipt epoch and pinned trust, but it
 does not atomically re-read a live Governor quarantine state with the SQLite
 I8 transaction. It is therefore not a native monotonic quarantine fence.
 An earlier valid dual proof alone does not establish current admissibility
 after a quarantine change. This remains a P0 for promoting direct native
 dispatch to a supported deployment; B1.1-B must remain Draft until that next
-fence and the integrated tests have been reviewed.
+fence and the integrated tests have been reviewed. The subsequent candidate
+[B1.1-C](B1_1_NATIVE_QUARANTINE.md) adds a shared single-host commit gate; its
+evidence must be reviewed at its own SHA. It does not retroactively strengthen
+the B1.1-B baseline or create a joint JSON/SQLite storage transaction.
 
 The following remain open: B2/witness and protected key custody; the
 historical G4-A/W4 integration boundary; generic core and connector APIs;

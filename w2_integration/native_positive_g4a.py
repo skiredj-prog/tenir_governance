@@ -86,6 +86,9 @@ class NativePositiveG4A:
             raise RuntimeError("grant request_hash diverges from evaluation")
         with self.authority._write("positive_g4a_grant") as db:
             self._require_same_key(db)
+            self.authority._require_b1_dual_binding(
+                db, operation_key, operation_key, command, require_live=True,
+            )
             permit = db.execute(
                 "SELECT * FROM w2_positive_v1_permits WHERE operation_key=?", (operation_key,),
             ).fetchone()

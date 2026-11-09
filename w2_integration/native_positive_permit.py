@@ -18,7 +18,7 @@ import secrets
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from datetime import datetime, timedelta, timezone
 
 from cryptography.exceptions import InvalidSignature
@@ -34,6 +34,7 @@ from b1_native_dual_grant import (
     canonical_b1,
     digest_b1,
 )
+from b1_native_quarantine import commit_guard, QuarantineGateBusy
 from independent_witness import IndependentWitness
 from w2_2b_canonical import request_hash as canon_request_hash
 from w2_integration.native_dispatch_command import COMMAND_SCHEMA, snapshot_command, snapshot_payload
@@ -77,6 +78,7 @@ class NativePositivePermitAuthority:
         self._provider_live_sends = {}
         self.verifiable_recovery = verifiable_recovery
         self.external_anchor = None
+        self._b1_quarantine_frames = threading.local()
         # JW-10: check any existing kernel custody pin BEFORE schema writes,
         # key generation or accepting a caller-provided witness object.
         with self._tx() as custody_db:
@@ -312,24 +314,50 @@ class NativePositivePermitAuthority:
         Also fences objects opened BEFORE a different object pins this store.
         Caller discipline and opt-in constructor checks alone are inadequate.
         """
-        with self.backend._transaction(operation) as db:
-            has_pin=db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='w2_verifiable_custody'"
+        # Final quarantine lease outlives the transaction context, including
+        # COMMIT/fault injection, but is never held during witness/provider I/O.
+        with ExitStack() as leases, self.backend._transaction(operation) as db:
+            frames = getattr(self._b1_quarantine_frames, "frames", None)
+            if frames is None:
+                frames = self._b1_quarantine_frames.frames = {}
+            checks = frames[id(db)] = []
+            try:
+                self._check_write_custody(db)
+                yield db
+                if checks:
+                    leases.enter_context(commit_guard(db, checks))
+            finally:
+                del frames[id(db)]
+
+    def _check_write_custody(self, db):
+        """Custody validation shared by every native write transaction."""
+        has_pin=db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='w2_verifiable_custody'"
+        ).fetchone()
+        if has_pin:
+            pinned=db.execute(
+                "SELECT kernel_key_id,witness_key_id "
+                "FROM w2_verifiable_custody WHERE singleton=1"
             ).fetchone()
-            if has_pin:
-                pinned=db.execute(
-                    "SELECT kernel_key_id,witness_key_id "
-                    "FROM w2_verifiable_custody WHERE singleton=1"
-                ).fetchone()
-                if pinned is None:
-                    raise RuntimeError("JW-10 kernel custody pin missing: HOLD")
-                if not self.verifiable_recovery:
-                    raise RuntimeError("JW-10 previous Kernel instance fenced by custody pin")
-                if (pinned["kernel_key_id"]!=self.key_id
-                        or pinned["witness_key_id"]!=self.witness.key_id):
-                    raise RuntimeError("JW-10 kernel/witness key changed on restart")
-            yield db
+            if pinned is None:
+                raise RuntimeError("JW-10 kernel custody pin missing: HOLD")
+            if not self.verifiable_recovery:
+                raise RuntimeError("JW-10 previous Kernel instance fenced by custody pin")
+            if (pinned["kernel_key_id"]!=self.key_id
+                    or pinned["witness_key_id"]!=self.witness.key_id):
+                raise RuntimeError("JW-10 kernel/witness key changed on restart")
+
+    def _require_b1_live_quarantine(self, db, row, payload):
+        checks = getattr(self._b1_quarantine_frames, "frames", {}).get(id(db))
+        if checks is None:
+            # Read-only claim verification grants no new send right. A valid
+            # one-use capability elected before quarantine remains in flight.
+            return
+        check = (dict(row), snapshot_payload(payload))
+        with commit_guard(db, [check]):
+            pass
+        checks.append(check)  # re-read under the gate held through COMMIT
 
     def _require_native_i8(self, db, operation_key: str, payload: dict, *, allow_committed: bool = False) -> None:
         """Refuse a claim or settlement when the durable I8 row no longer matches."""
@@ -682,6 +710,7 @@ class NativePositivePermitAuthority:
                 or row["expires_at"] <= int(time.time())):
             raise RuntimeError("durable B1 dual grant does not authorize native admission")
         self._require_b1_current_trust(db, row)
+        self._require_b1_live_quarantine(db, row, payload)
         existing = db.execute(
             "SELECT * FROM b1_approved_requests WHERE approval_id=? OR nonce=? "
             "OR operation_key=? OR idempotency_key=?",
@@ -759,6 +788,8 @@ class NativePositivePermitAuthority:
                 or permit["reservation_id"] != row["linked_reservation_id"]):
             raise RuntimeError("durable B1 dual grant permit link invalid")
         self._require_b1_current_trust(db, row)
+        if require_live:
+            self._require_b1_live_quarantine(db, row, payload)
         return row
 
     def admit_reserve_issue(
@@ -902,6 +933,19 @@ class NativePositivePermitAuthority:
                 "execution_authorized_historical": False}
 
     def consume_and_claim(self, operation_key: str, payload: dict, idempotency_key: str) -> dict:
+        # Retry only a rolled-back local claim on gate contention. Each attempt
+        # revalidates the same identity/epoch. The witness replays its durable
+        # identity; no provider call or ambiguous external effect is retried.
+        deadline = time.monotonic() + 0.5
+        while True:
+            try:
+                return self._consume_and_claim_once(operation_key, payload, idempotency_key)
+            except QuarantineGateBusy:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
+
+    def _consume_and_claim_once(self, operation_key: str, payload: dict, idempotency_key: str) -> dict:
         request_hash = canon_request_hash(payload)
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         witness_subject = f"{operation_key}:{idempotency_key}"
@@ -1465,6 +1509,7 @@ class NativePositivePermitAuthority:
                 "w2_positive_v1_capacity", "w2_positive_v1_permits",
                 "w2_positive_v1_outbox", "w2_positive_v1_events",
                 "b1_native_dual_grants", "b1_native_dual_permit_links",
+                "b1_native_quarantine_registry",
                 "resources", "reservations",
             ],
             "i8_backend": "SQLiteConsensusBackend",

@@ -36,6 +36,7 @@ _B1_PROFILE_TABLES = (
     "b1_governor_issuer_trust",
     "b1_governor_receipts",
     "b1_approved_requests",
+    "b1_native_quarantine_registry",
 )
 
 
@@ -187,7 +188,9 @@ def _copy_b1_profile(source, target):
     """Install a controlled pre-B1.1-B store image for migration testing.
 
     The helper copies only already-pinned trust material and the signed receipt,
-    after a legacy native permit has been created in a separate temporary store.
+    and registry topology pin after a legacy native permit has been created in
+    a separate temporary store. Missing-pin refusal has its own boundary test;
+    this fixture isolates refusal of the absent dual-permit link.
     It deliberately does not copy any dual-grant link.
     """
     with source._connection() as db:
