@@ -6,6 +6,7 @@ on:
     paths:
       - w2_integration/positive_uid_service.py
       - w2_integration/test_positive_uid_protocol.py
+      - scripts/verify_b11_legacy_uid_mutation.py
       - tests/test_positive_uid_linux.py
       - .github/workflows/b1-positive-uid-service.yml
 permissions:
@@ -36,6 +37,9 @@ jobs:
       - name: Run positive protocol regression
         run: |
           PYTHONPATH="$PWD:$PWD/w2_integration" python -m pytest -q -o addopts= w2_integration/test_positive_uid_protocol.py --junitxml=evidence/protocol.xml
+      - name: Demonstrate native UID retirement mutation is detected
+        run: |
+          PYTHONPATH="$PWD:$PWD/w2_integration" python scripts/verify_b11_legacy_uid_mutation.py evidence
       - name: Stage read-only source for distinct UIDs
         run: |
           set -euo pipefail
