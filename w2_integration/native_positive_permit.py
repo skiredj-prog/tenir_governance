@@ -1501,6 +1501,22 @@ class NativePositivePermitAuthority:
             return False
 
     def mark_dispatch_confirmed(self, claim: dict, receipt: dict) -> str:
+        """Gate the settlement on the cold-restart anchor, then confirm.
+
+        Settlement commits the I8 reservation, so the anti-rollback gate extends
+        to it: a rolled-back Kernel/Witness is refused before the effect is
+        settled, and a successful settlement re-anchors (extend-only). The
+        review/latch/unknown reconciliation paths are deliberately NOT gated --
+        they must be able to freeze a dubious dispatch even on a stale anchor --
+        so they rely on the Witness/outbox/receipt guards instead.
+        """
+        self._enforce_cold_restart_anchor("mark_dispatch_confirmed")
+        outcome = self._mark_dispatch_confirmed_locked(claim, receipt)
+        if outcome == "CONFIRMED":
+            self._publish_cold_restart_anchor_after_commit("mark_dispatch_confirmed")
+        return outcome
+
+    def _mark_dispatch_confirmed_locked(self, claim: dict, receipt: dict) -> str:
         """Persist only a receipt matching the exact pending/unknown native claim."""
         if not isinstance(claim, dict) or not isinstance(receipt, dict):
             raise RuntimeError("claim and provider receipt required")

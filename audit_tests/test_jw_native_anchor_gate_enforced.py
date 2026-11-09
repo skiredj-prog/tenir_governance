@@ -200,6 +200,50 @@ def test_kernel_only_restore_cannot_launder_a_second_send(tmp_path, monkeypatch)
         publish_cold_restart_anchor(restarted, publisher, subject=SUBJECT)
 
 
+def test_settlement_is_gated_by_the_cold_restart_anchor(tmp_path, monkeypatch):
+    """R1: mark_dispatch_confirmed (I8 settlement) is now gated, so a rolled-back
+    Kernel/Witness is refused before the effect is settled."""
+    _keys(monkeypatch)
+    backend, authority = _new_authority(tmp_path)
+    publisher = MonotoneAnchorAuthority()
+    _bootstrap(authority, publisher)
+    boot_kernel = tmp_path / "boot_kernel.sqlite3"
+    boot_witness = tmp_path / "boot_witness.sqlite3"
+    _snapshot(backend._database_path, boot_kernel)
+    _snapshot(authority.witness.db_path, boot_witness)
+    authority.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+    # Advance so the live anchor moves past the bootstrap snapshot.
+    authority.admit_reserve_issue("op1", "eval", PAYLOAD, resource_id="lab:budget")
+    authority.consume_and_claim("op1", PAYLOAD, "op1-idem")
+    # Joint rollback to the bootstrap state; the live reader holds the newer one.
+    _snapshot(boot_kernel, backend._database_path)
+    _snapshot(boot_witness, authority.witness.db_path)
+    restarted = NativePositivePermitAuthority(backend, verifiable_recovery=True)
+    restarted.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+    # Settlement HOLDs at the gate, before any receipt work.
+    with pytest.raises(ExternalAnchorHold, match="rollback or drift"):
+        restarted.mark_dispatch_confirmed(
+            {"execution_id": "x", "claim_token": "y"}, {"k": "v"})
+
+
+def test_settlement_gate_allows_current_state_then_validates_receipt(tmp_path, monkeypatch):
+    """The settlement gate does not block the current state: it passes the gate
+    and the inner path then rejects the bogus receipt (not an anchor HOLD)."""
+    _keys(monkeypatch)
+    backend, authority = _new_authority(tmp_path)
+    publisher = MonotoneAnchorAuthority()
+    _bootstrap(authority, publisher)
+    authority.attach_cold_restart_anchor_gate(
+        _gate(publisher), subject=SUBJECT, publisher=publisher)
+    with pytest.raises(RuntimeError) as exc:
+        authority.mark_dispatch_confirmed(
+            {"execution_id": "x", "claim_token": "y"}, {"k": "v"})
+    assert not isinstance(exc.value, ExternalAnchorHold)
+    assert "provider receipt" in str(exc.value)
+
+
 def test_native_path_holds_on_reader_outage(tmp_path, monkeypatch):
     _keys(monkeypatch)
     backend, authority = _new_authority(tmp_path)
