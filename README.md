@@ -202,6 +202,16 @@ The wider system may additionally implement review, escalation, recovery, or alt
 
 # Quick Start
 
+## 5-minute developer path
+
+See [GETTING_STARTED.md](GETTING_STARTED.md).
+
+```bash
+python experience/5min_gate.py
+```
+
+Synthetic lost response → UNKNOWN → blocked duplicate → correlated receipt → inspectable export. Single dispatcher.
+
 ## Install
 
 ```bash
@@ -487,106 +497,4 @@ COLLAPSE
 
 with a recovery path from `SIGNAL_CONFLICT` toward `METABOLIZING`.
 
-CES is an internal/experimental governance-state model in the R5 repository. It is **not required to understand or execute the core admissibility calculation**.
-
-| State             | Description                              |
-| ----------------- | ---------------------------------------- |
-| `REST`            | Stable state                             |
-| `METABOLIZING`    | Pressure being absorbed / monitored      |
-| `TENSION`         | Elevated attention state                 |
-| `SIGNAL_CONFLICT` | Competing signals requiring adjudication |
-| `COLLAPSE`        | Critical intervention state              |
-
----
-
-# Terminology
-
-v5.3.0 replaces several historical internal terms with neutral canonical terminology.
-
-| Historical term       | Canonical R5 term       |
-| --------------------- | ----------------------- |
-| `SCHIZOPHRENIA`       | `SIGNAL_CONFLICT`       |
-| `SCHIZOPHRENIA_ALERT` | `SIGNAL_CONFLICT_ALERT` |
-| `WHALE_RESONANCE`     | `DEEP_PATTERN_SIGNAL`   |
-
-Backward-compatible aliases are preserved where required for existing records and compatibility.
-
----
-
-# Integration Position
-
-TENIR-Gov is designed to complement adjacent infrastructure.
-
-| Layer                 | Primary question                                       | Typical function                 | TENIR-Gov distinction                                                |
-| --------------------- | ------------------------------------------------------ | -------------------------------- | -------------------------------------------------------------------- |
-| **Identity / IAM**    | Who is allowed to request?                             | Authentication, authorization    | TENIR evaluates the runtime admissibility of the proposed transition |
-| **API Gateway**       | Can the request reach the service?                     | Routing, rate limiting           | TENIR evaluates the action under active policy/state                 |
-| **Policy Engine**     | Does the request satisfy declared rules?               | Rule evaluation                  | TENIR adds a runtime admissibility layer                             |
-| **LLM Guardrails**    | Is generated content/action representation acceptable? | Content and model-level controls | TENIR provides an execution-boundary decision                        |
-| **Observability**     | What happened?                                         | Monitoring and telemetry         | TENIR can decide before execution and record the decision            |
-| **Execution Control** | Should this transition become real now?                | Runtime enforcement              | **TENIR-Gov**                                                        |
-
-TENIR-Gov is therefore not positioned as a replacement for these systems.
-
-It is an additional control layer at the **decision → execution boundary**.
-
----
-
-# What TENIR-Gov Does Not Claim
-
-TENIR-Gov does not claim that:
-
-* the admissibility formula is a universal safety metric;
-* a Merkle ledger proves the correctness of a decision;
-* deterministic execution control eliminates all agentic-AI risk;
-* a `HARD_VETO` guarantees physical prevention in every deployment;
-* the kernel replaces identity, authorization, cybersecurity, observability, or enterprise governance;
-* benchmark latency represents a production SLA;
-* repository test coverage represents complete operational assurance.
-
-These distinctions are intentional.
-
-The purpose of TENIR-Gov is narrower:
-
-> **make the decision to cross from autonomous reasoning into consequential execution an explicit, policy-controlled runtime event.**
-
----
-
-# Scientific / Research Context
-
-TENIR-Gov is part of the broader TENIR research and engineering program concerning runtime admissibility, autonomous systems, governance boundaries, and preservation of decision integrity under pressure.
-
-The v5.3.0 repository implements the **deterministic governance spine**.
-
-Broader TENIR concepts and ontological structures may appear in research materials and future releases, but they should not be inferred to be implemented by the v5.3.0 kernel merely because they exist in the broader framework.
-
----
-
-# Citation
-
-For reproducibility, identify the software version and exact Git tag or commit. The DOI below is an **all-versions concept DOI**, not a v5.7.0-specific archive:
-
-```text
-Skiredj, A. (2026).
-TENIR-Gov: Governance Middleware for AI-Enabled Operational Systems.
-Zenodo.
-https://doi.org/10.5281/zenodo.21264802
-```
-
-DOI:
-
-```text
-https://doi.org/10.5281/zenodo.21264802
-```
-
-A machine-readable citation is also provided through `CITATION.cff`.
-
----
-
-# License
-
-Apache License 2.0.
-
-See [LICENSE](LICENSE).
-
-Copyright © 2026 Abdelaziz Skiredj / TENIR Labs
+CES is an internal/experimental governance-state model in the R5 repository. It is **not required to understand or execute the kernel**.
