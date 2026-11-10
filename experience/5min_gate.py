@@ -31,6 +31,7 @@ class SingleDispatcher:
     def __init__(self):
         self._effects: dict[str, Effect] = {}
         self._budget_reserved = False
+        self._lease_epoch = 1
 
     def dispatch(self, effect_id: str, payload: dict) -> Effect:
         if effect_id in self._effects and self._effects[effect_id].dispatched:
@@ -57,11 +58,18 @@ class SingleDispatcher:
     def export(self, effect_id: str) -> dict:
         effect = self._effects[effect_id]
         return {
+            "implementation": "TENIR-Gov",
+            "version": "5.7.0-scaffold",
+            "adapter_version": "5min-gate-scaffold-v0",
+            "deployment_scope": "local-single-host-synthetic",
             "effect_id": effect.effect_id,
             "dispatched": effect.dispatched,
-            "outcome": effect.outcome.value,
+            "outcome_knowledge": effect.outcome.value,
             "receipt": effect.receipt,
-            "adapter_version": "5min-gate-scaffold-v0",
+            "lease_epoch": self._lease_epoch,
+            "permission_state": "granted",
+            "dispatch_state": "dispatched",
+            "mission_status": "closed",
         }
 
 def run_synthetic_scenario() -> dict:
@@ -75,26 +83,23 @@ def run_synthetic_scenario() -> dict:
     d = SingleDispatcher()
     effect_id = "booking-001"
 
-    # 0–1 min
     d.dispatch(effect_id, {"hotel": "synthetic", "guest": "dev"})
-    d.mark_unknown(effect_id)  # lost response
+    d.mark_unknown(effect_id)
 
-    # 2–3 min — retry must be blocked
     try:
         d.dispatch(effect_id, {"hotel": "synthetic", "guest": "dev"})
         raise AssertionError("Duplicate was not blocked")
     except RuntimeError:
-        pass  # expected
+        pass
 
-    # 3–4 min
     d.correlate_receipt(effect_id, "receipt-corr-001")
-
-    # 4–5 min
     return d.export(effect_id)
 
 if __name__ == "__main__":
     result = run_synthetic_scenario()
     print(result)
-    assert result["outcome"] == "CONFIRMED"
+    assert result["outcome_knowledge"] == "CONFIRMED"
     assert result["receipt"] == "receipt-corr-001"
+    assert result["implementation"] == "TENIR-Gov"
+    assert result["deployment_scope"] == "local-single-host-synthetic"
     print("5-minute gate scaffold: PASS")
