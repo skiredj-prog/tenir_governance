@@ -1,0 +1,41 @@
+name: P0 SQLite native authority slice 1
+on:
+  push:
+    branches:
+      - integration/p0-sqlite-authority-slice1
+  pull_request:
+    paths:
+      - 'tenir_governance/operations/experimental_native_sqlite_authority.py'
+      - 'tests/test_experimental_native_sqlite_authority.py'
+      - 'tests/test_sqlite_governor_crash_recovery.py'
+      - '.github/workflows/p0-native-sqlite-slice.yml'
+      - 'docs/P0_SQLITE_NATIVE_SLICE1.md'
+permissions:
+  contents: read
+jobs:
+  isolated-native-authority:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if python -m pip install --retries 4 --timeout 60 -e '.[test,ep02]'; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep $((attempt * 5))
+          done
+      - name: Compile source and tests
+        run: |
+          python -m py_compile tenir_governance/operations/experimental_native_sqlite_authority.py
+          python -m py_compile tests/test_experimental_native_sqlite_authority.py
+      - name: Native operation-budget and existing governor recovery regressions
+        run: |
+          python -m pytest -q -ra --strict-markers \
+            tests/test_experimental_native_sqlite_authority.py \
+            tests/test_sqlite_governor_crash_recovery.py
