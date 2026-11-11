@@ -1,0 +1,134 @@
+# ADR-P0-67 — One authoritative transaction for operation, attempt and settlement
+
+Status: **CANDIDATE ARCHITECTURE / NOT APPROVED FOR PRODUCTION**
+Date: 2026-10-25
+Tracking: TENIR-Gov #67; source PR #65; REG candidate PR #48.
+
+## Decision boundary
+
+The current governor persists `OperationState` in the JSON-backed `DurableOperationRegistry`. SQLiteConsensusBackend separately owns resource and reservation accounting; the experimental T6/T7 attempt ledger is another independent SQLite authority. No global atomic transaction exists. A lock or two reads cannot close this gap, and an Ed25519 signature does not certify the truth of a provider's claim.
+
+**Candidate direction:** converge authoritative operation state, attempt qualification, evidence, reservation ownership and commit transition within **one transactional backend** for the single-host lane, rather than adding a fourth independent two-phase journal. The existing SQLiteConsensusBackend is the logical schema/transaction host to evaluate first; its transaction boundary is already used for I8 budget invariants. This is a recommendation for design review, not permission to change live governor authority.
+
+## Implemented evidence
+
+- `AtomicAttemptCandidateAuthority`: experimental source projection, attempt and signed evidence event in ONE SQLite WAL transaction; signed/nonce/LEI/operation fingerprint binding.
+- Terminal and identity immutability plus append-only event guards.
+- 2-process contradictory signed outcomes, hard exits before/after commit, exact replay and restart.
+- Same-file coexistence with `SQLiteConsensusBackend`, without secretly invoking `reserve`, `commit`, `release` or `refund`. **Coexistence is not one transaction.**
+- [TENIR candidate CI 40168586084](https://github.com/skiredj-prog/tenir_governance/actions/runs/40168586084): 69/69 PASS; [REG independent CI 40168660397](https://github.com/skiredj-prog/reg-conformance/actions/runs/40168660397): PASS with non-promotion assertions and SHA-256 artifact.
+- Existing read-only observation API remains unconditional HOLD.
+
+## Migration contract — acceptance gates, not assertions of completion
+
+| Gate | Required behavior | Current status |
+| --- | --- | --- |
+| G0 inventory | Freeze authoritative JSON registry under shared admission/quarantine lock; export immutable operation IDs, state, payload digest, reservations and evidence hashes; refuse malformed/duplicate/unresolved ownership | NOT IMPLEMENTED |
+| G1 atomic schema | One canonical operation/attempt/evidence/reservation ownership transition in one DB transaction, with immutable actor/scope/operation fingerprint and schema guard | CANDIDATE for operation projection + attempt + evidence only; budget separate calls |
+| G2 shadow migration | Compare original JSON operation records to new SQLite source records for each key; fail-closed on mutation/missing records, version drift or stale reads; no write authority | NOT IMPLEMENTED |
+| G3 authoritative cutover | One-time exclusive owner/epoch/cutover record, former store fenced read-only, idempotent restart; no dual-active registry writers | NOT IMPLEMENTED |
+| G4 commit/dispatch | Bound single-use grant consumed under authoritative transaction; provider call only after durable dispatch claim, with UNKNOWN reconciliation and late-effect compensation; preserve I1/I8 | NOT IMPLEMENTED |
+| G5 proof | Systematic process exits at every boundary, simultaneous workers, quarantine, lost provider replies, invalid signer, expired/revoked authority, transaction rollback, budget settlement, power-loss scope and replay evidence | PARTIAL laboratory evidence; production gate untested |
+| G6 standardization | Native REG CT-R4-011/012 and eventually CT-R4-013 wire vectors, independently replayable full evidence archive and no false equivalence with reference runner | NOT IMPLEMENTED |
+
+## Explicit invariants
+
+1. A qualified claim in the attempt ledger is not itself an authorization to execute or alter `OperationState`.
+2. A timeout, lost reply or stale checkpoint must not establish non-execution.
+3. A budget reservation cannot be refunded/released solely because the *candidate* attempt is FAILED.
+4. Cross-store inconsistent states require HOLD and durable reconciliation, not inference.
+5. No new attempt may be admitted on the same LEI until independently governed T8 retry authority exists.
+6. Any source mismatch, untrusted signature, missing owner/epoch or active quarantine blocks dispatch; there is no fail-open fallback.
+7. Production guarantee claims must cite the exact release commit, environment, backend and test artifact. Green candidate tests do not promote the published 5.7.0.
+
+## Non-goals
+
+This ADR does not migrate any production data, change the governor dispatch path, modify public releases, claim cross-host consensus or authorize PR merging. Production implementation must be separately reviewed for backward-compatible migration and the external provider/budget fault model.
+
+## G0/G2 shadow inventory — implemented and verified (2026-10-25)
+
+The experimental `ShadowOperationMigrator` creates a **frozen SQLite projection** of the actual JSON-backed `DurableOperationRegistry` without altering the source or the governor's execution path.
+
+- G0: captures every source record under the same cross-process JSON writer file lock used by `register` and `transition_to`, while also holding the source quarantine gate and local registry lock. Rejects corrupt/missing/empty source, duplicate JSON keys at any depth, non-finite JSON values, unknown record fields, key/record mismatch, unroundtrippable data, quarantine and oversized inventory.
+- G2: validates immutable canonical record hashes and ordered-inventory SHA-256 across the entire source; stages the first inventory in **one SQLite WAL transaction** and permits only exact idempotent rechecks. New/changed/missing source records or damaged shadow rows are a **HOLD**, never an incremental unreviewed update.
+- Crash scenarios: an injected exception or child-process hard exit before commit leaves no shadow epoch or partial rows. Two worker processes converge on one identical epoch; registration from another process waits for capture lock, then causes visible source drift after its own successful write.
+- source [CI 40169534749](https://github.com/skiredj-prog/tenir_governance/actions/runs/40169534749) **88/88 PASS** at source commit `fe01013f635ba6117bcce56048b36beb6729ebec`. [Governance CI 40169534772](https://github.com/skiredj-prog/tenir_governance/actions/runs/40169534772) PASS.
+- Independent REG candidate [CI 40169588262](https://github.com/skiredj-prog/reg-conformance/actions/runs/40169588262) PASS, classifying `shadow_registry_migration.status=SCOPED_SHADOW_CAPTURE_PASS`, `cutover_performed=false` and `execution_authorized=false`.
+
+**Remaining production gates**: G1 canonical operation+attempt+budget authority in one transaction, G3 explicit durable owner epoch/fencing and backwards-compatible migration, G4 actual dispatch/commit integration, G5 crash + provider + I1/I8 testing. G0/G2 must not be interpreted as an authorization to cut over or delete JSON source.
+
+**Known limits:** the frozen snapshot proves identity at capture/check time on one host, not permanently synchronized state, monotonic source version fencing, multi-host linearizability, factual correctness of underlying records, or immunity to source ABA between independent runs. Legacy JSON records that do not round-trip exactly require a reviewed transformation/migration plan, not an automatic acceptance.
+
+## G1 budget-parity preflight — SCOPED evidence, NOT single authority
+
+The candidate `ShadowBudgetParityAudit` checks an already-frozen G0/G2 source epoch against `SQLiteConsensusBackend` reservations/resources **while holding** the JSON source writer lock, quarantine gate and one SQLite `BEGIN IMMEDIATE` transaction. This provides a bounded, single-host capture consistency check, **not** a durable unified governor/attempt/budget operation transition.
+
+- Every observed budget reservation must refer to a source operation whose `reservation_id`, key, resource, amount and budget ownership flags match. Orphan/duplicate reservations, missing links, `UNKNOWN` reservation states, unrecognized compensation statuses, and counter arithmetic violating I8 are rejected. The preflight deliberately refuses ambiguous legacy records rather than synthesizing ownership.
+- The frozen G0 source SHA-256 and canonical budget SHA-256 are written to an immutable G1 parity epoch in the same SQLite transaction; later source or reservation drift causes HOLD.
+- The preflight never changes the production JSON registry, budget counters, reservation state, provider effect or candidate dispatch authority. Its report explicitly sets `execution_authorized=false`, `cutover_authorized=false`.
+- [Source CI 40169877931](https://github.com/skiredj-prog/tenir_governance/actions/runs/40169877931): **97/97 targeted tests PASS**, nine new G1 tests. [Governance CI 40169877940](https://github.com/skiredj-prog/tenir_governance/actions/runs/40169877940) PASS, on `22e0452150e382b87eba012eb6eac7c001737722`.
+- [Independent REG candidate CI 40169963549](https://github.com/skiredj-prog/reg-conformance/actions/runs/40169963549): PASS on the same source SHA, with machine classification `SCOPED_G1_PARITY_PASS` and no-authority checks.
+
+**G1 actual transactional authority is not completed.** This is a G1 *preflight* that can block unsafe migration; it does not give the governor a shared atomic `OperationState` + attempt + reservation-commit transition. G3 fencing/cutover, G4 provider dispatch and G5 complete crash/safety proof remain OPEN.
+
+## G3 experimental fenced shadow — tested, no executable authority
+
+The candidate `G3ShadowFenceCoordinator` introduces a **cooperative single-host writer fence** for updated `DurableOperationRegistry` implementations only. This is deliberately **not** a live governor backend transfer.
+
+**Prerequisites**: frozen G0/G2 source, matching G1 source/budget digest, non-corrupt and non-quarantined JSON store, only CREATED/HOLD operations in the G0 snapshot, **no historical reservations at all**, and drained SQLite budget counters. Ambiguous provider-effect, dispatched, compensated or committed operations cannot use the prototype ceremony.
+
+**Durable sequence under the JSON registry writer lock and quarantine guard**:
+1. A SQLite `shadow_authority_fence` epoch commits `PREPARED` with a unique fence ID and source/budget hashes. A crash here creates **no new authority**. The old writer remains available until a durable fence file exists, and any source drift on retry is a HOLD.
+2. A persistent `.authority-fence.initialized` sentinel is fsynced before writing `.authority-fence.json`; updated legacy writers check either file under their normal writer lock and refuse subsequent JSON mutations. Deleting only the JSON marker cannot reopen writes. A crash after the marker leaves the old writer fenced and the SQLite epoch still PREPARED.
+3. The SQLite epoch advances monotonically to `FENCED_SHADOW_HOLD`. It can be replayed/recovered idempotently only when the frozen hashes and marker still agree. An inspector rechecks the current G1 parity. **Every result carries `execution_authorized=false`, `candidate_dispatch_authorized=false` and `is_production_cutover=false`.**
+
+**Evidence**: [TENIR-Gov CI 40171276528](https://github.com/skiredj-prog/tenir_governance/actions/runs/40171276528) **109/109 scoped tests PASS** on `4def8c9fd39ca758ef271be20d04a8916d67d6c1`, including child-process hard exits before/after marker, subsequent restart, two concurrent ceremonies, stale JSON registry instances, forbidden mutations and monotonic epoch SQL constraints. [Governance CI 40171276493](https://github.com/skiredj-prog/tenir_governance/actions/runs/40171276493) PASS. [Independent REG experiment 40171390160](https://github.com/skiredj-prog/reg-conformance/actions/runs/40171390160) PASS, with `SCOPED_G3_FENCED_HOLD_PASS`.
+
+**Critical limitations**:
+- Older pre-fence binaries that do not check this new sentinel, privileged users deleting **both** durable fence files, and multi-host writers are not excluded by this demonstration. This is a *cooperative single-host* fence, not cryptographic revocation or distributed fencing.
+- The marker may be installed during a crash and leave the old registry permanently HOLD; there is **no automatic unfence** or production rollback path. Institutional recovery must be independently authorized, specified and tested.
+- Preexisting provider calls or unobserved effects are not cancelled. The drained precondition is intentionally strict.
+- G3 does not make the candidate SQLite projection an active, authenticated governor owner. The production governor still references JSON; no atomic operation/attempt/budget/dispatch transaction has been deployed. G3 **readiness/fencing is tested, G3 production cutover remains HOLD**.
+
+## G3 finalized-marker tamper gate — verified
+
+A finalized `FENCED_SHADOW_HOLD` epoch **must not automatically recreate** a deleted initialized sentinel or JSON fence marker. An attempted replay after such loss raises `ShadowMigrationHold` and preserves the surviving file's writer block. This separates legitimate restart of an unfinished PREPARED ceremony from attempted silent repair of an already finalized ownership boundary.
+
+- [TENIR-Gov source CI 40171619527](https://github.com/skiredj-prog/tenir_governance/actions/runs/40171619527): **110/110 scoped tests PASS**, pinned implementation `31da28b33cffec474c6321f139032e121b61860e`; [Governance CI 40171619587](https://github.com/skiredj-prog/tenir_governance/actions/runs/40171619587): PASS.
+- [REG independent candidate 40171689306](https://github.com/skiredj-prog/reg-conformance/actions/runs/40171689306): PASS, asserting G3 missing-finalized-marker HOLD and that the remaining sentinel still blocks an already-open legacy registry; [REG Capabilities 40171689307](https://github.com/skiredj-prog/reg-conformance/actions/runs/40171689307): PASS.
+- `FENCED_SHADOW_HOLD` is **not** `COMMIT_AUTHORIZED`. Recovery requires a separately authorized, designed and tested procedure; privileged deletion of all fence files, unpatched legacy clients, multi-host stores and in-flight provider effects remain outside the current guarantees.
+
+## G1 experimental atomic budget admission — 2026-10-25
+
+The opt-in `CandidateAtomicBudgetAdmission` uses the **actual SQLiteConsensusBackend reservation/resource tables** together with `candidate_sources`, `candidate_attempts` and `candidate_events`, and commits all corresponding writes inside **one SQLite `BEGIN IMMEDIATE` transaction**.
+
+- An admitted candidate records its candidate operation identity/digest/LEI, attempt/nonce, append-only event, a single I8 reservation and its resource counter update atomically. A crash or injected exception before SQLite COMMIT rolls back **all** writes; a process exit after COMMIT is an idempotent replay.
+- `_resource_consistent` checks existing resource capacity against reserved/committed totals and reservation rows. New attempts fail closed on UNCERTAIN/UNKNOWN reservation state, unresolved compensation, orphan/partial matching candidate-budget keys, invalid decimals, insufficient capacity or conflicting replays. Concurrent processes cannot oversubscribe a budget in the tested single-host SQLite lane.
+- Candidate admissions require **both** an explicit `experimental_only=True` opt-in and `candidate:` namespaces for operation key, LEI and resource ID. These are accidental-use guards and **not an institutional security boundary**. The module must be used only against disposable experimental budget resources. An actual production budget store, even if a resource is prefixed `candidate:`, is not automatically safe.
+- Any existing G3 `shadow_authority_fence` epoch causes HOLD; it never promotes the fenced shadow to an executable owner. All admission results remain `CANDIDATE_RESERVED_HOLD`, `decision=HOLD`, `execution_authorized=false`, `source_is_production=false`.
+- **Critically**, the candidate source projection is not the authoritative JSON `DurableOperationRegistry` / `OperationState`. The test demonstrates the SQLite *transaction building block* for G1, not production governor admission, single-use RFC-4 commit grant, provider invocation, budget settlement or G3 authenticated cutover.
+
+### Test and independent replay
+
+- [TENIR-Gov CI run 40174415547](https://github.com/skiredj-prog/tenir_governance/actions/runs/40174415547): **135/135 scoped tests PASS** on source `09bd2d73ac5b70b825d500e2f8ace2e26a4e4aaa`, including 25 candidate budget tests for idempotency, I8 contention under two processes, capacity denial, compensation/UNKNOWN refusal, injected transaction rollback, process exit before and after COMMIT, accidental-use guard, and conflicting preexisting ledger states.
+- [TENIR Governance Gate 40174415445](https://github.com/skiredj-prog/tenir_governance/actions/runs/40174415445): PASS.
+- [Independent REG experiment 40174454700](https://github.com/skiredj-prog/reg-conformance/actions/runs/40174454700): PASS, machine classification `SCOPED_G1_ATOMIC_I8_CANDIDATE_PASS`, no-authority and no-production-cutover assertions. [REG Capabilities 40174454695](https://github.com/skiredj-prog/reg-conformance/actions/runs/40174454695): PASS.
+- [REG artifact #12590889066](https://github.com/skiredj-prog/reg-conformance/actions/runs/40174454700/artifacts/12590889066): reported archive digest `sha256:9aebe0141bb2b97be14be055a6c7905cedc73001171f8f086d9d4fad21bb4334`.
+
+**Verdict:** G1 experimental atomic operation-candidate/attempt/reservation proof **PASS in a disposable single-host scope**. Actual governor `OperationState` authority, deployment G3 cutover, G4 provider dispatch/settlement, T8 and multi-host/partition guarantees **HOLD**.
+
+## G1 experimental signed evidence ↔ I8 settlement transaction — 2026-10-25
+
+The isolated `CandidateAtomicBudgetAdmission.settle_attested_candidate()` now demonstrates the **other half** of a coherent SQLite candidate lifecycle. With an independently configured `Ed25519AttemptVerifier`, an already RESERVED candidate operation and signed evidence binding attempt, LEI, nonce and operation SHA-256 digest:
+
+- Authenticated `EFFECT_CONFIRMED` maps to candidate attempt `RESOLVED`, source projection `EFFECT_ATTESTED`, existing SQLite budget reservation `COMMITTED` and I8 resource counters (reserved decreases, committed increases).
+- Authenticated `NON_EXECUTION_CONFIRMED` maps to candidate attempt `FAILED`, source projection `NO_EFFECT_ATTESTED`, budget reservation `RELEASED` and I8 counters (reserved decreases without changing committed).
+- The source, attempt, evidence event, reservation disposition and resource counters are written **in a single SQLite transaction**. Exact same qualified proof is idempotent. Changed/contradictory terminal attestations are rejected, including concurrent opposing writers.
+- Failed signature, incorrect digest/nonce/identity, budget `UNKNOWN`, required compensation, outside-budget mutation or ledger disagreement results in HOLD; there is **no automatic provider retry or compensation**.
+- Pre-commit injected rollback and child-process abrupt exit are tested at both admission and settlement boundaries. No automatic T8 new-attempt right is created.
+
+**Security boundary:** Ed25519 verifies who signed a claim, not whether a provider actually performed the claimed effect or whether non-execution is factually established. Only disposable candidate budget resources are permitted, with explicit `experimental_only=True`. The production JSON `OperationState`, institutional grant issuance, external provider calls and production I8 settlement have **not** been coupled to this candidate authority.
+
+**Evidence:** [TENIR-Gov targeted CI 40174913150](https://github.com/skiredj-prog/tenir_governance/actions/runs/40174913150): **144/144 PASS** on source `97c1192c31b67045ec6b8bac11450a79dcd1eab1`. [Governance Gate 40174913178](https://github.com/skiredj-prog/tenir_governance/actions/runs/40174913178): PASS. Independent [REG candidate CI 40175011073](https://github.com/skiredj-prog/reg-conformance/actions/runs/40175011073): PASS, [REG Capabilities 40175011065](https://github.com/skiredj-prog/reg-conformance/actions/runs/40175011065): PASS. [Evidence archive #12591837579](https://github.com/skiredj-prog/reg-conformance/actions/runs/40175011073/artifacts/12591837579), SHA-256 `3ccc16cc6b428f4dc5e429c3ee97ef2046b92d81ef4b8cfc4fa914ffb7614854`.
+
+**Verdict:** G1 full **experimental candidate** admission + signed settlement in one SQLite transaction is tested. **G1 production governor authority, G3 institutional cutover, G4 external provider/commit proof, T8 retry and full REG normative CT-R4-011/012/013 remain HOLD.** No release or merge.
