@@ -435,6 +435,7 @@ class DualKernelCompositionClient:
         store_path: str | None = None,
         require_persistence: bool = False,
         enable_assessor: bool = False,
+        mandate_authority=None,
     ) -> None:
         """Initialize the dual-kernel composition client.
 
@@ -498,6 +499,7 @@ class DualKernelCompositionClient:
             policy=self._policy,
             registry=self._registry,
             assessor=assessor,
+            mandate_authority=mandate_authority,
         )
 
     @property
@@ -533,6 +535,7 @@ class DualKernelCompositionClient:
         resource_id: str | None = None,
         amount: float = 0.0,
         trajectory_id: str | None = None,
+        payload: dict | None = None,
     ) -> dict:
         """
         Run both-kernel composition adjudication.
@@ -549,6 +552,7 @@ class DualKernelCompositionClient:
             delegation=delegation,
             resource_id=resource_id, amount=amount,
             trajectory_id=trajectory_id,
+            payload=payload,
         )
 
     def adjudicate_schema(
@@ -573,9 +577,13 @@ class DualKernelCompositionClient:
         return conform_to_schema(result)
 
     def dispatch(self, idempotency_key: str, resource_id: str | None = None,
-                 amount: float = 0.0) -> dict:
-        """Atomically claim the dispatch slot."""
-        return self._governor.dispatch(idempotency_key, resource_id, amount)
+                 amount: float = 0.0, *, payload: dict | None = None,
+                 authority_context: dict[str, str] | None = None) -> dict:
+        """Atomically claim dispatch; enforce current mandate if configured."""
+        return self._governor.dispatch(
+            idempotency_key, resource_id, amount,
+            payload=payload, authority_context=authority_context,
+        )
 
     def confirm(self, idempotency_key: str) -> bool:
         """Confirm the external effect occurred."""
