@@ -168,10 +168,13 @@ class NativeRV002Tests(unittest.TestCase):
         self.assertEqual([], provider.calls)
 
     def test_B1_unguarded_governor_created_before_strict_activation(self):
-        """Already-open legacy clients must observe the shared strict marker."""
+        """An already-open legacy client must observe later strict enrollment."""
+        # This must be a separate registry: setUp already initialized strict
+        # mode on self.registry_path.
         from tenir_governance.operations.registry import OperationState
+        alt_path = str(Path(self.tmp.name) / "legacy-first-registry.json")
         legacy = DualKernelCompositionClient(
-            store_path=self.registry_path, require_persistence=True,
+            store_path=alt_path, require_persistence=True,
         )
         legacy.register_agent(Agent(
             agent_id=CONTEXT["actor_sub"], authority_score=0.9,
@@ -181,9 +184,37 @@ class NativeRV002Tests(unittest.TestCase):
         ))
         provider = CountingProvider()
         legacy.governor.provider = provider
-        self.admit("b1old")
+
+        # Strict enrollment occurs AFTER the unguarded instance was created.
+        protected = DualKernelCompositionClient(
+            store_path=alt_path, require_persistence=True,
+            mandate_authority=self.auth,
+        )
+        protected.register_agent(Agent(
+            agent_id=CONTEXT["actor_sub"], authority_score=0.9,
+        ))
+        protected.register_resource(Resource(
+            resource_id="rv2-budget", capacity=100.0,
+        ))
+        passage = Passage(
+            agent_id=CONTEXT["actor_sub"], action_type="get_system_time",
+            amount=1.0, idempotency_key="b1old",
+        )
+        d = protected.governor.adjudicate(
+            passage, pressure=0.7, velocity=0.5, capacity=0.9,
+            resource_id="rv2-budget", amount=1.0, payload=PAYLOAD,
+            authority=0.9, context_fit=1.0, evidence_quality=1.0,
+        )
+        self.assertEqual("reserved", d["operation_state"])
+        self.auth.bind_operation(
+            operation_id="b1old",
+            payload_sha256=canonical_payload_hash(PAYLOAD), **CONTEXT,
+        )
         self.auth.revoke_mandate("m1")
-        result = self.release("b1old", client=legacy)
+        result = legacy.governor.dispatch_and_execute(
+            "b1old", resource_id="rv2-budget", amount=1.0,
+            payload=PAYLOAD,
+        )
         self.assertFalse(result.get("dispatched"), result)
         self.assertEqual([], provider.calls)
         success, _ = legacy.governor.registry.transition_to(
