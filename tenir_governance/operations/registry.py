@@ -1098,6 +1098,52 @@ class DurableOperationRegistry:
                                 != os.path.realpath(strict_mark["authority_path"])
                         ):
                             return False, prev_state
+                        # Do not accept a fabricated MandateClaim dataclass as
+                        # proof. Recheck the actual live SQLite write transaction
+                        # and current authority rows while the durable registry
+                        # claim is serialized. An unguarded Governor cannot
+                        # simply pass a boolean to bypass this boundary.
+                        import sqlite3
+                        db = mandate_claim.connection
+                        if not isinstance(db, sqlite3.Connection) or not db.in_transaction:
+                            return False, prev_state
+                        try:
+                            attached = db.execute("PRAGMA database_list").fetchall()
+                            main_db = next((item[2] for item in attached if item[1] == "main"), None)
+                            if not main_db or os.path.realpath(main_db) != os.path.realpath(strict_mark["authority_path"]):
+                                return False, prev_state
+                            row = db.execute(
+                                "SELECT b.actor_sub,b.represented_user_sub,b.bearer_token_ref,"
+                                "b.payload_sha256,b.admission_epoch,m.epoch,m.status,"
+                                "m.actor_sub,m.represented_user_sub,m.bearer_token_ref,m.mandate_id "
+                                "FROM bindings b JOIN mandates m ON m.mandate_id=b.mandate_id "
+                                "WHERE b.operation_id=?", (idempotency_key,),
+                            ).fetchone()
+                            if (
+                                row is None
+                                or row[6] != "active"
+                                or row[4] != row[5]
+                                or row[0] != record.agent_id
+                                or row[0] != row[7]
+                                or row[1] != row[8]
+                                or row[2] != row[9]
+                                or row[3] != (
+                                    record.payload_digest if record.commit_gate_required
+                                    else record.payload_hash
+                                )
+                            ):
+                                return False, prev_state
+                            # Acquires a RESERVED write lock even if an external
+                            # caller attempts to pass a deferred transaction.
+                            # An already committed revocation cannot disappear.
+                            cur = db.execute(
+                                "UPDATE mandates SET epoch=epoch WHERE mandate_id=? "
+                                "AND epoch=? AND status='active'", (row[10], row[5]),
+                            )
+                            if cur.rowcount != 1:
+                                return False, prev_state
+                        except (sqlite3.Error, TypeError, ValueError):
+                            return False, prev_state
 
                 # For DISPATCHING: check not already dispatched
                 if new_state == OperationState.DISPATCHING:
