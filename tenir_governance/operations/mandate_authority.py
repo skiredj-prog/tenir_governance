@@ -22,6 +22,10 @@ class MandateClaim:
     sequence: int | None = None
     epoch: int | None = None
     claim_succeeded: bool = False
+    # Bound to the live context; cannot be reused after its transaction exits.
+    operation_id: str = ""
+    authority_path: str = ""
+    active: bool = False
 
 
 class SQLiteMandateAuthority:
@@ -208,10 +212,12 @@ class SQLiteMandateAuthority:
             claim = MandateClaim(
                 allowed=decision == "ALLOW_CLAIM",
                 decision=decision, sequence=seq, epoch=epoch,
+                operation_id=operation_id, authority_path=self.path, active=True,
             )
             try:
                 yield claim
             finally:
+                claim.active = False
                 if claim.claim_succeeded:
                     self._event(db, "dispatch_claim", operation_id=operation_id,
                                 mandate_id=mandate_id, epoch=epoch,
