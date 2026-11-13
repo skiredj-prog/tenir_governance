@@ -9,7 +9,7 @@ A dispatch already durably claimed before revocation is outside this guarantee.
 from __future__ import annotations
 
 from contextlib import contextmanager, closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import sqlite3
 from typing import Iterator, Mapping
@@ -26,6 +26,9 @@ class MandateClaim:
     operation_id: str = ""
     authority_path: str = ""
     active: bool = False
+    # Private connection is checked by the registry against the strict
+    # store's REAL DB state, not trusted as a simple boolean bearer proof.
+    connection: sqlite3.Connection | None = field(default=None, repr=False)
 
 
 class SQLiteMandateAuthority:
@@ -212,12 +215,14 @@ class SQLiteMandateAuthority:
             claim = MandateClaim(
                 allowed=decision == "ALLOW_CLAIM",
                 decision=decision, sequence=seq, epoch=epoch,
-                operation_id=operation_id, authority_path=self.path, active=True,
+                operation_id=operation_id, authority_path=self.path,
+                active=True, connection=db,
             )
             try:
                 yield claim
             finally:
                 claim.active = False
+                claim.connection = None
                 if claim.claim_succeeded:
                     self._event(db, "dispatch_claim", operation_id=operation_id,
                                 mandate_id=mandate_id, epoch=epoch,
