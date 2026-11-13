@@ -325,6 +325,7 @@ class DualKernelGovernor:
         consensus_backend: Any = None,
         commit_authority: Any = None,
         require_commit_authorization: bool = False,
+        mandate_authority: Any = None,
     ):
         # scoring_kernel is a ScoringKernelAdapter wrapping TenirKernel,
         # or any object with a compatible adjudicate() interface.
@@ -342,6 +343,8 @@ class DualKernelGovernor:
         self.provider = provider
         self.commit_authority = commit_authority
         self.require_commit_authorization = bool(require_commit_authorization)
+        # RV-002 opt-in: revocation and native dispatch claim share one durable fence.
+        self.mandate_authority = mandate_authority
         if self.require_commit_authorization and self.commit_authority is None:
             raise ValueError(
                 "require_commit_authorization=True requires a Profile S commit authority"
@@ -1554,6 +1557,7 @@ class DualKernelGovernor:
         *,
         payload: dict[str, Any] | None = None,
         _active_provider_call: bool = False,
+        authority_context: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         # Never hold the quarantine lock across SQLite or another external
         # authority call.  A quick first check avoids consuming an
@@ -1604,6 +1608,7 @@ class DualKernelGovernor:
             with self.registry.quarantine_guard():
                 result = self._dispatch_under_quarantine_lock(
                     idempotency_key, resource_id, amount, payload=actual_payload,
+                    authority_context=authority_context,
                 )
                 if result.get("_backend_claimed") or (
                     result.get("dispatched") and _active_provider_call
@@ -1658,6 +1663,7 @@ class DualKernelGovernor:
         amount: float = 0.0,
         *,
         payload: dict[str, Any] | None = None,
+        authority_context: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Atomically claim the dispatch slot and transition to DISPATCHING.
 
@@ -1752,11 +1758,53 @@ class DualKernelGovernor:
                 "operation_state": record.state.value,
             }
 
-        success, _prev = self.registry.transition_to(
-            idempotency_key, OperationState.DISPATCHING,
-            claimed_by=self._worker_id,
-            commit_gate_verified=commit_gate_verified,
-        )
+        # RV-002: this is the ONLY native RESERVED -> DISPATCHING claim point.
+        # A durable mandate fence prevents a revocation ACK from racing between
+        # current-authority verification and the durable claim. Never rely on a
+        # caller-side queue cancellation for this property.
+        if self.mandate_authority is not None:
+            try:
+                with self.mandate_authority.claim_fence(
+                    operation_id=idempotency_key,
+                    actor_sub=record.agent_id,
+                    payload_sha256=supplied_payload_hash,
+                    authority_context=authority_context,
+                ) as claim:
+                    if not claim.allowed:
+                        return {
+                            "dispatched": False,
+                            "reason": claim.decision,
+                            "guard_decision": claim.decision,
+                            "authority_check_seq": claim.sequence,
+                            "operation_state": record.state.value,
+                        }
+                    success, _prev = self.registry.transition_to(
+                        idempotency_key, OperationState.DISPATCHING,
+                        claimed_by=self._worker_id,
+                        commit_gate_verified=commit_gate_verified,
+                    )
+                    claim.claim_succeeded = bool(success)
+            except Exception:
+                # Ambiguous authority storage/check outcome: NEVER dispatch.
+                # If registry transitioned but audit persistence failed, the
+                # durable DISPATCHING state requires reconciliation, not replay.
+                return {
+                    "dispatched": False,
+                    "reason": "DENY_AUTHORITY_UNAVAILABLE",
+                    "guard_decision": "DENY_AUTHORITY_UNAVAILABLE",
+                    "operation_state": (
+                        self.registry.get(idempotency_key).state.value
+                        if self.registry.get(idempotency_key) is not None
+                        else "not_found"
+                    ),
+                    "recommendation": "human_review",
+                }
+        else:
+            success, _prev = self.registry.transition_to(
+                idempotency_key, OperationState.DISPATCHING,
+                claimed_by=self._worker_id,
+                commit_gate_verified=commit_gate_verified,
+            )
         if not success:
             existing = self.registry.get(idempotency_key)
             return {
@@ -1921,6 +1969,7 @@ class DualKernelGovernor:
         metadata: dict[str, Any] | None = None,
         *,
         payload: dict[str, Any] | None = None,
+        authority_context: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         # dispatch() linearizes the claim against QUARANTINE_LOCK. Do not hold
         # the global quarantine lock while performing external I/O: a hung
@@ -1929,6 +1978,7 @@ class DualKernelGovernor:
         # quarantine activates before provider.execute(). New claims are blocked.
         return self._dispatch_and_execute_under_quarantine_lock(
             idempotency_key, resource_id, amount, metadata, payload=payload,
+            authority_context=authority_context,
         )
 
     def _dispatch_and_execute_under_quarantine_lock(
@@ -1939,6 +1989,7 @@ class DualKernelGovernor:
         metadata: dict[str, Any] | None = None,
         *,
         payload: dict[str, Any] | None = None,
+        authority_context: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Atomically claim dispatch, then call the external provider.
 
@@ -1978,6 +2029,7 @@ class DualKernelGovernor:
             idempotency_key, resource_id, amount,
             payload=provider_metadata,
             _active_provider_call=self.provider is not None,
+            authority_context=authority_context,
         )
         if not dispatch_result.get("dispatched"):
             return dispatch_result
