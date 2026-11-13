@@ -138,5 +138,141 @@ class NativeRV002Tests(unittest.TestCase):
         self.assertEqual(0, len(self.provider.calls))
 
 
+    def test_B1_mixed_configuration_cannot_dispatch_protected_operation(self):
+        """Same durable registry, separate Governor without mandate authority."""
+        from tenir_governance.operations.registry import OperationState
+        self.admit("b1")
+        self.auth.revoke_mandate("m1")
+        legacy = DualKernelCompositionClient(
+            store_path=self.registry_path, require_persistence=True,
+        )
+        legacy.register_agent(Agent(
+            agent_id=CONTEXT["actor_sub"], authority_score=0.9,
+        ))
+        legacy.register_resource(Resource(
+            resource_id="rv2-budget", capacity=100.0,
+        ))
+        provider = CountingProvider()
+        legacy.governor.provider = provider
+        result = self.release("b1", client=legacy)
+        self.assertFalse(result.get("dispatched"), result)
+        self.assertEqual([], provider.calls)
+        self.assertEqual(
+            "reserved", legacy.governor.registry.get("b1").state.value,
+        )
+        # No direct native registry path may bypass strict mode.
+        success, _ = legacy.governor.registry.transition_to(
+            "b1", OperationState.DISPATCHING, claimed_by="unguarded"
+        )
+        self.assertFalse(success)
+        self.assertEqual([], provider.calls)
+
+    def test_B1_unguarded_governor_created_before_strict_activation(self):
+        """Already-open legacy clients must observe the shared strict marker."""
+        from tenir_governance.operations.registry import OperationState
+        legacy = DualKernelCompositionClient(
+            store_path=self.registry_path, require_persistence=True,
+        )
+        legacy.register_agent(Agent(
+            agent_id=CONTEXT["actor_sub"], authority_score=0.9,
+        ))
+        legacy.register_resource(Resource(
+            resource_id="rv2-budget", capacity=100.0,
+        ))
+        provider = CountingProvider()
+        legacy.governor.provider = provider
+        self.admit("b1old")
+        self.auth.revoke_mandate("m1")
+        result = self.release("b1old", client=legacy)
+        self.assertFalse(result.get("dispatched"), result)
+        self.assertEqual([], provider.calls)
+        success, _ = legacy.governor.registry.transition_to(
+            "b1old", OperationState.DISPATCHING, claimed_by="unguarded"
+        )
+        self.assertFalse(success)
+
+    def test_B1_resume_advice_requires_authority_recheck(self):
+        self.admit("b1resume")
+        self.auth.revoke_mandate("m1")
+        resume = self.client.resume_existing("b1resume")
+        self.assertEqual("revalidate_mandate", resume["action"], resume)
+        self.assertNotIn("Safe to dispatch", resume["reason"])
+
+    def test_B1_fabricated_claim_cannot_bypass_revocation(self):
+        import sqlite3
+        from tenir_governance.operations.registry import OperationState
+        from tenir_governance.operations.mandate_authority import MandateClaim
+        self.admit("b1forged")
+        self.auth.revoke_mandate("m1")
+        with sqlite3.connect(self.auth.path, isolation_level=None) as db:
+            db.execute("BEGIN IMMEDIATE")
+            forged = MandateClaim(
+                allowed=True, decision="ALLOW_CLAIM", sequence=123,
+                epoch=1, operation_id="b1forged",
+                authority_path=self.auth.path, active=True, connection=db,
+            )
+            success, _ = self.client.governor.registry.transition_to(
+                "b1forged", OperationState.DISPATCHING,
+                claimed_by="forged", mandate_claim=forged,
+            )
+            self.assertFalse(success)
+            db.rollback()
+        self.assertEqual("reserved", self.client.governor.registry.get("b1forged").state.value)
+
+    def test_C2_simulated_crash_after_durable_registry_claim(self):
+        """Exception-boundary injection, not independent SIGKILL evidence."""
+        from tenir_governance.operations.registry import OperationState
+        self.admit("c2sim")
+        registry = self.client.governor.registry
+        original_transition = registry.transition_to
+
+        def kill_after_persist(*args, **kwargs):
+            outcome = original_transition(*args, **kwargs)
+            if args[1] == OperationState.DISPATCHING and outcome[0]:
+                raise SystemExit("INJECTED_CRASH_AFTER_REGISTRY_PERSISTENCE")
+            return outcome
+
+        registry.transition_to = kill_after_persist
+        with self.assertRaisesRegex(SystemExit, "INJECTED_CRASH"):
+            self.release("c2sim")
+        registry.transition_to = original_transition
+        self.assertEqual("dispatching", registry.get("c2sim").state.value)
+        self.assertFalse(any(
+            e["kind"] == "dispatch_claim"
+            for e in self.auth.audit_events("c2sim")
+        ))
+        self.assertEqual([], self.provider.calls)
+        fresh_provider = CountingProvider()
+        fresh = self.new_client(fresh_provider)
+        decision = fresh.resume_existing("c2sim")
+        self.assertEqual("reconcile", decision["action"], decision)
+        attempted = self.release("c2sim", client=fresh)
+        self.assertFalse(attempted.get("dispatched"), attempted)
+        self.assertEqual([], fresh_provider.calls)
+
+    def test_B1_strict_mark_removal_fails_closed(self):
+        """If a strict marker disappears, it must not restore legacy dispatch."""
+        from pathlib import Path
+        self.admit("b1mark")
+        Path(self.registry_path + ".mandate.strict.json").unlink()
+        with self.assertRaisesRegex(RuntimeError, "strict mark"):
+            self.client.governor.registry.requires_mandate_claim("b1mark")
+        # Even the unguarded instance has no authorized execution route.
+        legacy = DualKernelCompositionClient(
+            store_path=self.registry_path, require_persistence=True,
+        )
+        provider = CountingProvider()
+        legacy.governor.provider = provider
+        with self.assertRaisesRegex(RuntimeError, "strict mark"):
+            legacy.governor.registry.transition_to(
+                "b1mark", __import__(
+                    "tenir_governance.operations.registry",
+                    fromlist=["OperationState"]
+                ).OperationState.DISPATCHING,
+            )
+        self.assertEqual([], provider.calls)
+
+
+
 if __name__ == "__main__":
     unittest.main()
