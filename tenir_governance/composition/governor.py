@@ -345,6 +345,10 @@ class DualKernelGovernor:
         self.require_commit_authorization = bool(require_commit_authorization)
         # RV-002 opt-in: revocation and native dispatch claim share one durable fence.
         self.mandate_authority = mandate_authority
+        if self.mandate_authority is not None:
+            # Persist the requirement in the shared registry before ANY
+            # guarded admission/claim; another Governor cannot opt out.
+            self.registry.install_strict_mandate_guard(self.mandate_authority.path)
         if self.require_commit_authorization and self.commit_authority is None:
             raise ValueError(
                 "require_commit_authorization=True requires a Profile S commit authority"
@@ -1456,6 +1460,20 @@ class DualKernelGovernor:
                         "authorization_decision": body.get("decision", "INVALID"),
                         "passage_id": record.passage_id,
                     }
+            if self.registry.requires_mandate_claim(idempotency_key):
+                return {
+                    "idempotency_key": idempotency_key,
+                    "action": "revalidate_mandate",
+                    "reason": (
+                        "Operation is RESERVED but not authorized for release: "
+                        "current mandate must pass the shared strict registry "
+                        "claim fence before dispatch."
+                    ),
+                    "operation_state": state.value,
+                    "passage_id": record.passage_id,
+                    "resource_id": record.resource_id,
+                    "amount": record.amount,
+                }
             return {
                 "idempotency_key": idempotency_key,
                 "action": "dispatch",
@@ -1782,6 +1800,7 @@ class DualKernelGovernor:
                         idempotency_key, OperationState.DISPATCHING,
                         claimed_by=self._worker_id,
                         commit_gate_verified=commit_gate_verified,
+                        mandate_claim=claim,
                     )
                     claim.claim_succeeded = bool(success)
             except Exception:
