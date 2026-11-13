@@ -290,6 +290,9 @@ class OperationRecord:
     commit_consumption_status: str = ""
     commit_gate_last_reason: str = ""
     commit_gate_events: list[dict] = field(default_factory=list)
+    # RV-002 strict mode: durable per-operation enforcement; once enabled
+    # this bit must not be cleared by a second, unguarded Governor.
+    mandate_guard_required: bool = False
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -431,6 +434,124 @@ class DurableOperationRegistry:
             finally:
                 if os.path.exists(tmp):
                     os.unlink(tmp)
+
+
+    # RV-002 strict mandate policy is a property of the SHARED durable store,
+    # not a discretionary constructor option of a single Governor.
+    def _mandate_guard_path(self) -> str | None:
+        return self._store_path + ".mandate.strict.json" if self._store_path else None
+
+    def _mandate_guard_initialized_path(self) -> str | None:
+        return self._store_path + ".mandate.initialized" if self._store_path else None
+
+    def _read_mandate_guard_locked(self) -> dict | None:
+        """Read strict mode under the registry's durable file lock.
+
+        A missing or malformed mark after initialization is corruption.
+        It is NEVER interpreted as an unprotected legacy registry.
+        """
+        if not self._store_path:
+            return None
+        path = self._mandate_guard_path()
+        init_path = self._mandate_guard_initialized_path()
+        initialized = os.path.exists(init_path)
+        exists = os.path.exists(path)
+        if not exists and not initialized:
+            return None
+        if not exists or not initialized:
+            raise RuntimeError("RV-002 mandate strict mark is missing/incomplete; dispatch blocked")
+        try:
+            with open(path, "r", encoding="utf-8") as stream:
+                mark = json.load(stream)
+            if (
+                not isinstance(mark, dict)
+                or mark.get("version") != 1
+                or mark.get("mode") != "strict"
+                or not isinstance(mark.get("authority_path"), str)
+                or not os.path.isabs(mark["authority_path"])
+            ):
+                raise ValueError("invalid strict mandate configuration")
+            return mark
+        except (OSError, ValueError, TypeError) as exc:
+            raise RuntimeError("RV-002 mandate strict mark corrupt; dispatch blocked") from exc
+
+    def install_strict_mandate_guard(self, authority_path: str) -> None:
+        """Irreversibly require current mandate claims for this registry.
+
+        Must be called by trusted orchestration before guarded admission.
+        Writers sharing a registry cannot opt out by omitting the authority
+        in a second Governor instance. This is an operational safety fence
+        against misconfiguration, not a defense against arbitrary malicious
+        Python code or an administrator deleting and replacing the store.
+        """
+        if not self._store_path:
+            raise ValueError("RV-002 strict authority requires a durable registry")
+        if not isinstance(authority_path, str) or not authority_path:
+            raise ValueError("authority path required")
+        authority_path = os.path.realpath(authority_path)
+        with self._lock:
+            flock = self._lock_file()
+            try:
+                mark = self._read_mandate_guard_locked()
+                if mark is not None:
+                    if os.path.realpath(mark["authority_path"]) != authority_path:
+                        raise RuntimeError("RV-002 different authority store; strict registry cannot be rebound")
+                else:
+                    # Create permanent initialized sentinel BEFORE the mark.
+                    # A crash in the middle remains fail-closed on restart.
+                    init_path = self._mandate_guard_initialized_path()
+                    with open(init_path, "xb") as stream:
+                        stream.write(b"RV002_STRICT_V1\\n")
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    marker_path = self._mandate_guard_path()
+                    with open(marker_path, "x", encoding="utf-8") as stream:
+                        json.dump({"version": 1, "mode": "strict",
+                                   "authority_path": authority_path}, stream)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if os.name != "nt":
+                        directory = os.path.dirname(os.path.abspath(marker_path))
+                        fd = os.open(directory, os.O_RDONLY)
+                        try:
+                            os.fsync(fd)
+                        finally:
+                            os.close(fd)
+
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                if self._corrupted:
+                    raise RuntimeError("Registry corrupted while enabling RV-002 strict mode")
+                # Backfill old operations: a missing sidecar must not silently
+                # re-enable them even if the marker is accidentally removed.
+                changed = False
+                for record in self._records.values():
+                    if not record.mandate_guard_required:
+                        record.mandate_guard_required = True
+                        changed = True
+                if changed:
+                    self._persist()
+            finally:
+                if flock:
+                    flock.close()
+
+    def requires_mandate_claim(self, idempotency_key: str) -> bool:
+        """Read durable effective strict mode (also used by resume advice)."""
+        with self._lock:
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                if self._corrupted:
+                    raise RuntimeError("Registry corrupted; mandate requirement unknown")
+                mark = self._read_mandate_guard_locked()
+                record = self._records.get(idempotency_key)
+                return mark is not None or bool(
+                    record is not None and record.mandate_guard_required
+                )
+            finally:
+                if flock:
+                    flock.close()
 
     def _lock_file(self):
         """Acquire a cross-process exclusive lock on the store file.
@@ -787,6 +908,8 @@ class DurableOperationRegistry:
                     )
                 if record.idempotency_key in self._records:
                     return False
+                if self._read_mandate_guard_locked() is not None:
+                    record.mandate_guard_required = True
                 self._records[record.idempotency_key] = record
                 self._persist()
                 return True
@@ -841,6 +964,7 @@ class DurableOperationRegistry:
         hold_record: HoldRecord | None = None,
         hold_record_changes: Mapping[str, Any] | None = None,
         commit_gate_verified: bool = False,
+        mandate_claim=None,
     ) -> tuple[bool, OperationState | None]:
         """Enforce shared quarantine even for direct registry admission calls.
 
@@ -861,6 +985,7 @@ class DurableOperationRegistry:
                     hold_record=hold_record,
                     hold_record_changes=hold_record_changes,
                     commit_gate_verified=commit_gate_verified,
+                    mandate_claim=mandate_claim,
                 )
         return self._transition_to_unchecked_quarantine(
             idempotency_key,
@@ -869,6 +994,7 @@ class DurableOperationRegistry:
             hold_record=hold_record,
             hold_record_changes=hold_record_changes,
             commit_gate_verified=commit_gate_verified,
+            mandate_claim=mandate_claim,
         )
 
     def _transition_to_unchecked_quarantine(
@@ -880,6 +1006,7 @@ class DurableOperationRegistry:
         hold_record: HoldRecord | None = None,
         hold_record_changes: Mapping[str, Any] | None = None,
         commit_gate_verified: bool = False,
+        mandate_claim=None,
     ) -> tuple[bool, OperationState | None]:
         """Atomically transition an operation to a new state.
 
@@ -952,6 +1079,25 @@ class DurableOperationRegistry:
                 # Check legal transition
                 if new_state not in _LEGAL_TRANSITIONS.get(record.state, set()):
                     return False, prev_state
+
+                # RV-002: this store-level check runs for EVERY caller,
+                # including Governors that were initialized without the
+                # authority, direct registry clients, and restarted workers.
+                if new_state == OperationState.DISPATCHING:
+                    strict_mark = self._read_mandate_guard_locked()
+                    if strict_mark is not None or record.mandate_guard_required:
+                        from .mandate_authority import MandateClaim
+                        if strict_mark is None:
+                            return False, prev_state
+                        if (
+                            not isinstance(mandate_claim, MandateClaim)
+                            or not mandate_claim.active
+                            or not mandate_claim.allowed
+                            or mandate_claim.operation_id != idempotency_key
+                            or os.path.realpath(mandate_claim.authority_path)
+                                != os.path.realpath(strict_mark["authority_path"])
+                        ):
+                            return False, prev_state
 
                 # For DISPATCHING: check not already dispatched
                 if new_state == OperationState.DISPATCHING:
