@@ -27,13 +27,9 @@ CONTEXT = {
 
 
 class CountingProvider(MockProvider):
+    """The native mock already records every execute() attempt."""
     def __init__(self):
         super().__init__(behavior="confirmed")
-        self.calls = []
-
-    def execute(self, **kwargs):
-        self.calls.append(kwargs)
-        return super().execute(**kwargs)
 
 
 class NativeRV002Tests(unittest.TestCase):
