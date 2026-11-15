@@ -23,7 +23,7 @@
         "terminal": false,
         "no_replay_possible": false
       },
-      "run_dir": "/tmp/rv003-t1p-3iouxsq8"
+      "run_dir": "/tmp/rv003-t1p-b3opmbw3"
     },
     {
       "case": "T2-P",
@@ -44,7 +44,7 @@
         "no_replay_possible": false
       },
       "permission_revoke_http": 204,
-      "commit_attempt": "{'operation_id': 't2p-op-001', 'claim_id': 'claim-1a574c055cb54f51', 'decided_by': 'receiver', 'decider_pid': 1318, 'admitted_policy_ids': {'agent': '7606f249-677a-4a43-9650-4d13e6f9454b', 'user': '7e173b19-e165-4b31-a92d-066074d4b279'}, 'lease_ms': 2000.0, 'rounds': [{'round': 1, 'lease_start_monotonic_ms': 22722.191561, 'checks': {'agent': {'authority_source': 'magertron:/api/v1/tool-rbac/server",
+      "commit_attempt": "{'operation_id': 't2p-op-001', 'claim_id': 'claim-597cd164435b4c54', 'decided_by': 'receiver', 'decider_pid': 714, 'admitted_policy_ids': {'agent': '317eebb0-476e-4864-95e5-9c299f21d062', 'user': 'b9778f92-5767-4e63-937d-776a84841216'}, 'lease_ms': 2000.0, 'rounds': [{'round': 1, 'lease_start_monotonic_ms': 25371.002132, 'checks': {'agent': {'authority_source': 'magertron:/api/v1/tool-rbac/servers",
       "status_after_commit": {
         "operation_id": "t2p-op-001",
         "state": "DENIED_REVOKED",
@@ -71,7 +71,19 @@
         "replay_response": "{'operation_id': 't2p-op-001', 'result': 'NO_NEW_ATTEMPT', 'state': 'DENIED_REVOKED'}",
         "no_new_effect": true
       },
-      "run_dir": "/tmp/rv003-t2p-vqd6lg06"
+      "restart_probe": {
+        "returncode": 0,
+        "stdout": "{\"restarted\": true, \"replay_response\": \"{'operation_id': 't2p-op-001', 'result': 'NO_NEW_ATTEMPT', 'state': 'DENIED_REVOKED'}\", \"effects_after_restart_replay\": 0, \"state_after\": \"DENIED_REVOKED\", \"no_new_effect\": true}\n",
+        "stderr": "",
+        "parsed": {
+          "restarted": true,
+          "replay_response": "{'operation_id': 't2p-op-001', 'result': 'NO_NEW_ATTEMPT', 'state': 'DENIED_REVOKED'}",
+          "effects_after_restart_replay": 0,
+          "state_after": "DENIED_REVOKED",
+          "no_new_effect": true
+        }
+      },
+      "run_dir": "/tmp/rv003-t2p-dvyjxlvt"
     }
   ]
 }

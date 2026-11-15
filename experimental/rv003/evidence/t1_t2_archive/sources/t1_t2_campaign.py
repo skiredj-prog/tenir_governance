@@ -309,6 +309,20 @@ def run_t2():
         }
         (RUN / "replay_probe.json").write_text(json.dumps(replay_evidence))
 
+        # Real process restart probe
+        import subprocess as sp
+        probe = sp.run(
+            [sys.executable, str(ADAPTER / "restart_replay_probe.py"), str(RUN), op],
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, "TENIR_GOV_CHECKOUT": str(NATIVE)},
+        )
+        restart_evidence = {"returncode": probe.returncode, "stdout": probe.stdout[-500:], "stderr": probe.stderr[-300:]}
+        try:
+            restart_evidence["parsed"] = json.loads(probe.stdout.strip().splitlines()[-1])
+        except Exception:
+            restart_evidence["parsed"] = None
+        (RUN / "restart_probe.json").write_text(json.dumps(restart_evidence))
+
         return {
             "case": "T2-P",
             "revocation_target": "lab receiver permission (after ACCEPT, before commit)",
@@ -322,6 +336,7 @@ def run_t2():
             "execute_calls": execute_count["n"],
             "reconcile_execute_delta": after_r - before_r,
             "replay_probe": replay_evidence,
+            "restart_probe": restart_evidence,
             "run_dir": str(RUN),
         }
     finally:
