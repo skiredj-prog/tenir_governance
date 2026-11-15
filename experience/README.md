@@ -1,28 +1,5 @@
-# 5-Minute Developer Gate
+# TENIR-Gov developer experience
 
-Synthetic lost-response recovery that operationalizes:
-- knows when not to act
-- evidence-bound recovery
-- single authoritative dispatcher and budget owner
+Follow [Getting Started](../docs/GETTING_STARTED.md) to run the lost-response walkthrough with the TENIR-Gov runtime. It shows how the governor preserves uncertainty, blocks a repeat dispatch, and reconciles when a correlated receipt is available.
 
-## Run
-
-```bash
-python experience/5min_gate.py
-```
-
-Expected output includes `"outcome": "CONFIRMED"` and a correlated receipt. The second dispatch is blocked.
-
-## Timeline (after preflight)
-
-| Elapsed | What happens |
-|---------|--------------|
-| 0–1 min | Authorized synthetic booking, response deliberately lost |
-| 1–2 min | UNKNOWN (authorization succeeded, outcome unconfirmed) |
-| 2–3 min | Retry blocked — no second dispatch |
-| 3–4 min | Correlated receipt recovers the outcome |
-| 4–5 min | Exported record is inspectable |
-
-Clock starts when preflight passes. Local, no credentials.
-
-This is a scaffold. It demonstrates the single-dispatcher rule and the recovery path. It is not yet wired to the full TENIR-Gov kernel or Workbench.
+The [archived five-minute scaffold](../docs/archive/developer-experience/5min_gate.py) was a standalone simulation with its own in-memory dispatcher. Its output describes the scaffold only.
