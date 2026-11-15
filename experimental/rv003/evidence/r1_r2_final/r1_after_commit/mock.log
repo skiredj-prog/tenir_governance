@@ -1,0 +1,2 @@
+{"seq": 1, "kind": "RULE_CREATED", "rule_id": "77cfedbd-6e1e-44f2-bb59-6aa3ddc5d90d", "role_id": "role-lab-agent", "effect": "ALLOW", "replaces": null, "recorded_utc": "2026-11-15T04:16:00.280981+00:00", "recorded_monotonic_ms": 35550.641568}
+{"seq": 2, "kind": "RULE_CREATED", "rule_id": "b31e49a1-8a82-4b41-9895-b87ef280c3e8", "role_id": "role-lab-person", "effect": "ALLOW", "replaces": null, "recorded_utc": "2026-11-15T04:16:00.282750+00:00", "recorded_monotonic_ms": 35552.410191}

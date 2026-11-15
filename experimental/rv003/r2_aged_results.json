@@ -1,0 +1,95 @@
+{
+  "native_sha": "674c8606089251ea2f74890bd47bce3a717c3b91",
+  "native_verified": true,
+  "lag_ms": 400,
+  "lag_semantics": "visibility lag: asof = now - lag_ms; rules must be older than lag to remain visible",
+  "runs": [
+    {
+      "i": 0,
+      "accepted": "ACCEPTED_PAUSED",
+      "revoke_http": 204,
+      "revoke_monotonic_ms": 30939.544491,
+      "commit": "{'operation_id': 'r2-aged-0', 'claim_id': 'claim-3d3c6788e48e4ae5', 'decided_by': 'receiver', 'decider_pid': 1118, 'admitted_policy_ids': {'agent': '42afb143-fd10-4704-9be8-f52f3dade12c', 'user': '0f7",
+      "effects": 1,
+      "final_state": "COMMITTED",
+      "verdict": "R2_VIOLATION_OBSERVED",
+      "mock_log_tail": [
+        "{\"seq\": 1, \"kind\": \"RULE_CREATED\", \"rule_id\": \"42afb143-fd10-4704-9be8-f52f3dade12c\", \"role_id\": \"role-lab-agent\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:33.695170+00:00\", \"recorded_monotonic_ms\": 30297.856471}",
+        "{\"seq\": 2, \"kind\": \"RULE_CREATED\", \"rule_id\": \"0f7179ac-a056-4343-ad0a-713951f3a50b\", \"role_id\": \"role-lab-person\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:33.696602+00:00\", \"recorded_monotonic_ms\": 30299.289667}",
+        "{\"seq\": 3, \"kind\": \"RULE_DELETED\", \"rule_id\": \"42afb143-fd10-4704-9be8-f52f3dade12c\", \"role_id\": \"role-lab-agent\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:34.336557+00:00\", \"recorded_monotonic_ms\": 30939.245038}"
+      ],
+      "run_dir": "/tmp/rv003-r2-aged-0-7pli68ij"
+    },
+    {
+      "i": 1,
+      "accepted": "ACCEPTED_PAUSED",
+      "revoke_http": 204,
+      "revoke_monotonic_ms": 32118.462027,
+      "commit": "{'operation_id': 'r2-aged-1', 'claim_id': 'claim-06c7e8058a1e4e4f', 'decided_by': 'receiver', 'decider_pid': 1118, 'admitted_policy_ids': {'agent': '6c3197c0-86bf-4cfb-b337-8ef52c9aa87f', 'user': '956",
+      "effects": 1,
+      "final_state": "COMMITTED",
+      "verdict": "R2_VIOLATION_OBSERVED",
+      "mock_log_tail": [
+        "{\"seq\": 1, \"kind\": \"RULE_CREATED\", \"rule_id\": \"6c3197c0-86bf-4cfb-b337-8ef52c9aa87f\", \"role_id\": \"role-lab-agent\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:35.000593+00:00\", \"recorded_monotonic_ms\": 31603.279627}",
+        "{\"seq\": 2, \"kind\": \"RULE_CREATED\", \"rule_id\": \"95645b01-c6c8-4af1-bdb0-4a3cd5c94042\", \"role_id\": \"role-lab-person\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:35.001992+00:00\", \"recorded_monotonic_ms\": 31604.680123}",
+        "{\"seq\": 3, \"kind\": \"RULE_DELETED\", \"rule_id\": \"6c3197c0-86bf-4cfb-b337-8ef52c9aa87f\", \"role_id\": \"role-lab-agent\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:35.515450+00:00\", \"recorded_monotonic_ms\": 32118.137371}"
+      ],
+      "run_dir": "/tmp/rv003-r2-aged-1-9v6ooyn0"
+    },
+    {
+      "i": 2,
+      "accepted": "ACCEPTED_PAUSED",
+      "revoke_http": 204,
+      "revoke_monotonic_ms": 33294.787829999994,
+      "commit": "{'operation_id': 'r2-aged-2', 'claim_id': 'claim-67ce1e0b1b8649fb', 'decided_by': 'receiver', 'decider_pid': 1118, 'admitted_policy_ids': {'agent': '928dd143-d17b-49bf-93a5-06bb769529f3', 'user': '1bb",
+      "effects": 1,
+      "final_state": "COMMITTED",
+      "verdict": "R2_VIOLATION_OBSERVED",
+      "mock_log_tail": [
+        "{\"seq\": 1, \"kind\": \"RULE_CREATED\", \"rule_id\": \"928dd143-d17b-49bf-93a5-06bb769529f3\", \"role_id\": \"role-lab-agent\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:36.179055+00:00\", \"recorded_monotonic_ms\": 32781.742993}",
+        "{\"seq\": 2, \"kind\": \"RULE_CREATED\", \"rule_id\": \"1bb7fdcc-574d-486d-8abc-2c915375d665\", \"role_id\": \"role-lab-person\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:36.180336+00:00\", \"recorded_monotonic_ms\": 32783.024265}",
+        "{\"seq\": 3, \"kind\": \"RULE_DELETED\", \"rule_id\": \"928dd143-d17b-49bf-93a5-06bb769529f3\", \"role_id\": \"role-lab-agent\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:36.691799+00:00\", \"recorded_monotonic_ms\": 33294.507029}"
+      ],
+      "run_dir": "/tmp/rv003-r2-aged-2-1s0fiom6"
+    },
+    {
+      "i": 3,
+      "accepted": "ACCEPTED_PAUSED",
+      "revoke_http": 204,
+      "revoke_monotonic_ms": 34475.573599999996,
+      "commit": "{'operation_id': 'r2-aged-3', 'claim_id': 'claim-6b0589616fac4e85', 'decided_by': 'receiver', 'decider_pid': 1118, 'admitted_policy_ids': {'agent': '13bbaf33-9720-459e-ad43-e3cdfb731022', 'user': '11d",
+      "effects": 1,
+      "final_state": "COMMITTED",
+      "verdict": "R2_VIOLATION_OBSERVED",
+      "mock_log_tail": [
+        "{\"seq\": 1, \"kind\": \"RULE_CREATED\", \"rule_id\": \"13bbaf33-9720-459e-ad43-e3cdfb731022\", \"role_id\": \"role-lab-agent\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:37.357964+00:00\", \"recorded_monotonic_ms\": 33960.651884}",
+        "{\"seq\": 2, \"kind\": \"RULE_CREATED\", \"rule_id\": \"11da90a3-7e1a-4e0f-ac11-bef1b8358749\", \"role_id\": \"role-lab-person\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:37.359271+00:00\", \"recorded_monotonic_ms\": 33961.958522}",
+        "{\"seq\": 3, \"kind\": \"RULE_DELETED\", \"rule_id\": \"13bbaf33-9720-459e-ad43-e3cdfb731022\", \"role_id\": \"role-lab-agent\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:37.872553+00:00\", \"recorded_monotonic_ms\": 34475.24089}"
+      ],
+      "run_dir": "/tmp/rv003-r2-aged-3-1r1ubpfd"
+    },
+    {
+      "i": 4,
+      "accepted": "ACCEPTED_PAUSED",
+      "revoke_http": 204,
+      "revoke_monotonic_ms": 35654.638206,
+      "commit": "{'operation_id': 'r2-aged-4', 'claim_id': 'claim-c2a61b0badb045a0', 'decided_by': 'receiver', 'decider_pid': 1118, 'admitted_policy_ids': {'agent': '316e34f6-0f99-4d3c-845f-0a2d73b4113f', 'user': '6b5",
+      "effects": 1,
+      "final_state": "COMMITTED",
+      "verdict": "R2_VIOLATION_OBSERVED",
+      "mock_log_tail": [
+        "{\"seq\": 1, \"kind\": \"RULE_CREATED\", \"rule_id\": \"316e34f6-0f99-4d3c-845f-0a2d73b4113f\", \"role_id\": \"role-lab-agent\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:38.535715+00:00\", \"recorded_monotonic_ms\": 35138.403287}",
+        "{\"seq\": 2, \"kind\": \"RULE_CREATED\", \"rule_id\": \"6b58db9f-b960-4e45-8836-956a2a872947\", \"role_id\": \"role-lab-person\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:38.536986+00:00\", \"recorded_monotonic_ms\": 35139.67402}",
+        "{\"seq\": 3, \"kind\": \"RULE_DELETED\", \"rule_id\": \"316e34f6-0f99-4d3c-845f-0a2d73b4113f\", \"role_id\": \"role-lab-agent\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:23:39.051575+00:00\", \"recorded_monotonic_ms\": 35654.262676}"
+      ],
+      "run_dir": "/tmp/rv003-r2-aged-4-aqp8jeki"
+    }
+  ],
+  "summary": {
+    "total": 5,
+    "violations": 5,
+    "no_effect": 0,
+    "invalid": 0,
+    "overall": "R2_VIOLATION_OBSERVED"
+  }
+}
