@@ -392,6 +392,20 @@ class DurableOperationRegistry:
             # invisible due to corruption.
             self._corrupted = True
 
+    def _assert_no_g3_sqlite_owner(self) -> None:
+        """Guard cooperative single-host G3 switch before ANY JSON write.
+
+        The persistent initialized sentinel intentionally blocks old registry
+        instances using this code even if the active marker is removed.
+        An unpatched binary or privileged deletion of both files cannot be
+        fenced here: these remain hard production cutover blockers.
+        """
+        if self._store_path and (
+            os.path.lexists(self._store_path + ".g3-sqlite-owner.initialized")
+            or os.path.lexists(self._store_path + ".g3-sqlite-owner.json")
+        ):
+            raise RuntimeError("G3_SQLITE_OWNER_HOLD: legacy JSON writer fenced")
+
     def _persist(self):
         """Persist records to the durable store.
 
@@ -411,6 +425,7 @@ class DurableOperationRegistry:
         handles all of this internally).
         """
         if self._store_path:
+            self._assert_no_g3_sqlite_owner()
             data = {k: v.to_dict() for k, v in self._records.items()}
             directory = os.path.dirname(os.path.abspath(self._store_path))
             prefix = os.path.basename(self._store_path) + "."
@@ -785,6 +800,7 @@ class DurableOperationRegistry:
                         "Registry store became corrupted on reload — refuse "
                         "to register new operations."
                     )
+                self._assert_no_g3_sqlite_owner()
                 if record.idempotency_key in self._records:
                     return False
                 self._records[record.idempotency_key] = record
@@ -943,6 +959,7 @@ class DurableOperationRegistry:
                         "to transition operations."
                     )
 
+                self._assert_no_g3_sqlite_owner()
                 record = self._records.get(idempotency_key)
                 if record is None:
                     return False, None

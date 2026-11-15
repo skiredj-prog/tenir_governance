@@ -276,6 +276,13 @@ class SQLiteConsensusBackend:
                 if Decimal(existing["amount"]) == normalized and existing["resource_id"] == resource_id:
                     return ReservationResult(existing["state"], existing["reservation_id"], normalized)
                 return ReservationResult("DUPLICATE_KEY")
+            positive_table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='w2_positive_v1_capacity'"
+            ).fetchone()
+            if positive_table and connection.execute(
+                "SELECT 1 FROM w2_positive_v1_capacity WHERE operation_key = ?", (key,),
+            ).fetchone():
+                return ReservationResult("POSITIVE_AUTHORITY_OWNS_KEY")
             resource = connection.execute(
                 "SELECT * FROM resources WHERE resource_id = ?", (resource_id,),
             ).fetchone()
