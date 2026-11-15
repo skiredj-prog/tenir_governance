@@ -1,0 +1,108 @@
+{
+  "native_sha": "674c8606089251ea2f74890bd47bce3a717c3b91",
+  "native_verified": true,
+  "cases": [
+    {
+      "case": "R1-recovery",
+      "accepted": "ACCEPTED_PAUSED",
+      "crash_rc": 77,
+      "effects_after_crash": 0,
+      "state_after_crash": "COMMIT_CHECKING",
+      "effects_after_recovery": 0,
+      "state_after_recovery": "COMMIT_CHECKING",
+      "recovery_output": "{\"resp\": \"{'operation_id': 'r1-recovery-001', 'result': 'NO_NEW_ATTEMPT', 'state': 'COMMIT_CHECKING'}\"}",
+      "no_double_effect": true,
+      "run_dir": "/tmp/rv003-r1-recovery-2jxn6ydr"
+    },
+    {
+      "case": "R2-zero-lag",
+      "runs": [
+        {
+          "i": 0,
+          "accepted": "ACCEPTED_PAUSED",
+          "revoke_http": 204,
+          "commit": "{'operation_id': 'r2-0-0', 'claim_id': 'claim-d16458ad623a42b6', 'decided_by': 'receiver', 'decider_pid': 1474, 'admitted_policy_ids': {'agent': 'c185dfa4-92a9-4b50-a8b4-cd7d0ae74a",
+          "effects": 0,
+          "final_state": "DENIED_REVOKED",
+          "verdict": "NO_EFFECT",
+          "run_dir": "/tmp/rv003-r2-0-0-mhta3i6i"
+        },
+        {
+          "i": 1,
+          "accepted": "ACCEPTED_PAUSED",
+          "revoke_http": 204,
+          "commit": "{'operation_id': 'r2-0-1', 'claim_id': 'claim-a9bfe256a6204b61', 'decided_by': 'receiver', 'decider_pid': 1474, 'admitted_policy_ids': {'agent': '50c5cf45-0449-4eb6-b309-9f5c6a492c",
+          "effects": 0,
+          "final_state": "DENIED_REVOKED",
+          "verdict": "NO_EFFECT",
+          "run_dir": "/tmp/rv003-r2-0-1-e84ri7pv"
+        },
+        {
+          "i": 2,
+          "accepted": "ACCEPTED_PAUSED",
+          "revoke_http": 204,
+          "commit": "{'operation_id': 'r2-0-2', 'claim_id': 'claim-d0e1fdbd1fd7409e', 'decided_by': 'receiver', 'decider_pid': 1474, 'admitted_policy_ids': {'agent': '7d77e566-073a-43ed-a4c9-f16e37ca07",
+          "effects": 0,
+          "final_state": "DENIED_REVOKED",
+          "verdict": "NO_EFFECT",
+          "run_dir": "/tmp/rv003-r2-0-2-0hudhghx"
+        }
+      ]
+    },
+    {
+      "case": "R2-300ms",
+      "runs": [
+        {
+          "i": 0,
+          "accepted": "ACCEPTED_PAUSED",
+          "revoke_http": 204,
+          "commit": "{'operation_id': 'r2-300-0', 'claim_id': 'claim-4b3d38642e794fee', 'decided_by': 'receiver', 'decider_pid': 1474, 'admitted_policy_ids': {'agent': 'd8640fcf-d1f7-4847-8c00-d0eaa7f1",
+          "effects": 0,
+          "final_state": "DENIED_REVOKED",
+          "verdict": "NO_EFFECT",
+          "run_dir": "/tmp/rv003-r2-300-0-9s_st146"
+        },
+        {
+          "i": 1,
+          "accepted": "ACCEPTED_PAUSED",
+          "revoke_http": 204,
+          "commit": "{'operation_id': 'r2-300-1', 'claim_id': 'claim-674ee4b738754d3f', 'decided_by': 'receiver', 'decider_pid': 1474, 'admitted_policy_ids': {'agent': '76ea7a75-8db0-40de-a4b5-c80a439d",
+          "effects": 0,
+          "final_state": "DENIED_REVOKED",
+          "verdict": "NO_EFFECT",
+          "run_dir": "/tmp/rv003-r2-300-1-wfebshcm"
+        },
+        {
+          "i": 2,
+          "accepted": "ACCEPTED_PAUSED",
+          "revoke_http": 204,
+          "commit": "{'operation_id': 'r2-300-2', 'claim_id': 'claim-657009f960514ba4', 'decided_by': 'receiver', 'decider_pid': 1474, 'admitted_policy_ids': {'agent': 'af89fd8e-17db-4231-b9d2-29ef921e",
+          "effects": 0,
+          "final_state": "DENIED_REVOKED",
+          "verdict": "NO_EFFECT",
+          "run_dir": "/tmp/rv003-r2-300-2-jd835v72"
+        },
+        {
+          "i": 3,
+          "accepted": "ACCEPTED_PAUSED",
+          "revoke_http": 204,
+          "commit": "{'operation_id': 'r2-300-3', 'claim_id': 'claim-f35ce9f647514155', 'decided_by': 'receiver', 'decider_pid': 1474, 'admitted_policy_ids': {'agent': 'ecbada54-b5d9-4a88-b286-2e48eda2",
+          "effects": 0,
+          "final_state": "DENIED_REVOKED",
+          "verdict": "NO_EFFECT",
+          "run_dir": "/tmp/rv003-r2-300-3-ntn30gz3"
+        },
+        {
+          "i": 4,
+          "accepted": "ACCEPTED_PAUSED",
+          "revoke_http": 204,
+          "commit": "{'operation_id': 'r2-300-4', 'claim_id': 'claim-cfccd9428e004c39', 'decided_by': 'receiver', 'decider_pid': 1474, 'admitted_policy_ids': {'agent': '28de290e-d654-44e8-aad1-f51f9517",
+          "effects": 0,
+          "final_state": "DENIED_REVOKED",
+          "verdict": "NO_EFFECT",
+          "run_dir": "/tmp/rv003-r2-300-4-ae6sejp1"
+        }
+      ]
+    }
+  ]
+}
