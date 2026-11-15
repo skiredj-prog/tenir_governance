@@ -1,0 +1,232 @@
+[
+  {
+    "i": 0,
+    "operation_id": "r2-aged-0",
+    "state": "COMMITTED",
+    "effects": 1,
+    "consumptions": 1,
+    "receipts": [
+      [
+        1,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        2,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        3,
+        "acceptance",
+        "ACCEPTED"
+      ],
+      [
+        4,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        5,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        6,
+        "commit",
+        "AUTHORIZED"
+      ],
+      [
+        7,
+        "consumption",
+        "CONSUMED"
+      ]
+    ],
+    "revoke_http": 204,
+    "verdict": "R2_VIOLATION_OBSERVED"
+  },
+  {
+    "i": 1,
+    "operation_id": "r2-aged-1",
+    "state": "COMMITTED",
+    "effects": 1,
+    "consumptions": 1,
+    "receipts": [
+      [
+        1,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        2,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        3,
+        "acceptance",
+        "ACCEPTED"
+      ],
+      [
+        4,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        5,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        6,
+        "commit",
+        "AUTHORIZED"
+      ],
+      [
+        7,
+        "consumption",
+        "CONSUMED"
+      ]
+    ],
+    "revoke_http": 204,
+    "verdict": "R2_VIOLATION_OBSERVED"
+  },
+  {
+    "i": 2,
+    "operation_id": "r2-aged-2",
+    "state": "COMMITTED",
+    "effects": 1,
+    "consumptions": 1,
+    "receipts": [
+      [
+        1,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        2,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        3,
+        "acceptance",
+        "ACCEPTED"
+      ],
+      [
+        4,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        5,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        6,
+        "commit",
+        "AUTHORIZED"
+      ],
+      [
+        7,
+        "consumption",
+        "CONSUMED"
+      ]
+    ],
+    "revoke_http": 204,
+    "verdict": "R2_VIOLATION_OBSERVED"
+  },
+  {
+    "i": 3,
+    "operation_id": "r2-aged-3",
+    "state": "COMMITTED",
+    "effects": 1,
+    "consumptions": 1,
+    "receipts": [
+      [
+        1,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        2,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        3,
+        "acceptance",
+        "ACCEPTED"
+      ],
+      [
+        4,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        5,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        6,
+        "commit",
+        "AUTHORIZED"
+      ],
+      [
+        7,
+        "consumption",
+        "CONSUMED"
+      ]
+    ],
+    "revoke_http": 204,
+    "verdict": "R2_VIOLATION_OBSERVED"
+  },
+  {
+    "i": 4,
+    "operation_id": "r2-aged-4",
+    "state": "COMMITTED",
+    "effects": 1,
+    "consumptions": 1,
+    "receipts": [
+      [
+        1,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        2,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        3,
+        "acceptance",
+        "ACCEPTED"
+      ],
+      [
+        4,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        5,
+        "observation",
+        "ALLOW"
+      ],
+      [
+        6,
+        "commit",
+        "AUTHORIZED"
+      ],
+      [
+        7,
+        "consumption",
+        "CONSUMED"
+      ]
+    ],
+    "revoke_http": 204,
+    "verdict": "R2_VIOLATION_OBSERVED"
+  }
+]
