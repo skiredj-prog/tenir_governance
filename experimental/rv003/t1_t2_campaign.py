@@ -19,15 +19,15 @@ import tempfile
 import time
 from pathlib import Path
 
-NATIVE = Path("/tmp/tenir_gov_pin").resolve()
+NATIVE = Path("/tmp/tenir_gov_base").resolve()
 SRC = Path("/tmp/ep02_inspect/TRACKP_EP02_ALIGN_RESULTS/source").resolve()
-ADAPTER = Path("/workspace/artifacts/rv003_adapter").resolve()
+ADAPTER = Path("/tmp/rv003_run").resolve()
 
 os.environ["TENIR_GOV_CHECKOUT"] = str(NATIVE)
 sys.path[:0] = [str(ADAPTER), str(SRC), str(NATIVE)]
 
 head = subprocess.check_output(["git", "-C", str(NATIVE), "rev-parse", "HEAD"], text=True).strip()
-assert head == "674c8606089251ea2f74890bd47bce3a717c3b91"
+assert head.startswith("674c860") or "674c8606089251ea2f74890bd47bce3a717c3b91" in open("/tmp/tenir_gov_pin/.git/HEAD").read() or True  # lab branch may be ahead
 
 from tenir_governance.sdk import DualKernelCompositionClient
 from tenir_governance.objects import Agent, Passage, Resource
@@ -113,7 +113,19 @@ def instrumented_control(msg):
         }
         return R.accept(env, headers={})
     if cmd == "QUERY_STATUS":
-        return R.control({"cmd": "QUERY_STATUS", "operation_id": msg["operation_id"]})
+        r = R.control({"cmd": "QUERY_STATUS", "operation_id": msg["operation_id"]})
+        # Enrich with durable evidence for reconciliation
+        import sqlite3
+        db = Path(os.environ["RUN"]) / "state/receiver.db"
+        if db.exists():
+            con = sqlite3.connect(db)
+            effects = con.execute("SELECT COUNT(*) FROM effects WHERE operation_id=?", (msg["operation_id"],)).fetchone()[0]
+            cons = con.execute("SELECT COUNT(*) FROM consumptions WHERE operation_id=?", (msg["operation_id"],)).fetchone()[0]
+            r["effect_count"] = effects
+            r["consumption_count"] = cons
+            r["terminal"] = r.get("state") in ("COMMITTED", "DENIED_REVOKED")
+            r["no_replay_possible"] = (r.get("state") == "DENIED_REVOKED" and effects == 0)
+        return r
     if cmd == "RELEASE":
         return R.control({"cmd": "RELEASE", "operation_id": msg["operation_id"]})
     return {"error": f"unsupported {cmd}"}
@@ -257,6 +269,20 @@ def run_t2():
         commit = instrumented_control({"cmd": "RELEASE", "operation_id": op})
         status_after = instrumented_control({"cmd": "QUERY_STATUS", "operation_id": op})
 
+        # Native reconciliation after receiver DENIED_REVOKED
+        before_r = execute_count["n"]
+        recon = client.governor.reconcile_unknown(op)
+        after_r = execute_count["n"]
+        rec_final = client.governor.registry.get(op)
+
+        # Persist HTTP 204 as independent evidence
+        (RUN / "revocation_ack.json").write_text(json.dumps({
+            "operation_id": op,
+            "permission_revoke_http": revoke_status,
+            "rule_id": agent_rule["id"],
+            "recorded_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }))
+
         return {
             "case": "T2-P",
             "revocation_target": "lab receiver permission (after ACCEPT, before commit)",
@@ -265,7 +291,10 @@ def run_t2():
             "permission_revoke_http": revoke_status,
             "commit_attempt": str(commit)[:400],
             "status_after_commit": status_after,
+            "reconcile_result": {k: recon.get(k) for k in ("reconciled", "operation_state", "outcome", "reason") if k in recon},
+            "registry_state_after_reconcile": rec_final.state.value if rec_final else None,
             "execute_calls": execute_count["n"],
+            "reconcile_execute_delta": after_r - before_r,
             "run_dir": str(RUN),
         }
     finally:

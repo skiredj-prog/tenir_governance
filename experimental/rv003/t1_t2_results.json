@@ -17,9 +17,13 @@
       "execute_calls": 0,
       "receiver_status": {
         "operation_id": "t1p-op-001",
-        "state": "NEW"
+        "state": "NEW",
+        "effect_count": 0,
+        "consumption_count": 0,
+        "terminal": false,
+        "no_replay_possible": false
       },
-      "run_dir": "/tmp/rv003-t1p-ddwx8qsw"
+      "run_dir": "/tmp/rv003-t1p-mmze5bl4"
     },
     {
       "case": "T2-P",
@@ -33,19 +37,34 @@
         "state": "ACCEPTED_PAUSED",
         "request_digest": "b7c02a466c7e88545a133e8faf53c80a61e8e5ba6a29e9f1693ca5a9cbd10660",
         "binding_digest": "eee9f7ddd1b4dae7c79ea790ddd625206c3c11c379f3409b16499e249546df3d",
-        "acceptance_seq": 3
+        "acceptance_seq": 3,
+        "effect_count": 0,
+        "consumption_count": 0,
+        "terminal": false,
+        "no_replay_possible": false
       },
       "permission_revoke_http": 204,
-      "commit_attempt": "{'operation_id': 't2p-op-001', 'claim_id': 'claim-45de7fb81cb0446b', 'decided_by': 'receiver', 'decider_pid': 984, 'admitted_policy_ids': {'agent': '380db98d-1c72-4902-8c0f-6cc9d0d8ab23', 'user': '3f08838b-acba-4234-9d9b-c65ec86075b5'}, 'lease_ms': 2000.0, 'rounds': [{'round': 1, 'lease_start_monotonic_ms': 50162.806348, 'checks': {'agent': {'authority_source': 'magertron:/api/v1/tool-rbac/servers",
+      "commit_attempt": "{'operation_id': 't2p-op-001', 'claim_id': 'claim-11a80ab1131f42f0', 'decided_by': 'receiver', 'decider_pid': 2233, 'admitted_policy_ids': {'agent': '0251c64f-bea3-4119-a88c-ea0391efea44', 'user': 'b52f2f9d-f3bf-45d3-97ae-64dc4c481245'}, 'lease_ms': 2000.0, 'rounds': [{'round': 1, 'lease_start_monotonic_ms': 221554.954577, 'checks': {'agent': {'authority_source': 'magertron:/api/v1/tool-rbac/serve",
       "status_after_commit": {
         "operation_id": "t2p-op-001",
         "state": "DENIED_REVOKED",
         "request_digest": "b7c02a466c7e88545a133e8faf53c80a61e8e5ba6a29e9f1693ca5a9cbd10660",
         "binding_digest": "eee9f7ddd1b4dae7c79ea790ddd625206c3c11c379f3409b16499e249546df3d",
-        "acceptance_seq": 3
+        "acceptance_seq": 3,
+        "effect_count": 0,
+        "consumption_count": 0,
+        "terminal": true,
+        "no_replay_possible": true
       },
+      "reconcile_result": {
+        "reconciled": true,
+        "operation_state": "failed",
+        "reason": "Provider confirmed no effect occurred."
+      },
+      "registry_state_after_reconcile": "failed",
       "execute_calls": 1,
-      "run_dir": "/tmp/rv003-t2p-h567pus3"
+      "reconcile_execute_delta": 0,
+      "run_dir": "/tmp/rv003-t2p-0fyfq6pj"
     }
   ]
 }
