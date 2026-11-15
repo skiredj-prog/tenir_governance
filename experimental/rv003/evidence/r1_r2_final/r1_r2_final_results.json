@@ -1,0 +1,48 @@
+{
+  "native_sha": "674c8606089251ea2f74890bd47bce3a717c3b91",
+  "native_verified": true,
+  "lag_semantics": "lag_ms is a visibility lag, not a response delay. evaluate() uses asof = monotonic_now - lag_ms; rules created or closed after asof are invisible. A revocation sets _closed_ns = now; with lag_ms > 0 the rule remains visible until lag elapses.",
+  "cases": [
+    {
+      "case": "R1-crash-after-durable-commit",
+      "accepted": "ACCEPTED_PAUSED",
+      "commit_state": "COMMITTED",
+      "effects": 1,
+      "effect_recoverable": true,
+      "note": "Effect is durable in SQLite; absence of ACK does not erase it. Must not be classified FAILED.",
+      "run_dir": "/tmp/rv003-r1-after-commit-mpoh7kbn"
+    },
+    {
+      "case": "R1-recovery-reconcile",
+      "accepted": "ACCEPTED_PAUSED",
+      "crash_rc": 77,
+      "state_after_crash": "COMMIT_CHECKING",
+      "effects_after_crash": 0,
+      "status_after_restart": "CKING\", \"request_digest\": \"e66c3699d6a8b1869807bf52558f9aacadf7082aaa585a5cc9e1d232c01009cf\", \"binding_digest\": \"9a3bd7c5d11091d5f68a927610fbc70eac693fffe74fbe8013febaf4342ca16c\", \"acceptance_seq\": 3}",
+      "state_after_query": "COMMIT_CHECKING",
+      "effects_after_query": 0,
+      "no_redispatch": true,
+      "terminal_decision": false,
+      "note": "If state remains COMMIT_CHECKING, keep UNKNOWN/HOLD; do not force terminal.",
+      "run_dir": "/tmp/rv003-r1-reconcile-eobyy0j9"
+    },
+    {
+      "case": "R2-stale-visibility",
+      "accepted": "ACCEPTED_PAUSED",
+      "revoke_http": 204,
+      "lag_ms": 500,
+      "lag_semantics": "lag_ms is a visibility lag, not a response delay. evaluate() uses asof = monotonic_now - lag_ms; rules created or closed after asof are invisible. A revocation sets _closed_ns = now; with lag_ms > 0 the rule remains visible until lag elapses.",
+      "commit": "{'operation_id': 'r2-stale-001', 'claim_id': 'claim-6997a22154554fb0', 'decided_by': 'receiver', 'decider_pid': 741, 'admitted_policy_ids': {'agent': 'eb37a1c4-9f79-417c-a452-f63f6543569e', 'user': '8",
+      "effects": 0,
+      "final_state": "DENIED_REVOKED",
+      "stale_allow_observed": false,
+      "verdict": "R2_STALE_VISIBILITY_NOT_EXERCISED",
+      "mock_log_tail": [
+        "{\"seq\": 1, \"kind\": \"RULE_CREATED\", \"rule_id\": \"eb37a1c4-9f79-417c-a452-f63f6543569e\", \"role_id\": \"role-lab-agent\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:16:01.958102+00:00\", \"recorded_monotonic_ms\": 37227.763249}",
+        "{\"seq\": 2, \"kind\": \"RULE_CREATED\", \"rule_id\": \"86e0709d-a466-41a3-a7e6-ca2e63585d3f\", \"role_id\": \"role-lab-person\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:16:01.959589+00:00\", \"recorded_monotonic_ms\": 37229.24896}",
+        "{\"seq\": 3, \"kind\": \"RULE_DELETED\", \"rule_id\": \"eb37a1c4-9f79-417c-a452-f63f6543569e\", \"role_id\": \"role-lab-agent\", \"effect\": \"ALLOW\", \"replaces\": null, \"recorded_utc\": \"2026-11-15T04:16:01.969396+00:00\", \"recorded_monotonic_ms\": 37239.055521}"
+      ],
+      "run_dir": "/tmp/rv003-r2-stale-wdku956h"
+    }
+  ]
+}
