@@ -1,0 +1,23 @@
+{
+  "native_sha": "674c8606089251ea2f74890bd47bce3a717c3b91",
+  "cases": [
+    {
+      "case": "R1-crash-inside-commit",
+      "accepted": "ACCEPTED_PAUSED",
+      "crashed": true,
+      "child_rc": 77,
+      "effects_after_crash": 0,
+      "state_after_crash": "COMMIT_CHECKING",
+      "no_durable_effect": true,
+      "run_dir": "/tmp/rv003-r1-crash-xxn7m_bu"
+    },
+    {
+      "case": "R2-visibility-lag",
+      "accepted": null,
+      "commit_result": "{'operation_id': 'r2-op-001', 'result': 'UNKNOWN_OPERATION'}",
+      "effects": 0,
+      "committed_despite_revocation": false,
+      "run_dir": "/tmp/rv003-r2-lag-enpmdd4d"
+    }
+  ]
+}
