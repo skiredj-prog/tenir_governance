@@ -1,1 +1,1 @@
-{"operation_id": "t2p-op-001", "permission_revoke_http": 204, "rule_id": "0251c64f-bea3-4119-a88c-ea0391efea44", "recorded_utc": "2026-11-15T02:44:55Z"}
+{"operation_id": "t2p-op-001", "http_status": 204, "rule_id": "7606f249-677a-4a43-9650-4d13e6f9454b", "response_body_len": 0, "recorded_utc": "2026-11-15T03:26:18Z", "monotonic_ms": 22720.064182000002}

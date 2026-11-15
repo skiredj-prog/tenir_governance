@@ -1,0 +1,1 @@
+{"effects_before": 0, "effects_after": 0, "state_after_replay": "DENIED_REVOKED", "replay_response": "{'operation_id': 't2p-op-001', 'result': 'NO_NEW_ATTEMPT', 'state': 'DENIED_REVOKED'}", "no_new_effect": true}

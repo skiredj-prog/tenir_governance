@@ -23,7 +23,7 @@
         "terminal": false,
         "no_replay_possible": false
       },
-      "run_dir": "/tmp/rv003-t1p-mmze5bl4"
+      "run_dir": "/tmp/rv003-t1p-3iouxsq8"
     },
     {
       "case": "T2-P",
@@ -44,7 +44,7 @@
         "no_replay_possible": false
       },
       "permission_revoke_http": 204,
-      "commit_attempt": "{'operation_id': 't2p-op-001', 'claim_id': 'claim-11a80ab1131f42f0', 'decided_by': 'receiver', 'decider_pid': 2233, 'admitted_policy_ids': {'agent': '0251c64f-bea3-4119-a88c-ea0391efea44', 'user': 'b52f2f9d-f3bf-45d3-97ae-64dc4c481245'}, 'lease_ms': 2000.0, 'rounds': [{'round': 1, 'lease_start_monotonic_ms': 221554.954577, 'checks': {'agent': {'authority_source': 'magertron:/api/v1/tool-rbac/serve",
+      "commit_attempt": "{'operation_id': 't2p-op-001', 'claim_id': 'claim-1a574c055cb54f51', 'decided_by': 'receiver', 'decider_pid': 1318, 'admitted_policy_ids': {'agent': '7606f249-677a-4a43-9650-4d13e6f9454b', 'user': '7e173b19-e165-4b31-a92d-066074d4b279'}, 'lease_ms': 2000.0, 'rounds': [{'round': 1, 'lease_start_monotonic_ms': 22722.191561, 'checks': {'agent': {'authority_source': 'magertron:/api/v1/tool-rbac/server",
       "status_after_commit": {
         "operation_id": "t2p-op-001",
         "state": "DENIED_REVOKED",
@@ -64,7 +64,14 @@
       "registry_state_after_reconcile": "failed",
       "execute_calls": 1,
       "reconcile_execute_delta": 0,
-      "run_dir": "/tmp/rv003-t2p-0fyfq6pj"
+      "replay_probe": {
+        "effects_before": 0,
+        "effects_after": 0,
+        "state_after_replay": "DENIED_REVOKED",
+        "replay_response": "{'operation_id': 't2p-op-001', 'result': 'NO_NEW_ATTEMPT', 'state': 'DENIED_REVOKED'}",
+        "no_new_effect": true
+      },
+      "run_dir": "/tmp/rv003-t2p-vqd6lg06"
     }
   ]
 }

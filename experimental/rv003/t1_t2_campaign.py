@@ -27,7 +27,11 @@ os.environ["TENIR_GOV_CHECKOUT"] = str(NATIVE)
 sys.path[:0] = [str(ADAPTER), str(SRC), str(NATIVE)]
 
 head = subprocess.check_output(["git", "-C", str(NATIVE), "rev-parse", "HEAD"], text=True).strip()
-assert head.startswith("674c860") or "674c8606089251ea2f74890bd47bce3a717c3b91" in open("/tmp/tenir_gov_pin/.git/HEAD").read() or True  # lab branch may be ahead
+if head != "674c8606089251ea2f74890bd47bce3a717c3b91":
+    raise SystemExit(f"NATIVE SHA MISMATCH: {head}")
+dirty = subprocess.check_output(["git", "-C", str(NATIVE), "status", "--porcelain"], text=True)
+if dirty.strip():
+    raise SystemExit("NATIVE WORKING TREE DIRTY")
 
 from tenir_governance.sdk import DualKernelCompositionClient
 from tenir_governance.objects import Agent, Passage, Resource
@@ -264,6 +268,16 @@ def run_t2():
         )
         with urllib.request.urlopen(req, timeout=2) as r:
             revoke_status = r.status
+            revoke_body = r.read()
+        revoke_ack = {
+            "operation_id": op,
+            "http_status": revoke_status,
+            "rule_id": agent_rule["id"],
+            "response_body_len": len(revoke_body),
+            "recorded_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "monotonic_ms": time.monotonic() * 1000,
+        }
+        (RUN / "revocation_ack.json").write_text(json.dumps(revoke_ack))
 
         # Attempt commit
         commit = instrumented_control({"cmd": "RELEASE", "operation_id": op})
@@ -275,13 +289,25 @@ def run_t2():
         after_r = execute_count["n"]
         rec_final = client.governor.registry.get(op)
 
-        # Persist HTTP 204 as independent evidence
-        (RUN / "revocation_ack.json").write_text(json.dumps({
-            "operation_id": op,
-            "permission_revoke_http": revoke_status,
-            "rule_id": agent_rule["id"],
-            "recorded_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }))
+        # Durable restart/replay probe
+        import sqlite3
+        db = RUN / "state/receiver.db"
+        con = sqlite3.connect(db)
+        effects_before = con.execute("SELECT COUNT(*) FROM effects WHERE operation_id=?", (op,)).fetchone()[0]
+        con.close()
+        replay = instrumented_control({"cmd": "RELEASE", "operation_id": op})
+        con = sqlite3.connect(db)
+        effects_after = con.execute("SELECT COUNT(*) FROM effects WHERE operation_id=?", (op,)).fetchone()[0]
+        state_after = con.execute("SELECT state FROM ops WHERE operation_id=?", (op,)).fetchone()[0]
+        con.close()
+        replay_evidence = {
+            "effects_before": effects_before,
+            "effects_after": effects_after,
+            "state_after_replay": state_after,
+            "replay_response": str(replay)[:300],
+            "no_new_effect": effects_after == effects_before == 0,
+        }
+        (RUN / "replay_probe.json").write_text(json.dumps(replay_evidence))
 
         return {
             "case": "T2-P",
@@ -295,6 +321,7 @@ def run_t2():
             "registry_state_after_reconcile": rec_final.state.value if rec_final else None,
             "execute_calls": execute_count["n"],
             "reconcile_execute_delta": after_r - before_r,
+            "replay_probe": replay_evidence,
             "run_dir": str(RUN),
         }
     finally:
