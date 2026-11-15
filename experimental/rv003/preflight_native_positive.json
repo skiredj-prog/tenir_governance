@@ -1,0 +1,54 @@
+{
+  "run_id": "native-positive-preflight-001",
+  "native_sha": "674c8606089251ea2f74890bd47bce3a717c3b91",
+  "native_dirty": false,
+  "strict_mandate": true,
+  "scoring_config": {
+    "pressure": 0.7,
+    "velocity": 0.5,
+    "capacity": 0.9,
+    "authority": 0.9,
+    "context_fit": 1.0,
+    "evidence_quality": 1.0
+  },
+  "steps": [
+    {
+      "step": "adjudicate",
+      "composed_decision": "FLAG",
+      "operation_state": "reserved",
+      "rationale": "Scoring kernel flags: risk warning."
+    },
+    {
+      "step": "bind_operation",
+      "bound": true
+    },
+    {
+      "step": "dispatch_and_execute",
+      "dispatched": true,
+      "executed": false,
+      "registry_state": "dispatching",
+      "execute_calls_delta": 1
+    },
+    {
+      "step": "post_accept_reconcile",
+      "outcome": "pending"
+    },
+    {
+      "step": "lab_commit",
+      "raw": "{'operation_id': 'preflight-op-positive-001', 'claim_id': 'claim-5cc743e0119f4abe', 'decided_by': 'receiver', 'decider_pid': 1645, 'admitted_policy_ids': {'agent': 'f691ff5c-d212-4f0a-b21d-6ad9c43f588c', 'user': '4e737e6c-eb0f-43ce-a1e6-161af1c5e96c'}, 'lease_ms': 2000.0, 'rounds': [{'round': 1, 'le"
+    },
+    {
+      "step": "reconcile_unknown",
+      "result": {
+        "reconciled": true,
+        "operation_state": "confirmed"
+      },
+      "registry_state": "confirmed",
+      "execute_calls_delta": 0
+    }
+  ],
+  "execute_calls_total": 1,
+  "final_state": "confirmed",
+  "receiver_run_dir": "/tmp/rv003-native-preflight-8t35m45z",
+  "verdict": "NATIVE_GOVERNOR_LAB_RECEIVER_POSITIVE_PREFLIGHT_PASS"
+}

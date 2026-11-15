@@ -1,0 +1,51 @@
+{
+  "native_sha": "674c8606089251ea2f74890bd47bce3a717c3b91",
+  "cases": [
+    {
+      "case": "T1-P",
+      "revocation_target": "TENIR-Gov mandate (before dispatch)",
+      "adjudicate_state": "reserved",
+      "revoke_ack": {
+        "epoch": 2,
+        "seq": 3,
+        "status": "revoked"
+      },
+      "dispatch_result": {
+        "dispatched": false,
+        "guard_decision": "DENY_REVOKED"
+      },
+      "execute_calls": 0,
+      "receiver_status": {
+        "operation_id": "t1p-op-001",
+        "state": "NEW"
+      },
+      "run_dir": "/tmp/rv003-t1p-ddwx8qsw"
+    },
+    {
+      "case": "T2-P",
+      "revocation_target": "lab receiver permission (after ACCEPT, before commit)",
+      "dispatch_result": {
+        "dispatched": true,
+        "executed": false
+      },
+      "status_after_accept": {
+        "operation_id": "t2p-op-001",
+        "state": "ACCEPTED_PAUSED",
+        "request_digest": "b7c02a466c7e88545a133e8faf53c80a61e8e5ba6a29e9f1693ca5a9cbd10660",
+        "binding_digest": "eee9f7ddd1b4dae7c79ea790ddd625206c3c11c379f3409b16499e249546df3d",
+        "acceptance_seq": 3
+      },
+      "permission_revoke_http": 204,
+      "commit_attempt": "{'operation_id': 't2p-op-001', 'claim_id': 'claim-45de7fb81cb0446b', 'decided_by': 'receiver', 'decider_pid': 984, 'admitted_policy_ids': {'agent': '380db98d-1c72-4902-8c0f-6cc9d0d8ab23', 'user': '3f08838b-acba-4234-9d9b-c65ec86075b5'}, 'lease_ms': 2000.0, 'rounds': [{'round': 1, 'lease_start_monotonic_ms': 50162.806348, 'checks': {'agent': {'authority_source': 'magertron:/api/v1/tool-rbac/servers",
+      "status_after_commit": {
+        "operation_id": "t2p-op-001",
+        "state": "DENIED_REVOKED",
+        "request_digest": "b7c02a466c7e88545a133e8faf53c80a61e8e5ba6a29e9f1693ca5a9cbd10660",
+        "binding_digest": "eee9f7ddd1b4dae7c79ea790ddd625206c3c11c379f3409b16499e249546df3d",
+        "acceptance_seq": 3
+      },
+      "execute_calls": 1,
+      "run_dir": "/tmp/rv003-t2p-h567pus3"
+    }
+  ]
+}
