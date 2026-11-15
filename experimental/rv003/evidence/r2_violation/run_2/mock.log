@@ -1,0 +1,3 @@
+{"seq": 1, "kind": "RULE_CREATED", "rule_id": "928dd143-d17b-49bf-93a5-06bb769529f3", "role_id": "role-lab-agent", "effect": "ALLOW", "replaces": null, "recorded_utc": "2026-11-15T04:23:36.179055+00:00", "recorded_monotonic_ms": 32781.742993}
+{"seq": 2, "kind": "RULE_CREATED", "rule_id": "1bb7fdcc-574d-486d-8abc-2c915375d665", "role_id": "role-lab-person", "effect": "ALLOW", "replaces": null, "recorded_utc": "2026-11-15T04:23:36.180336+00:00", "recorded_monotonic_ms": 32783.024265}
+{"seq": 3, "kind": "RULE_DELETED", "rule_id": "928dd143-d17b-49bf-93a5-06bb769529f3", "role_id": "role-lab-agent", "effect": "ALLOW", "replaces": null, "recorded_utc": "2026-11-15T04:23:36.691799+00:00", "recorded_monotonic_ms": 33294.507029}
