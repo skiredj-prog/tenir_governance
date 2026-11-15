@@ -19,11 +19,17 @@ It does not replace an LLM, an identity system, an observability stack, a policy
 
 ---
 
+## Start developing
+
+The [developer quickstart](docs/GETTING_STARTED.md) runs a synthetic lost-response scenario against TENIR-Gov. It is a source preview built on the 5.7.0 runtime. The published 5.7.0 wheel predates this walkthrough.
+
+TENIR-Gov is the maintained product. The HOLD prototype owns its historical hackathon results. REG defines the specification and qualification framework. See the [product and claims policy](docs/PRODUCT_IDENTITY.md) and [migration inventory](docs/HOLD_MIGRATION.md).
+
 ## Three-Sentence Pitch
 
 1. **Problem:** Models reason and agents propose actions — but a consequential action needs a runtime decision about whether it is admissible before execution.
 2. **Solution:** TENIR-Gov provides a deterministic execution-control layer at the decision → action boundary, with explicit policy thresholds and fail-closed defaults.
-3. **Evidence and limits:** The v5.7.0 source line includes a two-kernel composition, governed HOLD and provider reconciliation, payload binding, and single-host SQLite WAL budget accounting. The CI checks tests and Python distributions; those checks do not constitute independent certification, prove external provider effects, or establish multi-host fault tolerance (C3).
+3. **Evidence and limits:** The v5.7.0 source line includes a two-kernel composition, operation suspension and provider reconciliation, payload binding, and single-host SQLite WAL budget accounting. The CI checks tests and Python distributions; those checks do not constitute independent certification, prove external provider effects, or establish multi-host fault tolerance (C3).
 
 ---
 
