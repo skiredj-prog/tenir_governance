@@ -272,19 +272,23 @@ class HoldManager:
         )
 
         target_state = OperationState.HOLD if approve else OperationState.FAILED
+        changes = {"exit_receipt": receipt, "exit_reason": "authorized_exit"}
+        if not approve:
+            # Decision B3: an escalated attempt was never dispatched, so a
+            # denial establishes its non-execution, as τ_K and
+            # cancel_escalation already record. FAILED is the runtime label.
+            changes["execution_record"] = "CONFIRMED_NONEXECUTION"
         success, _prev = self._registry.transition_to(
             idempotency_key,
             target_state,
-            hold_record_changes={
-                "exit_receipt": receipt,
-                "exit_reason": "authorized_exit",
-            },
+            hold_record_changes=changes,
         )
         current = self._registry.get(idempotency_key)
 
         return {
             "exited": success,
             "operation_state": current.state.value if current else None,
+            "execution_record": ("CONFIRMED_NONEXECUTION" if success and not approve else None),
             "exit_receipt": receipt.to_dict() if success else None,
             "reason": f"Authorized exit ({'approved' if approve else 'denied'}) by {authorized_by}." if success
                       else f"Transition ESCALATED → {target_state.value} failed.",

@@ -1608,3 +1608,22 @@ def test_cancel_escalation_releases_reservation_and_is_terminal():
     assert result["execution_record"] == "CONFIRMED_NONEXECUTION"
     assert gov.registry.get(p.idempotency_key).state == OperationState.FAILED
     assert budget.reserved == 0.0 and budget.consumed == 0.0
+
+
+def test_denied_exit_records_confirmed_nonexecution():
+    """Decision B3: a denial from ESCALATED ends an attempt that was never
+    dispatched; it records CONFIRMED_NONEXECUTION like τ_K and cancel_escalation."""
+    gov, state = _setup_governor(budget_capacity=100.0)
+    gov.scoring = _BrokenScoring()
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(p, pressure=0.2, velocity=0.2, capacity=0.9,
+                   resource_id="budget", amount=10.0)
+    assert gov.escalate_hold(p.idempotency_key, escalated_by="risk-officer")["escalated"]
+    result = gov.authorize_exit(p.idempotency_key, "risk-officer", "payment",
+                                "ceremony-G-R5-001", "denied", approve=False)
+    assert result["exited"] is True
+    assert result["execution_record"] == "CONFIRMED_NONEXECUTION"
+    record = gov.registry.get(p.idempotency_key)
+    assert record.state == OperationState.FAILED
+    assert record.hold_record.execution_record == "CONFIRMED_NONEXECUTION"
+    assert state.resources["budget"].reserved == 0.0
