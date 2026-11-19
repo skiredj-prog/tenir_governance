@@ -106,6 +106,7 @@ p = Passage(agent_id="alice", action_type="payment", amount=10.0)
 
 result = client.adjudicate(
     p, pressure=0.2, velocity=0.2, capacity=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9,
     resource_id="budget", amount=10.0,
 )
 
@@ -152,6 +153,7 @@ print("  the idempotency key was already claimed at CREATED.\n")
 step("Re-submitting the same passage (same idempotency key)...")
 result2 = client.adjudicate(
     p, pressure=0.2, velocity=0.2, capacity=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9,
     resource_id="budget", amount=10.0,
 )
 
@@ -295,6 +297,7 @@ client_mem.register_resource(Resource(resource_id="budget_mem", capacity=100.0))
 p_mem = Passage(agent_id="bob", action_type="payment", amount=15.0)
 client_mem.adjudicate(
     p_mem, pressure=0.2, velocity=0.2, capacity=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9,
     resource_id="budget_mem", amount=15.0,
 )
 detail(f"Adjudicated: state={client_mem.governor.registry.get(p_mem.idempotency_key).state}")
@@ -307,6 +310,7 @@ client_mem2.register_agent(Agent(agent_id="bob", authority_score=0.9, trusted_de
 client_mem2.register_resource(Resource(resource_id="budget_mem", capacity=100.0))
 result_mem2 = client_mem2.adjudicate(
     p_mem, pressure=0.2, velocity=0.2, capacity=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9,
     resource_id="budget_mem", amount=15.0,
 )
 detail(f"Re-adjudication:     {result_mem2['composed_decision']}")
@@ -332,6 +336,7 @@ client_p1.register_resource(Resource(resource_id="budget_p", capacity=100.0))
 p_p = Passage(agent_id="carol", action_type="payment", amount=25.0)
 client_p1.adjudicate(
     p_p, pressure=0.2, velocity=0.2, capacity=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9,
     resource_id="budget_p", amount=25.0,
 )
 detail(f"Adjudicated: state={client_p1.governor.registry.get(p_p.idempotency_key).state}")
@@ -343,6 +348,7 @@ client_p2.register_agent(Agent(agent_id="carol", authority_score=0.9, trusted_de
 client_p2.register_resource(Resource(resource_id="budget_p", capacity=100.0))
 result_p2 = client_p2.adjudicate(
     p_p, pressure=0.2, velocity=0.2, capacity=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9,
     resource_id="budget_p", amount=25.0,
 )
 detail(f"Re-adjudication:     {result_p2['composed_decision']}")
@@ -382,6 +388,7 @@ client_t.register_resource(Resource(resource_id="budget_t", capacity=100.0))
 p5 = Passage(agent_id="dave", action_type="payment", amount=30.0)
 client_t.adjudicate(
     p5, pressure=0.2, velocity=0.2, capacity=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9,
     resource_id="budget_t", amount=30.0,
 )
 

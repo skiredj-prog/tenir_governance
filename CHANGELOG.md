@@ -8,6 +8,11 @@ Not tagged. 5.7.5 is the single-host pilot line (ROADMAP_90_DAYS, "5.7.5 — Aud
 
 ### No favorable default for an unmeasured axis; a FLAG states its declared conditions (decisions 2 and 3, 19 Nov)
 
+#### Behaviour change (5.7.5)
+- **A call that does not supply `authority`, `context_fit` and `evidence_quality` (or `pressure`, `velocity`, `capacity`) is now refused with `HARD_VETO`**, and the operation reaches `FAILED`. On 5.7.0 the same call was admitted on the `1.0` / `0.5` defaults. The scoring rationale names each missing axis (`"authority missing: cannot adjudicate without authority assessment"`, ...), and `declared_unmeasured` lists them.
+- `docs/agentic-governance-guide.md` and `demo.py` now pass these axes explicitly. The guide shows a call without them (`HARD_VETO`, with its reason) and states the observed decision: `FLAG`, not `PASS` (§1, §6, §10). Its "PASS" was already wrong on 5.7.0, which returned `FLAG` because four axes are never measured.
+- Not fixed, also failing on 5.7.0: guide §4 (`mark_unknown` is not on the client), §5 (budget escalation example does not reach `HOLD`), §7 (`adjudicate_schema` requires `canonical_context`); `demo.py` step "Expected RESERVED or FAILED, got HOLD".
+
 #### Changed
 - `DualKernelCompositionClient.adjudicate`: `authority`, `context_fit` and `evidence_quality` default to `None` (were `1.0`). An axis that is not supplied now reaches the scoring adapter as missing, which is a hard gate there: the request is not admitted. Callers that relied on the `1.0` defaults must now pass measured values.
 - `Agent.authority_score` defaults to `None` (was `1.0`). No kernel reads it.
@@ -21,7 +26,6 @@ Not tagged. 5.7.5 is the single-host pilot line (ROADMAP_90_DAYS, "5.7.5 — Aud
 
 #### Not changed
 - `confidence = 1.0` in the post-execution value assessment (`assessment/evp.py`, `assessor.py`, `assess_post_execution`) is unchanged: it weighs the expected value of an operation already terminal, not its admission.
-- `docs/agentic-governance-guide.md` and `demo.py` call `client.adjudicate` without `authority`, `context_fit` and `evidence_quality`; with this line they get `HARD_VETO`. On 5.7.0 the guide's "PASS" was already a `FLAG`. Not updated yet.
 
 ### τ_K as a policy-declared fail-safe bound on HOLD (fixes #140)
 
