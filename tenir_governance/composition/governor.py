@@ -3650,9 +3650,13 @@ class DualKernelGovernor:
             hold_record_changes={"exit_reason": "expired"},
         )
         current = self.registry.get(idempotency_key)
+        # Every advance point checks before any DISPATCHING claim: the attempt
+        # was never dispatched, so its non-execution is established. FAILED is
+        # this runtime's label; the canonical record is CONFIRMED_NONEXECUTION.
         reason = (
-            f"τ_K exhausted ({bound}) at {point}: FAIL-CLOSED, no effect, "
-            "reservation released (not a resolution)."
+            f"τ_K exhausted ({bound}) at {point}: FAIL-CLOSED, terminal for this attempt "
+            "identity, never dispatched (CONFIRMED_NONEXECUTION), reservation released "
+            "(not a resolution)."
             if success else f"τ_K exhausted ({bound}) at {point}; transition to FAILED failed."
         )
         self.ledger.append(
@@ -3666,6 +3670,7 @@ class DualKernelGovernor:
             **base,
             "operation_state": current.state.value if current else None,
             "composed_decision": Decision.HARD_VETO.value,
+            "execution_record": "CONFIRMED_NONEXECUTION" if success else None,
             "reason": reason,
         }
 

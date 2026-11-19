@@ -15,6 +15,7 @@ Patch release. Behaviour changes only for a deployment whose policy declares a ฯ
   - `dispatch` / `dispatch_and_execute`: a HOLD still unanswered past the bound, or a RESERVED operation whose HOLD was resolved after the bound (or at an unrecorded time), is not dispatched.
   In each case the reservation is released first, the operation reaches `FAILED` with `exit_reason="expired"`, and the ledger records a `HARD_VETO` entry naming the bound, its source and the advance point. If the release cannot be proven, the operation stays open for reconciliation.
 - The bound counts from HOLD entry. An escalation or an authorized exit does not restart it.
+- The refusal is terminal for that attempt identity; a later effect needs a new attempt. Every advance point checks before any dispatch claim, so the attempt was never dispatched: the result carries `execution_record="CONFIRMED_NONEXECUTION"` and the ledger entry says so. `FAILED` stays the runtime's label.
 
 ### Not changed
 - `expire_hold` and `expire_escalated` (timer-driven paths) are unchanged; `expire_escalated` still yields `UNKNOWN` per v7.1 ยง19.

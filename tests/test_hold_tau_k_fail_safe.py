@@ -155,6 +155,7 @@ def test_late_resolution_fails_closed_and_releases_budget(clock):
     assert res["tau_k_expired"] is True
     assert res["composed_decision"] == Decision.HARD_VETO.value
     assert res["operation_state"] == OperationState.FAILED.value
+    assert res["execution_record"] == "CONFIRMED_NONEXECUTION"
     assert budget.reserved == 0.0
     out = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0,
                                    payload={"action_type": "payment"})
@@ -172,6 +173,7 @@ def test_late_resolution_is_ledgered_as_hard_veto(clock):
     assert last.kernel == "hold_lifecycle"
     assert last.decision == Decision.HARD_VETO.value
     assert "τ_K exhausted" in last.rationale and "resolve_hold" in last.rationale
+    assert "CONFIRMED_NONEXECUTION" in last.rationale
     assert gov.ledger.verify_chain()
 
 
