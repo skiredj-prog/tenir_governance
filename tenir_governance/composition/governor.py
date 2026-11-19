@@ -214,12 +214,15 @@ class ScoringKernelAdapter:
         # PASS: it must not reach a comparison, where NaN compares false and
         # admits. It is reported as unmeasured, and every conclusive veto the
         # other inputs still support is evaluated and governs (RFC-0 §4).
+        # A finite value outside the normalized range [0, 1] is just as
+        # invalid: the kernel rejects it, and a raise would end in the
+        # fail-closed HOLD that masks a veto. It is handled the same way.
         def _finite(v):
             if v is None:
                 return True  # absence is handled below as a missing measure
             if isinstance(v, bool) or not isinstance(v, (int, float)):
                 return False
-            return math.isfinite(v)
+            return math.isfinite(v) and 0.0 <= v <= 1.0
         named = {"pressure": pressure, "velocity": velocity, "capacity": capacity,
                  "option_space": option_space, "authority": authority,
                  "context_fit": context_fit, "evidence_quality": evidence_quality,
@@ -238,11 +241,14 @@ class ScoringKernelAdapter:
             irreversibility_materiality = 0.5
         if pvc_non_finite:
             # S cannot be computed: no S-based verdict is drawn from a placeholder.
+            measured = {n: v for n, v in named.items()
+                        if v is not None and n not in non_finite}
             return self._insufficient_evidence_without_s(
                 non_finite, option_space=option_space,
                 capacity=None if "capacity" in non_finite else capacity,
                 missing=[n for n in ("authority", "context_fit", "evidence_quality")
                          if named[n] is None],
+                measured=measured,
             )
 
         # Compute the extra signals the prototype's ScoringKernel checked
@@ -344,7 +350,7 @@ class ScoringKernelAdapter:
             # Insufficient evidence: no admission on a non-finite measure. A
             # conclusive veto from the other inputs has already governed above.
             decision = Decision.HOLD.value
-            rationale = (f"INSUFFICIENT_EVIDENCE: non-finite measure(s) {', '.join(non_finite)}; "
+            rationale = (f"INSUFFICIENT_EVIDENCE: invalid measure(s) (non-finite or outside [0, 1]) {', '.join(non_finite)}; "
                          "held, not scored as admissible. " + rationale).strip()
 
         return {
@@ -364,18 +370,39 @@ class ScoringKernelAdapter:
             "unmeasured_axes": list(non_finite),
         }
 
-    def _insufficient_evidence_without_s(self, non_finite, *, option_space, capacity, missing):
-        """P, V or C is not finite: S is unknown. Veto on what is still
-        conclusive without S (a missing mandatory measure, option space at its
-        block floor, a measured capacity of zero, which makes S = 0 whatever P
-        and V are); otherwise HOLD for insufficient evidence."""
+    # Adapter input name -> geometry axis name, where they differ.
+    _GEOMETRY_AXIS = {"irreversibility_materiality": "irreversible_pathway_materiality"}
+
+    def _conclusive_geometry_vetoes(self, measured):
+        """Hard facets of the kernel's geometry whose every axis carries a
+        valid measure. Such a facet does not depend on an unknown value, so
+        its violation is conclusive and must govern (RFC-0 §4)."""
+        point = {self._GEOMETRY_AXIS.get(n, n): float(v) for n, v in measured.items()}
+        policy = getattr(getattr(self._kernel, "policy", None), "geometry", None)
+        reasons = []
+        for facet in getattr(policy, "facets", ()):
+            if facet.severity != "hard" or not set(facet.normal) <= set(point):
+                continue
+            if sum(w * point[a] for a, w in facet.normal.items()) > facet.bound:
+                reasons.append(facet.rationale)
+        return reasons
+
+    def _insufficient_evidence_without_s(self, non_finite, *, option_space, capacity, missing,
+                                         measured=None):
+        """P, V or C is invalid: S is unknown. Veto on what is still
+        conclusive without S (a missing mandatory measure, a hard geometry
+        facet whose axes are all measured, such as authority or context_fit
+        below its floor, option space at its block floor, a measured capacity
+        of zero, which makes S = 0 whatever P and V are); otherwise HOLD for
+        insufficient evidence."""
         hard = [f"{n} missing: cannot adjudicate without it" for n in missing]
+        hard.extend(self._conclusive_geometry_vetoes(measured or {}))
         if capacity is not None and capacity <= 0:
             hard.append(f"TAU BREACH: capacity={capacity} gives S=0 ≤ τ={self._tau_floor} "
                         "whatever pressure and velocity are")
         if option_space is not None and option_space <= self._option_space_block_floor:
             hard.append(f"option_space={option_space:.3f} ≤ block floor")
-        reason = f"INSUFFICIENT_EVIDENCE: non-finite measure(s) {', '.join(non_finite)}; S not computed."
+        reason = f"INSUFFICIENT_EVIDENCE: invalid measure(s) (non-finite or outside [0, 1]) {', '.join(non_finite)}; S not computed."
         decision = Decision.HARD_VETO.value if hard else Decision.HOLD.value
         return {
             "kernel": "scoring",

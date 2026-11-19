@@ -97,3 +97,50 @@ def test_lattice_scoring_hold_with_membrane_pass_is_hold():
     from tenir_governance.composition.lattice import compose
     assert compose("HOLD", "PASS")[0] == "HOLD"
     assert compose("HOLD", "FLAG")[0] == "HOLD"
+
+
+# Follow-up (reproduced by the veto-masking script, 19 Nov): a finite value
+# outside [0, 1] made the kernel raise, and the fail-closed HOLD masked the veto.
+@pytest.mark.parametrize("axis,bad", [
+    ("evidence_quality", 1.5), ("evidence_quality", -0.1), ("authority", 1.5),
+    ("context_fit", -0.1), ("option_space", 1.5), ("irreversibility_materiality", 1.5),
+    ("pressure", -0.1), ("velocity", 5.0), ("capacity", 7.0),
+])
+def test_out_of_range_value_is_invalid_not_a_raise(axis, bad):
+    r = _adapter().adjudicate(**{**BEST, axis: bad})
+    assert r["decision"] == Decision.HOLD.value
+    assert axis in r["unmeasured_axes"]
+    assert "INSUFFICIENT_EVIDENCE" in r["rationale"]
+
+
+@pytest.mark.parametrize("bad", [1.5, -0.1])
+def test_tau_breach_governs_over_out_of_range_evidence(bad):
+    r = _adapter().adjudicate(**{**BEST, **TAU_BREACH, "evidence_quality": bad})
+    assert r["decision"] == Decision.HARD_VETO.value
+
+
+@pytest.mark.parametrize("veto", [{"authority": 0.0}, {"context_fit": 0.0}])
+@pytest.mark.parametrize("axis", ["pressure", "velocity", "capacity"])
+def test_single_axis_veto_governs_when_s_is_unknown(veto, axis):
+    r = _adapter().adjudicate(**{**BEST, **veto, axis: math.nan})
+    assert r["decision"] == Decision.HARD_VETO.value
+    assert r["s_score"] is None
+    assert axis in r["unmeasured_axes"]
+
+
+def test_unmeasured_axis_does_not_make_a_geometry_veto_without_s():
+    """A facet that reads an invalid axis is not conclusive: no veto from it."""
+    r = _adapter().adjudicate(**{**BEST, "pressure": math.nan, "authority": math.nan,
+                                 "irreversibility_materiality": 1.0})
+    assert r["decision"] == Decision.HOLD.value
+
+
+def test_masked_veto_no_longer_reaches_an_effect_after_resolve_hold():
+    """On 0c9192c, authority 0 with NaN pressure held, and a favourable
+    resolve_hold then admitted. The veto is now terminal at adjudication."""
+    gov = _governor()
+    r = gov.adjudicate(Passage(agent_id="a", action_type="x"),
+                       **{**BEST, "authority": 0.0, "pressure": math.nan})
+    assert r["scoring_decision"] == Decision.HARD_VETO.value
+    assert r["composed_decision"] == Decision.HARD_VETO.value
+    assert r["operation_state"] != "hold"
