@@ -271,10 +271,12 @@ if exit_rec and hasattr(exit_rec, 'exit_receipt') and exit_rec.exit_receipt:
     detail(f"Exit receipt signed by: {exit_rec.exit_receipt.authorized_by}")
     detail(f"Authorization:        {exit_rec.exit_receipt.authorization}")
 
-if record4.state.value in ('reserved', 'failed'):
-    ok(f"Authorized exit → {record4.state.value.upper()} (with exit receipt)")
+# An approved exit returns the operation to HOLD: the authorization is
+# recorded, and a fresh re-adjudication is required before any admission.
+if record4.state.value == 'hold':
+    ok("Authorized exit → HOLD (exit receipt recorded; fresh re-adjudication required)")
 else:
-    fail(f"Expected RESERVED or FAILED, got {record4.state}")
+    fail(f"Expected HOLD after an approved exit, got {record4.state}")
 
 info("ESCALATED is absorbing — no time-based auto-exit. τ_K expiry")
 info("in ESCALATED produces UNKNOWN, not resolution (v7.1 §19).\n")

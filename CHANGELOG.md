@@ -10,8 +10,16 @@ Not tagged. 5.7.5 is the single-host pilot line (ROADMAP_90_DAYS, "5.7.5 — Aud
 
 #### Behaviour change (5.7.5)
 - **A call that does not supply `authority`, `context_fit` and `evidence_quality` (or `pressure`, `velocity`, `capacity`) is now refused with `HARD_VETO`**, and the operation reaches `FAILED`. On 5.7.0 the same call was admitted on the `1.0` / `0.5` defaults. The scoring rationale names each missing axis (`"authority missing: cannot adjudicate without authority assessment"`, ...), and `declared_unmeasured` lists them.
-- `docs/agentic-governance-guide.md` and `demo.py` now pass these axes explicitly. The guide shows a call without them (`HARD_VETO`, with its reason) and states the observed decision: `FLAG`, not `PASS` (§1, §6, §10). Its "PASS" was already wrong on 5.7.0, which returned `FLAG` because four axes are never measured.
-- Not fixed, also failing on 5.7.0: guide §4 (`mark_unknown` is not on the client), §5 (budget escalation example does not reach `HOLD`), §7 (`adjudicate_schema` requires `canonical_context`); `demo.py` step "Expected RESERVED or FAILED, got HOLD".
+- `docs/agentic-governance-guide.md` and `demo.py` now pass these axes explicitly. The guide shows a call without them (`HARD_VETO`, with its reason) and states the observed decision: `FLAG`, not `PASS` (§2, §4, §9, §10). Its "PASS" was already wrong on 5.7.0, which returned `FLAG` because four axes are never measured.
+
+### Guide and demo examples run as written
+
+Three guide examples and one demo step already failed on 5.7.0. Each is rewritten and its result written as observed:
+- §4 (lifecycle): confirm, fail and the uncertain outcome were chained on one operation; each now runs on its own. `mark_unknown` is not exposed by `DualKernelCompositionClient`; the example goes through `client.governor.mark_unknown` (an UNKNOWN operation counts its amount as consumed until reconciliation).
+- §7 (budget escalation): the new client registered no agent or budget, so the first payment was vetoed. It now registers them; 40 on 100 gives `FLAG`, then 20 more (60 % ≥ 50 %) escalates to `HOLD`.
+- §8 (schema 1.2): `adjudicate_schema` requires an explicit `canonical_context`; the example supplies one and prints the observed fields (`CAUTION`, `allow_with_alert`).
+- `demo.py`: an approved authorized exit returns the operation to `HOLD` (fresh re-adjudication required), as `authorize_exit` documents; the demo expected `RESERVED` or `FAILED`.
+- `tests/test_guide_examples.py` runs every Python block of the guide in order.
 
 #### Changed
 - `DualKernelCompositionClient.adjudicate`: `authority`, `context_fit` and `evidence_quality` default to `None` (were `1.0`). An axis that is not supplied now reaches the scoring adapter as missing, which is a hard gate there: the request is not admitted. Callers that relied on the `1.0` defaults must now pass measured values.
