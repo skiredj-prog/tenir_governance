@@ -211,6 +211,17 @@ class ScoringKernelAdapter:
         # Compute the extra signals the prototype's ScoringKernel checked
         # but TenirKernel does not natively evaluate. These become gate reasons
         # injected into TenirKernel.adjudicate().
+        # No favorable default for S (decision 2): a missing P, V or C is a hard
+        # gate. The placeholders only keep the arithmetic defined; capacity 0
+        # is the conservative bound, so the S preview cannot read as safe.
+        missing_pvc = [n for n, v in (("pressure", pressure), ("velocity", velocity),
+                                      ("capacity", capacity)) if v is None]
+        for n in missing_pvc:
+            hard_reasons.append(f"{n} missing: cannot score S without it")
+        if missing_pvc:
+            pressure = 0.5 if pressure is None else pressure
+            velocity = 0.5 if velocity is None else velocity
+            capacity = 0.0 if capacity is None else capacity
         s_preview = capacity / (pressure * velocity + 1e-6)
         if s_preview <= self._tau_floor:
             hard_reasons.append(
@@ -249,6 +260,7 @@ class ScoringKernelAdapter:
         # measurements. This prevents a favorable score from being
         # interpreted as evidence of safety on unmeasured dimensions.
         unmeasured = getattr(self, "_unmeasured_axes", [])
+        unmeasured.extend(n for n in missing_pvc if n not in unmeasured)
         for axis in unmeasured:
             soft_reasons.append(f"unmeasured axis: {axis} (neutral default, not favorable)")
 
@@ -375,9 +387,9 @@ class DualKernelGovernor:
     def adjudicate(
         self,
         passage,
-        pressure: float = 0.5,
-        velocity: float = 0.5,
-        capacity: float = 1.0,
+        pressure: float | None = None,
+        velocity: float | None = None,
+        capacity: float | None = None,
         option_space: float | None = None,
         authority: float | None = None,
         context_fit: float | None = None,
@@ -2922,9 +2934,9 @@ class DualKernelGovernor:
         self,
         idempotency_key: str,
         passage=None,
-        pressure: float = 0.5,
-        velocity: float = 0.5,
-        capacity: float = 1.0,
+        pressure: float | None = None,
+        velocity: float | None = None,
+        capacity: float | None = None,
         option_space: float | None = None,
         authority: float | None = None,
         context_fit: float | None = None,

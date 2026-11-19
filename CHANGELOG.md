@@ -16,8 +16,12 @@ Not tagged. 5.7.5 is the single-host pilot line (ROADMAP_90_DAYS, "5.7.5 — Aud
 - Scoring and composed results carry `declared_unmeasured`: the axes the score did not measure (`option_space` when absent, the four axes with no measurement input, and any missing mandatory axis). Their neutral placeholders keep the geometry complete; they are declared, not measured.
 - `CompositionPolicy.flag_conditions` (tuple of non-empty strings, default empty): the conditions under which a FLAG authorizes (RFC-0 §4), declared by the deployment. Every FLAG result carries them in `flag_conditions`, and the composed ledger rationale names them. With the default policy a FLAG states no condition, as in 5.7.0; the runtime invents none and does not enforce them.
 
+- Same rule applied to S: `pressure`, `velocity` and `capacity` of `DualKernelGovernor.adjudicate`, `resolve_hold` and `DualKernelCompositionClient.adjudicate` default to `None` (were `0.5`, `0.5`, `1.0`, which give S ≈ 4, far above τ). A missing one is a hard gate and is listed in `declared_unmeasured`.
+- `Relationship.trust_score` defaults to `None` (was `1.0`). No kernel reads it.
+
 #### Not changed
-- Other defaults that may favor the score (`pressure = velocity = 0.5`, `capacity = 1.0` in `adjudicate`; `confidence = 1.0` in the assessment helpers; `Relationship.trust_score = 1.0`) are not covered by the decision and are unchanged.
+- `confidence = 1.0` in the post-execution value assessment (`assessment/evp.py`, `assessor.py`, `assess_post_execution`) is unchanged: it weighs the expected value of an operation already terminal, not its admission.
+- `docs/agentic-governance-guide.md` and `demo.py` call `client.adjudicate` without `authority`, `context_fit` and `evidence_quality`; with this line they get `HARD_VETO`. On 5.7.0 the guide's "PASS" was already a `FLAG`. Not updated yet.
 
 ### τ_K as a policy-declared fail-safe bound on HOLD (fixes #140)
 

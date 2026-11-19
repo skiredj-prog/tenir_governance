@@ -521,9 +521,9 @@ class DualKernelCompositionClient:
     def adjudicate(
         self,
         passage,
-        pressure: float = 0.5,
-        velocity: float = 0.5,
-        capacity: float = 1.0,
+        pressure: float | None = None,
+        velocity: float | None = None,
+        capacity: float | None = None,
         option_space: float | None = None,
         authority: float | None = None,
         context_fit: float | None = None,
