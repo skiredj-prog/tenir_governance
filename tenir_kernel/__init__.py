@@ -11,4 +11,4 @@ __all__ = [
     "TenirKernel",
 ]
 
-__version__ = "5.7.1"
+__version__ = "5.7.5"

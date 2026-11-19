@@ -119,8 +119,8 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import tomllib
-          assert tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"] == "5.7.1"
-          print("Preflight candidate version 5.7.1 confirmed; no tag/publish")
+          assert tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"] == "5.7.5"
+          print("Preflight candidate version 5.7.5 confirmed; no tag/publish")
           PY
       - name: Install test and build tools
         run: python -m pip install --upgrade pip build twine pip-audit

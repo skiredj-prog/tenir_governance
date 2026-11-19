@@ -13,7 +13,7 @@ abstract: >
   The 5.7.0 source line builds on the published 5.6.1 release, adding
   single-host durability and fail-closed controls. Raft remains restricted
   to development/test loopback nodes while FM-20 is open.
-version: "5.7.1"
+version: "5.7.5"
 license: Apache-2.0
 repository-code: "https://github.com/skiredj-prog/tenir_governance"
 doi: 10.5281/zenodo.21264802
