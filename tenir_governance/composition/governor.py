@@ -3573,10 +3573,12 @@ class DualKernelGovernor:
             }
 
     def expire_escalated(self, idempotency_key: str) -> dict[str, Any]:
-        """Expire an ESCALATED operation when τ_K expires → UNKNOWN.
+        """Expire an ESCALATED operation once τ_K is exhausted → UNKNOWN.
 
-        Per v7.1 §19: a time-based exit from ESCALATED is rejected.
-        Expiry produces UNKNOWN, not resolution.
+        Refuses before the bound, like ``expire_hold``. Per v7.1 §19 the runtime
+        label is UNKNOWN; the operation never reached dispatch, so the record says
+        CONFIRMED_NONEXECUTION. The reservation is left to reconciliation, as before.
+        An early end goes through ``cancel_escalation``.
         """
         try:
             with self._settlement_lock:
@@ -3592,6 +3594,50 @@ class DualKernelGovernor:
             return {
                 "expired": False,
                 "operation_state": current.state.value if current else None,
+                "reason": "Could not acquire durable HOLD settlement lock; operation unchanged.",
+            }
+
+    def cancel_escalation(
+        self, idempotency_key: str, cancelled_by: str, reason: str, decision: str,
+    ) -> dict[str, Any]:
+        """End an escalation before its bound, by an authority → FAILED.
+
+        Releases the reservation first (never dispatched), then records actor,
+        reason and decision. If the release cannot be proven, nothing changes.
+        """
+        try:
+            with self._settlement_lock:
+                with self.registry.settlement_lock(
+                    idempotency_key,
+                    require_persistent=(
+                        self.consensus_backend is not None and self.registry.is_persistent
+                    ),
+                ):
+                    record = self.registry.get(idempotency_key)
+                    if record is None or record.state != OperationState.ESCALATED:
+                        return self.hold_manager.cancel_escalation(
+                            idempotency_key, cancelled_by, reason, decision)
+                    if not all(str(v or "").strip() for v in (cancelled_by, reason, decision)):
+                        return self.hold_manager.cancel_escalation(
+                            idempotency_key, cancelled_by, reason, decision)
+                    release_error = self._release_hold_budget_before_terminal_transition(
+                        idempotency_key, record,
+                    )
+                    if release_error:
+                        return {
+                            "cancelled": False,
+                            "operation_state": record.state.value,
+                            "budget_reconciliation_required": True,
+                            "reason": release_error,
+                        }
+                    return self.hold_manager.cancel_escalation(
+                        idempotency_key, cancelled_by, reason, decision)
+        except Exception:
+            current = self.registry.get(idempotency_key)
+            return {
+                "cancelled": False,
+                "operation_state": current.state.value if current else None,
+                "budget_reconciliation_required": True,
                 "reason": "Could not acquire durable HOLD settlement lock; operation unchanged.",
             }
 

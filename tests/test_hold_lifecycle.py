@@ -460,26 +460,87 @@ class TestHoldLifecycle:
         record = reg.get("op-hold-6")
         assert record.hold_record.exit_reason == "expired"
 
-    def test_hold_manager_expire_escalated(self):
-        """HoldManager.expire_escalated() transitions ESCALATED → UNKNOWN.
-
-        Per v7.1 §19: time-based exit from ESCALATED is rejected.
-        Expiry produces UNKNOWN, not resolution.
-        """
+    def test_hold_manager_expire_escalated_refuses_before_the_bound(self):
+        """expire_escalated is time-driven: before τ_K it refuses, like expire_hold."""
         reg = DurableOperationRegistry()
-        rec = OperationRecord(
+        reg.register(OperationRecord(
             idempotency_key="op-hold-7", passage_id="p1",
             agent_id="alice", action_type="payment",
-        )
-        reg.register(rec)
+        ))
         hm = HoldManager(reg)
         hm.enter_hold("op-hold-7", tau_k_seconds=300)
         hm.escalate_hold("op-hold-7")
         result = hm.expire_escalated("op-hold-7")
+        assert result["expired"] is False
+        assert reg.get("op-hold-7").state == OperationState.ESCALATED
+
+    def test_hold_manager_expire_escalated_refuses_without_a_bound(self):
+        reg = DurableOperationRegistry()
+        reg.register(OperationRecord(
+            idempotency_key="op-hold-7b", passage_id="p1",
+            agent_id="alice", action_type="payment",
+        ))
+        hm = HoldManager(reg)
+        hm.enter_hold("op-hold-7b")
+        hm.escalate_hold("op-hold-7b")
+        assert hm.expire_escalated("op-hold-7b")["expired"] is False
+        assert reg.get("op-hold-7b").state == OperationState.ESCALATED
+
+    def test_hold_manager_expire_escalated(self, monkeypatch):
+        """Past τ_K: ESCALATED → UNKNOWN (v7.1 §19 label), never dispatched.
+
+        The record says CONFIRMED_NONEXECUTION: an escalation has not reached dispatch.
+        """
+        reg = DurableOperationRegistry()
+        reg.register(OperationRecord(
+            idempotency_key="op-hold-7c", passage_id="p1",
+            agent_id="alice", action_type="payment",
+        ))
+        hm = HoldManager(reg)
+        hm.enter_hold("op-hold-7c", tau_k_seconds=300)
+        hm.escalate_hold("op-hold-7c")
+        from tenir_governance.operations import hold as hold_module
+        monkeypatch.setattr(hold_module, "_utc_now_seconds", lambda: time.time() + 301)
+        result = hm.expire_escalated("op-hold-7c")
         assert result["expired"] is True
         assert result["operation_state"] == OperationState.UNKNOWN.value
-        record = reg.get("op-hold-7")
+        assert result["execution_record"] == "CONFIRMED_NONEXECUTION"
+        record = reg.get("op-hold-7c")
         assert record.hold_record.exit_reason == "expired_escalated"
+        assert record.hold_record.execution_record == "CONFIRMED_NONEXECUTION"
+
+    def test_cancel_escalation_needs_actor_reason_and_decision(self):
+        reg = DurableOperationRegistry()
+        reg.register(OperationRecord(
+            idempotency_key="op-hold-8", passage_id="p1",
+            agent_id="alice", action_type="payment",
+        ))
+        hm = HoldManager(reg)
+        hm.enter_hold("op-hold-8", tau_k_seconds=300)
+        hm.escalate_hold("op-hold-8")
+        for actor, reason, decision in (("", "r", "d"), ("a", "", "d"), ("a", "r", " ")):
+            assert hm.cancel_escalation("op-hold-8", actor, reason, decision)["cancelled"] is False
+            assert reg.get("op-hold-8").state == OperationState.ESCALATED
+
+    def test_cancel_escalation_is_terminal_and_records_the_authority(self):
+        reg = DurableOperationRegistry()
+        reg.register(OperationRecord(
+            idempotency_key="op-hold-9", passage_id="p1",
+            agent_id="alice", action_type="payment",
+        ))
+        hm = HoldManager(reg)
+        hm.enter_hold("op-hold-9", tau_k_seconds=300)
+        hm.escalate_hold("op-hold-9")
+        result = hm.cancel_escalation("op-hold-9", "risk-officer", "client withdrew", "DEC-42")
+        assert result["cancelled"] is True
+        assert result["operation_state"] == OperationState.FAILED.value
+        assert result["execution_record"] == "CONFIRMED_NONEXECUTION"
+        hold = reg.get("op-hold-9").hold_record
+        assert hold.exit_reason == "cancelled"
+        assert hold.exit_receipt.authorized_by == "risk-officer"
+        assert hold.exit_receipt.authorization == "DEC-42"
+        assert hold.exit_receipt.reason == "client withdrew"
+        assert hm.expire_escalated("op-hold-9")["expired"] is False
 
 
 # ── Authorized Exit Tests ─────────────────────────────────────────────

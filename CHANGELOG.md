@@ -25,8 +25,13 @@ Behaviour changes only for a deployment whose policy declares a τ_K; with the d
 - The bound counts from HOLD entry. An escalation or an authorized exit does not restart it.
 - The refusal is terminal for that attempt identity; a later effect needs a new attempt. Every advance point checks before any dispatch claim, so the attempt was never dispatched: the result carries `execution_record="CONFIRMED_NONEXECUTION"` and the ledger entry says so. `FAILED` stays the runtime's label.
 
+#### Changed (decision B2/B3, 19 Nov)
+- `expire_escalated` is time-driven like `expire_hold`: it refuses before τ_K is exhausted, and when no τ_K is set. Past the bound it still gives `UNKNOWN` (runtime label, v7.1 §19) and now records `execution_record="CONFIRMED_NONEXECUTION"`: an escalation never reached dispatch. The reservation is still left to reconciliation.
+- New `cancel_escalation(key, cancelled_by, reason, decision)` (HoldManager and governor): an authority ends an escalation early. All three fields are required and kept in an `ExitReceipt`; the reservation is released first; the attempt reaches `FAILED` with `exit_reason="cancelled"` and `CONFIRMED_NONEXECUTION`. Calling `expire_escalated` early is no longer a way to end an escalation.
+- `test_hold_manager_expire_escalated`, which expired an escalation without waiting, is rewritten.
+
 #### Not changed
-- `expire_hold` and `expire_escalated` (timer-driven paths) are unchanged; `expire_escalated` still yields `UNKNOWN` per v7.1 §19.
+- `expire_hold` is unchanged. `expire_escalated` still yields `UNKNOWN` per v7.1 §19, but see "Changed" below.
 - A late denial (`authorize_exit(approve=False)`) still denies.
 - No τ_K default anywhere; a HOLD created without a declared bound carries `tau_k_seconds = 0.0` as before.
 

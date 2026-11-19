@@ -16,6 +16,7 @@ the governor's compensation logic is fixed:
      leaves the reservation in place.
 """
 import threading
+import time
 import json
 import pytest
 from decimal import Decimal
@@ -35,14 +36,14 @@ from tenir_governance.operations import (
 from tenir_kernel.kernel import TenirKernel
 
 
-def _setup_governor(budget_capacity=100.0, provider=None):
+def _setup_governor(budget_capacity=100.0, provider=None, policy=None):
     state = MembraneState()
     state.register_resource(Resource(resource_id="budget", capacity=budget_capacity))
     state.register_agent(Agent(agent_id="alice", authority_score=0.9,
                                trusted_delegates=frozenset({"bob"})))
     scoring = ScoringKernelAdapter(TenirKernel())
     membrane = TransitionMembrane(state)
-    gov = DualKernelGovernor(scoring, membrane, provider=provider)
+    gov = DualKernelGovernor(scoring, membrane, provider=provider, policy=policy)
     return gov, state
 
 
@@ -95,13 +96,19 @@ def test_hold_resolve_then_dispatch_does_not_double_reserve():
     assert budget.consumed == 10.0
 
 
-def test_reconcile_from_escalated_unknown_releases_reservation():
+def test_reconcile_from_escalated_unknown_releases_reservation(monkeypatch):
     """ESCALATED → UNKNOWN → FAILED : release (rien n'a été commité), pas refund."""
+    from tenir_governance.composition.policy import CompositionPolicy
+    from tenir_governance.operations import hold as hold_module
     provider = MockProvider(
         behavior="timeout",
         reconcile_outcome=ProviderOutcome.FAILED,
     )
-    gov, state = _setup_governor(provider=provider, budget_capacity=100.0)
+    # expire_escalated is time-driven: it needs a declared τ_K, exhausted.
+    gov, state = _setup_governor(
+        provider=provider, budget_capacity=100.0,
+        policy=CompositionPolicy(hold_tau_k_seconds=300, hold_tau_k_source="test"),
+    )
     budget = state.resources["budget"]
 
     gov.scoring = _BrokenScoring()
@@ -115,6 +122,8 @@ def test_reconcile_from_escalated_unknown_releases_reservation():
     assert budget.consumed == 0.0
 
     assert gov.escalate_hold(p.idempotency_key, escalated_by="risk-officer")["escalated"]
+    assert not gov.expire_escalated(p.idempotency_key)["expired"]  # before the bound
+    monkeypatch.setattr(hold_module, "_utc_now_seconds", lambda: time.time() + 301)
     assert gov.expire_escalated(p.idempotency_key)["expired"]
     assert gov.registry.get(p.idempotency_key).state == OperationState.UNKNOWN
 
@@ -1573,3 +1582,22 @@ def test_expire_hold_does_not_release_unowned_durable_reservation(tmp_path, monk
     assert release_calls == []
     assert backend.get_state("budget").reserved == Decimal("10.0")
 
+
+
+def test_cancel_escalation_releases_reservation_and_is_terminal():
+    """Decision B2: an early end is an authority's act, not an expiry."""
+    gov, state = _setup_governor(budget_capacity=100.0)
+    budget = state.resources["budget"]
+    gov.scoring = _BrokenScoring()
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(p, pressure=0.2, velocity=0.2, capacity=0.9,
+                   resource_id="budget", amount=10.0)
+    assert gov.escalate_hold(p.idempotency_key, escalated_by="risk-officer")["escalated"]
+    assert budget.reserved == 10.0
+    assert not gov.cancel_escalation(p.idempotency_key, "risk-officer", "", "DEC-1")["cancelled"]
+    assert budget.reserved == 10.0
+    result = gov.cancel_escalation(p.idempotency_key, "risk-officer", "client withdrew", "DEC-1")
+    assert result["cancelled"] is True
+    assert result["execution_record"] == "CONFIRMED_NONEXECUTION"
+    assert gov.registry.get(p.idempotency_key).state == OperationState.FAILED
+    assert budget.reserved == 0.0 and budget.consumed == 0.0
