@@ -1,5 +1,32 @@
 # Changelog
 
+## [5.7.1] — τ_K as a policy-declared fail-safe bound on HOLD (release candidate)
+
+Patch release. Behaviour changes only for a deployment whose policy declares a τ_K; with the default policy, behaviour is the one of 5.7.0. Fixes #140.
+
+### Added
+- `CompositionPolicy.hold_tau_k_seconds` (default `None`) and `CompositionPolicy.hold_tau_k_source`. When the policy declares a τ_K, every HOLD created by `DualKernelGovernor.adjudicate` carries it, with its source. A τ_K without a source is rejected at policy validation. The governor still invents no τ_K when the policy declares none.
+- `HoldRecord.resolved_at`: time at which re-adjudication resolved the HOLD to admission.
+
+### Fixed
+- An exhausted τ_K now refuses alone wherever a held operation could advance, without a timer (RN-001 §2a, RFC-5 §2):
+  - `resolve_hold`: no re-adjudication after the bound, whatever the new evidence;
+  - `authorize_exit(approve=True)`: a late approval is not accepted;
+  - `dispatch` / `dispatch_and_execute`: a HOLD still unanswered past the bound, or a RESERVED operation whose HOLD was resolved after the bound (or at an unrecorded time), is not dispatched.
+  In each case the reservation is released first, the operation reaches `FAILED` with `exit_reason="expired"`, and the ledger records a `HARD_VETO` entry naming the bound, its source and the advance point. If the release cannot be proven, the operation stays open for reconciliation.
+- The bound counts from HOLD entry. An escalation or an authorized exit does not restart it.
+
+### Not changed
+- `expire_hold` and `expire_escalated` (timer-driven paths) are unchanged; `expire_escalated` still yields `UNKNOWN` per v7.1 §19.
+- A late denial (`authorize_exit(approve=False)`) still denies.
+- No τ_K default anywhere; a HOLD created without a declared bound carries `tau_k_seconds = 0.0` as before.
+
+### Verification scope
+- 22 new tests in `tests/test_hold_tau_k_fail_safe.py`; 7 of them fail when the advance-point check is disabled. Time is moved through the governor's clock, not by editing a HOLD record.
+- Single process, in-memory and JSON-file registries. Not exercised: the SQLite WAL backend under concurrent processes, and clock skew between processes.
+
+---
+
 ## [5.7.0] — Single-host safety, durable accounting and deployment evidence
 
 This version targets single-host deployments with explicitly bounded guarantees. Any Harv activity is an independent review, not a certification.
