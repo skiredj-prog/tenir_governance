@@ -291,3 +291,83 @@ def test_persistent_registry_keeps_resolution_time(tmp_path, clock):
     reloaded = DurableOperationRegistry(store).get(p.idempotency_key)
     assert reloaded.hold_record.resolved_at
     assert reloaded.hold_record.tau_k_seconds == TAU
+
+
+# -- review of #142: escalation, structured record, release failure, order ---
+
+def test_escalation_past_bound_fails_closed(clock):
+    gov, budget = _governor(_policy())
+    p = _held(gov)
+    clock(TAU + 1)
+    out = gov.escalate_hold(p.idempotency_key, "ops")
+    assert out["escalated"] is False
+    assert out["tau_k_expired"] is True
+    assert out["operation_state"] == OperationState.FAILED.value
+    assert budget.reserved == 0.0
+
+
+def test_escalation_inside_bound_is_unchanged(clock):
+    gov, budget = _governor(_policy())
+    p = _held(gov)
+    clock(TAU / 2)
+    assert gov.escalate_hold(p.idempotency_key, "ops")["escalated"] is True
+    assert budget.reserved == 10.0
+
+
+def test_exhaustion_is_recorded_in_structured_fields(clock):
+    gov, _ = _governor(_policy())
+    p = _held(gov)
+    clock(TAU + 1)
+    _resolve(gov, p)
+    hold = gov.registry.get(p.idempotency_key).hold_record
+    assert hold.exit_reason == "expired"
+    assert hold.exhaustion_disposition == "fail-closed"
+    assert hold.exhausted_at == "resolve_hold"
+    assert hold.execution_record == "CONFIRMED_NONEXECUTION"
+    assert hold.tau_k_seconds == TAU and hold.tau_k_source == "test SLA"
+    last = [e for e in gov.ledger.entries if e.idempotency_key == p.idempotency_key][-1]
+    assert last.composed_decision == Decision.HARD_VETO.value
+
+
+def test_structured_record_survives_persistence(tmp_path, clock):
+    from tenir_governance.operations import DurableOperationRegistry
+
+    state = MembraneState()
+    state.register_resource(Resource(resource_id="budget", capacity=100.0))
+    state.register_agent(Agent(agent_id="alice", authority_score=0.9))
+    store = str(tmp_path / "ops.json")
+    gov = DualKernelGovernor(ScoringKernelAdapter(TenirKernel()), TransitionMembrane(state),
+                             policy=_policy(), provider=MockProvider(),
+                             registry=DurableOperationRegistry(store))
+    p = _held(gov)
+    clock(TAU + 1)
+    _resolve(gov, p)
+    hold = DurableOperationRegistry(store).get(p.idempotency_key).hold_record
+    assert hold.execution_record == "CONFIRMED_NONEXECUTION"
+    assert hold.exhausted_at == "resolve_hold"
+
+
+def test_release_failure_is_ledgered_and_leaves_attempt_open(clock, monkeypatch):
+    gov, budget = _governor(_policy())
+    p = _held(gov)
+    clock(TAU + 1)
+    monkeypatch.setattr(gov, "_release_hold_budget_before_terminal_transition",
+                        lambda key, record: "simulated release failure")
+    res = _resolve(gov, p)
+    assert res["tau_k_expired"] is True
+    assert res["budget_reconciliation_required"] is True
+    assert res["operation_state"] == OperationState.HOLD.value
+    last = [e for e in gov.ledger.entries if e.idempotency_key == p.idempotency_key][-1]
+    assert last.decision == Decision.HARD_VETO.value
+    assert "reconciliation required" in last.rationale
+
+
+def test_late_resolution_with_wrong_payload_still_closes_the_attempt(clock):
+    gov, budget = _governor(_policy())
+    p = _held(gov)
+    clock(TAU + 1)
+    res = gov.resolve_hold(p.idempotency_key, passage=p, payload={"action_type": "other"},
+                           resource_id="budget", amount=10.0, **GOOD)
+    assert res["tau_k_expired"] is True
+    assert res["operation_state"] == OperationState.FAILED.value
+    assert budget.reserved == 0.0

@@ -208,6 +208,13 @@ class HoldRecord:
         resolved_at: ISO timestamp when re-adjudication resolved the HOLD to
                      admission (empty if never resolved). Lets dispatch tell
                      a resolution inside τ_K from one outside it.
+        exhaustion_disposition: disposition applied when τ_K was exhausted
+                     ("fail-closed"), empty otherwise.
+        exhausted_at: advance point where the exhaustion was applied
+                     (resolve_hold, escalate_hold, authorize_exit, dispatch).
+        execution_record: canonical record of what is known of the effect at
+                     closure ("CONFIRMED_NONEXECUTION" when the attempt was
+                     never dispatched). The runtime label stays FAILED.
     """
     hold_start: str = ""
     tau_k_seconds: float = 0.0
@@ -217,6 +224,9 @@ class HoldRecord:
     exit_reason: str = ""
     exit_receipt: ExitReceipt | None = None
     resolved_at: str = ""
+    exhaustion_disposition: str = ""
+    exhausted_at: str = ""
+    execution_record: str = ""
 
     @property
     def is_escalated(self) -> bool:
@@ -920,11 +930,13 @@ class DurableOperationRegistry:
         changes = dict(hold_record_changes or {})
         allowed_hold_fields = {
             "escalated_at", "escalated_by", "exit_reason", "exit_receipt", "resolved_at",
+            "exhaustion_disposition", "exhausted_at", "execution_record",
         }
         unknown_hold_fields = set(changes) - allowed_hold_fields
         if unknown_hold_fields:
             raise ValueError(f"unsupported hold record field(s): {sorted(unknown_hold_fields)}")
-        for name in ("escalated_at", "escalated_by", "exit_reason", "resolved_at"):
+        for name in ("escalated_at", "escalated_by", "exit_reason", "resolved_at",
+                     "exhaustion_disposition", "exhausted_at", "execution_record"):
             if name in changes and not isinstance(changes[name], str):
                 raise TypeError(f"{name} must be a string")
         if "exit_receipt" in changes and changes["exit_receipt"] is not None and not isinstance(changes["exit_receipt"], ExitReceipt):

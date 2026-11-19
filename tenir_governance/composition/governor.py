@@ -3026,6 +3026,13 @@ class DualKernelGovernor:
                             "reason": "Durable HOLD re-adjudication requires a persistent operation registry.",
                         }
 
+                    # A policy-declared τ_K refuses alone: past it, no fresh
+                    # evidence can resolve the HOLD (RN-001 §2a). Checked before
+                    # identity: the attempt is closed at its bound, whoever calls.
+                    if self._tau_k_exhausted(current):
+                        return self._fail_closed_on_tau_k(
+                            idempotency_key, current, "resolve_hold",
+                        )
                     # Bind HOLD resolution to the exact durable operation.
                     # Recheck under the lock so a stale caller cannot
                     # substitute identity while another worker settles HOLD.
@@ -3065,12 +3072,6 @@ class DualKernelGovernor:
                             "operation_state": current.state.value,
                             "reason": reason,
                         }
-                    # A policy-declared τ_K refuses alone: past it, no fresh
-                    # evidence can resolve the HOLD (RN-001 §2a).
-                    if self._tau_k_exhausted(current):
-                        return self._fail_closed_on_tau_k(
-                            idempotency_key, current, "resolve_hold",
-                        )
                     # First check avoids needless kernel evaluation under a
                     # known quarantine. Re-check under the shared gate at the
                     # actual HOLD -> RESERVED transition: scoring and membrane
@@ -3429,6 +3430,12 @@ class DualKernelGovernor:
                         self.consensus_backend is not None and self.registry.is_persistent
                     ),
                 ):
+                    record = self.registry.get(idempotency_key)
+                    if (record is not None and record.state == OperationState.HOLD
+                            and self._tau_k_exhausted(record)):
+                        return self._fail_closed_on_tau_k(
+                            idempotency_key, record, "escalate_hold",
+                        )
                     return self.hold_manager.escalate_hold(idempotency_key, escalated_by)
         except Exception:
             current = self.registry.get(idempotency_key)
@@ -3633,21 +3640,37 @@ class DualKernelGovernor:
         base = {
             "hold_resolved": False,
             "exited": False,
+            "escalated": False,
             "dispatched": False,
             "tau_k_expired": True,
             "advance_point": point,
         }
         if release_error:
+            reason = (f"τ_K exhausted ({bound}) at {point}: no effect; attempt not closed, "
+                      "budget reconciliation required; " + release_error)
+            self.ledger.append(
+                kernel="hold_lifecycle",
+                decision=Decision.HARD_VETO.value,
+                rationale=reason,
+                passage_id=record.passage_id,
+                idempotency_key=idempotency_key,
+                composed_decision=Decision.HARD_VETO.value,
+            )
             return {
                 **base,
                 "operation_state": record.state.value,
                 "budget_reconciliation_required": True,
-                "reason": f"τ_K exhausted ({bound}) at {point}; " + release_error,
+                "reason": reason,
             }
         success, _prev = self.registry.transition_to(
             idempotency_key,
             OperationState.FAILED,
-            hold_record_changes={"exit_reason": "expired"},
+            hold_record_changes={
+                "exit_reason": "expired",
+                "exhaustion_disposition": "fail-closed",
+                "exhausted_at": point,
+                "execution_record": "CONFIRMED_NONEXECUTION",
+            },
         )
         current = self.registry.get(idempotency_key)
         # Every advance point checks before any DISPATCHING claim: the attempt
@@ -3665,6 +3688,7 @@ class DualKernelGovernor:
             rationale=reason,
             passage_id=record.passage_id,
             idempotency_key=idempotency_key,
+            composed_decision=Decision.HARD_VETO.value,
         )
         return {
             **base,
