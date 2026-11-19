@@ -118,21 +118,28 @@ assert client.confirm(p_a.idempotency_key) is True
 assert client.governor.registry.get(p_a.idempotency_key).state.value == "confirmed"
 assert budget.consumed == consumed0 + 25.0
 
-# 3b : Échouer (→ FAILED — l'effet n'a pas eu lieu, budget libéré)
+# 3b : Échouer (→ FAILED — l'effet n'a pas eu lieu, budget libéré).
+# Après un dispatch, il faut la preuve de non-exécution (fournisseur ou
+# réconciliation). Sans elle, fail() refuse : l'opération passe en UNKNOWN
+# et garde son budget.
 p_b = admit_and_dispatch(10.0)
-assert client.fail(p_b.idempotency_key, resource_id="budget", amount=10.0) is True
+assert client.fail(p_b.idempotency_key, resource_id="budget", amount=10.0,
+                   authoritative_non_execution=True) is True
 assert client.governor.registry.get(p_b.idempotency_key).state.value == "failed"
 assert budget.consumed == consumed0 + 25.0 and budget.reserved == reserved0
 
+p_b2 = admit_and_dispatch(10.0)
+assert client.fail(p_b2.idempotency_key, resource_id="budget", amount=10.0) is False
+assert client.governor.registry.get(p_b2.idempotency_key).state.value == "unknown"
+consumed0 += 10.0  # retenu jusqu'à la réconciliation
+
 # 3c : Incertain (→ UNKNOWN — timeout, l'effet a pu avoir lieu)
-# Le client n'expose pas mark_unknown : passer par le governor.
 p_c = admit_and_dispatch(5.0)
-assert client.governor.mark_unknown(p_c.idempotency_key) is True
+assert client.mark_unknown(p_c.idempotency_key) is True
 assert client.governor.registry.get(p_c.idempotency_key).state.value == "unknown"
 assert budget.consumed == consumed0 + 30.0  # compté comme consommé jusqu'à la réconciliation
 ```
 
-Le client n'expose pas `mark_unknown` : le guide passe par `client.governor`.
 
 ---
 
@@ -369,7 +376,8 @@ assert "Duplicate" in r2["composed_rationale"]
 | `client.adjudicate_schema(passage, **kwargs)` | Adjudique — retourne le dict conforme schema 1.2 |
 | `client.dispatch(key, resource_id, amount)` | Claim atomique DISPATCHING |
 | `client.confirm(key)` | DISPATCHING → CONFIRMED |
-| `client.fail(key, resource_id, amount)` | → FAILED + libère/refund le budget |
+| `client.fail(key, resource_id, amount, authoritative_non_execution=False)` | → FAILED + libère/refund le budget. Après dispatch, exige la preuve de non-exécution ; sans elle → UNKNOWN, budget retenu, renvoie False |
+| `client.mark_unknown(key)` | DISPATCHING → UNKNOWN, budget retenu jusqu'à réconciliation |
 | `client.mark_unknown(key)` | DISPATCHING → UNKNOWN |
 | `client.resume_existing(key)` | Reprend une opération existante |
 | `client.recover()` | Liste les opérations non résolues |

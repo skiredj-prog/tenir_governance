@@ -12,10 +12,19 @@ Not tagged. 5.7.5 is the single-host pilot line (ROADMAP_90_DAYS, "5.7.5 — Aud
 - **A call that does not supply `authority`, `context_fit` and `evidence_quality` (or `pressure`, `velocity`, `capacity`) is now refused with `HARD_VETO`**, and the operation reaches `FAILED`. On 5.7.0 the same call was admitted on the `1.0` / `0.5` defaults. The scoring rationale names each missing axis (`"authority missing: cannot adjudicate without authority assessment"`, ...), and `declared_unmeasured` lists them.
 - `docs/agentic-governance-guide.md` and `demo.py` now pass these axes explicitly. The guide shows a call without them (`HARD_VETO`, with its reason) and states the observed decision: `FLAG`, not `PASS` (§2, §4, §9, §10). Its "PASS" was already wrong on 5.7.0, which returned `FLAG` because four axes are never measured.
 
+### A failure after dispatch needs proof of non-execution (decision B3)
+
+#### Fixed
+- Without a consensus backend, `fail()` on a dispatched operation (`DISPATCHING`) moved it to `FAILED` and gave its budget back with no proof that the effect did not occur (fail-open). It now requires `authoritative_non_execution=True` once the operation is `DISPATCHING` or `UNKNOWN`. Without it, a `DISPATCHING` operation moves to `UNKNOWN` (reconciliation), keeps its budget, and `fail()` returns `False`; an `UNKNOWN` one is left unchanged. The backend path already refused. `tests/test_fail_after_dispatch_needs_proof.py` fails on the previous code.
+- **Behaviour change**: a caller that called `fail()` after dispatch, without proof, now gets `False` and an `UNKNOWN` operation. Documented in the guide (§4, API table) before this release as "→ FAILED + libère le budget"; both are updated. `tests/test_fault_injection.py::test_reconciliation_finds_no_effect` now passes the proof its reconciliation established.
+
+#### Added
+- `DualKernelCompositionClient.fail(..., authoritative_non_execution=False)` passes the flag through, and `DualKernelCompositionClient.mark_unknown(key)` exposes the governor's method (DISPATCHING → UNKNOWN, budget kept).
+
 ### Guide and demo examples run as written
 
 Three guide examples and one demo step already failed on 5.7.0. Each is rewritten and its result written as observed:
-- §4 (lifecycle): confirm, fail and the uncertain outcome were chained on one operation; each now runs on its own. `mark_unknown` is not exposed by `DualKernelCompositionClient`; the example goes through `client.governor.mark_unknown` (an UNKNOWN operation counts its amount as consumed until reconciliation).
+- §4 (lifecycle): confirm, fail and the uncertain outcome were chained on one operation; each now runs on its own. An UNKNOWN operation counts its amount as consumed until reconciliation.
 - §7 (budget escalation): the new client registered no agent or budget, so the first payment was vetoed. It now registers them; 40 on 100 gives `FLAG`, then 20 more (60 % ≥ 50 %) escalates to `HOLD`.
 - §8 (schema 1.2): `adjudicate_schema` requires an explicit `canonical_context`; the example supplies one and prints the observed fields (`CAUTION`, `allow_with_alert`).
 - `demo.py`: an approved authorized exit returns the operation to `HOLD` (fresh re-adjudication required), as `authorize_exit` documents; the demo expected `RESERVED` or `FAILED`.

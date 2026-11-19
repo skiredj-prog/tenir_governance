@@ -2828,6 +2828,16 @@ class DualKernelGovernor:
                 idempotency_key, OperationState.FAILED,
             )
             return success
+        # Decision B3: once dispatch was possible, only proof of non-execution
+        # may close the attempt as FAILED and give its budget back. Without it,
+        # a DISPATCHING operation becomes UNKNOWN (reconciliation) and keeps
+        # its budget; an UNKNOWN one is left as it is.
+        if record.state in (OperationState.DISPATCHING, OperationState.UNKNOWN) \
+                and not authoritative_non_execution:
+            if record.state == OperationState.DISPATCHING:
+                self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+            return False
+
         if recorded_resource and recorded_amount > 0 and owns_budget:
             resource = self.membrane.state.resources.get(recorded_resource)
             if resource is None:
@@ -2875,7 +2885,7 @@ class DualKernelGovernor:
         return success
 
     def mark_unknown(self, idempotency_key: str) -> bool:
-        """Transition DISPATCHING → UNKNOWN. Outcome is uncertain."""
+        """Transition DISPATCHING → UNKNOWN. Outcome is uncertain; the budget is kept."""
         success, _prev = self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
         return success
 

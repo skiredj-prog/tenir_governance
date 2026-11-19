@@ -258,8 +258,10 @@ class TestCrashAfterExternalAcceptance:
         gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0)
         assert state.resources["budget"].consumed == 25.0
 
-        # Reconciliation finds no effect → FAILED
-        assert gov.fail(p.idempotency_key, resource_id="budget", amount=25.0)
+        # Reconciliation finds no effect → FAILED. The finding is the proof of
+        # non-execution that a dispatched operation needs (decision B3).
+        assert gov.fail(p.idempotency_key, resource_id="budget", amount=25.0,
+                        authoritative_non_execution=True)
         record = gov.registry.get(p.idempotency_key)
         assert record.state == OperationState.FAILED
 
