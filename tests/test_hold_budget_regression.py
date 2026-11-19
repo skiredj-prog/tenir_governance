@@ -47,6 +47,13 @@ def _setup_governor(budget_capacity=100.0, provider=None, policy=None):
     return gov, state
 
 
+def _attested(key):
+    from tenir_governance.operations.registry import NonExecutionAttestation
+    return NonExecutionAttestation(idempotency_key=key, source="provider-reconciliation",
+                                   attestation="test: no effect observed for this attempt",
+                                   attested_at="2026-11-19T06:40:00+00:00")
+
+
 class _BrokenScoring:
     """Scoring kernel that always raises → fail-closed HOLD."""
 
@@ -1005,7 +1012,7 @@ def test_concurrent_confirm_and_proven_fail_settle_budget_consistently(tmp_path,
     def fail_worker():
         start.wait(timeout=5)
         results["fail"] = gov.fail(
-            key, "budget", 10.0, authoritative_non_execution=True
+            key, "budget", 10.0, non_execution_attested=_attested(key)
         )
 
     confirm_thread = threading.Thread(target=confirm_worker)
@@ -1088,7 +1095,7 @@ def test_cross_instance_confirm_and_proven_fail_cannot_diverge_durable_budget(tm
 
     def fail_worker():
         results["fail"] = gov2.fail(
-            key, "budget", 10.0, authoritative_non_execution=True,
+            key, "budget", 10.0, non_execution_attested=_attested(key),
         )
 
     confirm_thread = threading.Thread(target=confirm_worker)
@@ -1152,7 +1159,7 @@ def test_subprocess_confirm_and_proven_fail_serialize_durable_budget(tmp_path):
                 value = gov.confirm(key)
             else:
                 value = gov.fail(
-                    key, "budget", 10.0, authoritative_non_execution=True,
+                    key, "budget", 10.0, non_execution_attested=_attested(key),
                 )
             results.put((kind, value, None))
         except BaseException as exc:

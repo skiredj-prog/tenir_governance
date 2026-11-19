@@ -582,16 +582,17 @@ class DualKernelCompositionClient:
         return self._governor.confirm(idempotency_key)
 
     def fail(self, idempotency_key: str, resource_id: str | None = None,
-             amount: float = 0.0, *, authoritative_non_execution: bool = False) -> bool:
+             amount: float = 0.0, *, non_execution_attested=None) -> bool:
         """Mark the operation as failed and release/refund budget.
 
         Once the operation was dispatched (DISPATCHING or UNKNOWN), this needs
-        ``authoritative_non_execution=True``: the provider or reconciliation
-        confirms no effect occurred. Without it, a DISPATCHING operation moves
-        to UNKNOWN, keeps its budget, and False is returned.
+        ``non_execution_attested``: a ``NonExecutionAttestation`` (source,
+        attestation, time, effect count 0) bound to this operation, persisted
+        before any budget change. Without it, a DISPATCHING operation moves to
+        UNKNOWN, keeps its budget, and False is returned.
         """
         return self._governor.fail(idempotency_key, resource_id, amount,
-                                   authoritative_non_execution=authoritative_non_execution)
+                                   non_execution_attested=non_execution_attested)
 
     def mark_unknown(self, idempotency_key: str) -> bool:
         """DISPATCHING → UNKNOWN: the outcome is uncertain, the budget is kept

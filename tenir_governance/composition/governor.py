@@ -58,6 +58,7 @@ from ..operations.registry import (
     OperationState,
     HoldRecord,
     ExitReceipt,
+    NonExecutionAttestation,
 )
 from ..operations.hold import HoldManager
 from ..operations.payload_binding import canonical_payload_hash
@@ -2219,7 +2220,14 @@ class DualKernelGovernor:
             try:
                 failed = self.fail(
                     idempotency_key, resource_id, amount,
-                    authoritative_non_execution=True,
+                    non_execution_attested=NonExecutionAttestation(
+                        idempotency_key=idempotency_key,
+                        source="provider",
+                        attestation=(f"provider outcome FAILED; reference="
+                                     f"{prov_result.provider_reference or '-'}; "
+                                     f"error={prov_result.error or '-'}"),
+                        attested_at=_utc_now_iso(),
+                    ),
                 )
             finally:
                 with self._active_dispatches_lock:
@@ -2468,6 +2476,28 @@ class DualKernelGovernor:
                         "provider_reference": recon.provider_reference,
                     }
                 elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
+                    # T7: persist the proof of non-execution before any settlement.
+                    try:
+                        attested = self.registry.record_non_execution_attested(
+                            idempotency_key,
+                            NonExecutionAttestation(
+                                idempotency_key=idempotency_key,
+                                source="provider-reconciliation",
+                                attestation=(f"reconciliation outcome FAILED; reference="
+                                             f"{recon.provider_reference or '-'}"),
+                                attested_at=_utc_now_iso(),
+                            ),
+                        )
+                    except (ValueError, RuntimeError):
+                        attested = False
+                    if not attested:
+                        return {
+                            "reconciled": False,
+                            "idempotency_key": idempotency_key,
+                            "operation_state": current.state.value,
+                            "reason": "Non-execution attestation could not be persisted; budget unchanged.",
+                        }
+                    record = self.registry.get(idempotency_key) or record
                     committed = record.budget_committed
                     if self.consensus_backend is not None and record.amount > 0:
                         # The backend is authoritative when a crash occurred between
@@ -2776,8 +2806,24 @@ class DualKernelGovernor:
         success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
         return success
 
-    def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, authoritative_non_execution: bool = False) -> bool:
-        """Serialize failure compensation with confirmation for this governor instance."""
+    def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *,
+             non_execution_attested=None, authoritative_non_execution: bool = False) -> bool:
+        """Serialize failure compensation with confirmation for this governor instance.
+
+        Once the attempt was dispatched (DISPATCHING or UNKNOWN), only a
+        ``NonExecutionAttestation`` (or its dict form) closes it as FAILED and
+        gives the budget back; it is persisted on the operation first. Without
+        it, DISPATCHING moves to UNKNOWN, the budget is kept, and False is
+        returned. ``authoritative_non_execution`` (a bare boolean) is no longer
+        accepted as proof and is kept only so that older callers do not break.
+        """
+        if authoritative_non_execution and non_execution_attested is None:
+            import warnings
+            warnings.warn(
+                "fail(authoritative_non_execution=True) is not proof of non-execution; "
+                "pass non_execution_attested=NonExecutionAttestation(...)",
+                DeprecationWarning, stacklevel=2,
+            )
         with self._settlement_lock:
             try:
                 with self.registry.settlement_lock(
@@ -2786,21 +2832,40 @@ class DualKernelGovernor:
                 ):
                     return self._fail_under_settlement_lock(
                         idempotency_key, resource_id, amount,
-                        authoritative_non_execution=authoritative_non_execution,
+                        non_execution_attested=non_execution_attested,
                     )
             except Exception:
                 # Do not mutate budget if cross-process coordination is uncertain.
                 return False
 
-    def _fail_under_settlement_lock(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, authoritative_non_execution: bool = False) -> bool:
+    def _fail_under_settlement_lock(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, non_execution_attested=None) -> bool:
         """Transition to FAILED and mutate only this operation's budget.
 
-        authoritative_non_execution must be true only when the provider or
-        reconciliation protocol explicitly confirms that no external effect occurred.
+        After dispatch, non_execution_attested is required: the provider or
+        reconciliation protocol confirms that no external effect occurred, and
+        the attestation is persisted on the operation before any budget change.
         """
         record = self.registry.get(idempotency_key)
         if record is None:
             return False
+        authoritative_non_execution = False
+        if non_execution_attested is not None:
+            att = non_execution_attested
+            if isinstance(att, dict):
+                att = NonExecutionAttestation.from_dict(att)
+            if not isinstance(att, NonExecutionAttestation):
+                return False
+            if record.state not in (OperationState.DISPATCHING, OperationState.UNKNOWN):
+                return False  # an attestation is for a dispatched attempt only
+            try:
+                authoritative_non_execution = self.registry.record_non_execution_attested(
+                    idempotency_key, att,
+                )
+            except (ValueError, RuntimeError):
+                return False
+            if not authoritative_non_execution:
+                return False
+            record = self.registry.get(idempotency_key)
         recorded_resource = record.resource_id or None
         if resource_id is None:
             resource_id = recorded_resource

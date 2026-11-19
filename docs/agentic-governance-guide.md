@@ -119,12 +119,21 @@ assert client.governor.registry.get(p_a.idempotency_key).state.value == "confirm
 assert budget.consumed == consumed0 + 25.0
 
 # 3b : Échouer (→ FAILED — l'effet n'a pas eu lieu, budget libéré).
-# Après un dispatch, il faut la preuve de non-exécution (fournisseur ou
+# Après un dispatch, il faut une attestation de non-exécution (fournisseur ou
 # réconciliation). Sans elle, fail() refuse : l'opération passe en UNKNOWN
 # et garde son budget.
 p_b = admit_and_dispatch(10.0)
+from tenir_governance.operations import NonExecutionAttestation
+proof = NonExecutionAttestation(
+    idempotency_key=p_b.idempotency_key,
+    source="provider",                       # qui atteste
+    attestation="charge ch_123: never captured",  # la preuve elle-même
+    attested_at="2026-11-19T06:40:00+00:00",
+)
 assert client.fail(p_b.idempotency_key, resource_id="budget", amount=10.0,
-                   authoritative_non_execution=True) is True
+                   non_execution_attested=proof) is True
+# La preuve est persistée avec l'opération (le runtime ne vérifie pas la signature)
+assert client.governor.registry.get(p_b.idempotency_key).non_execution_attested["source"] == "provider"
 assert client.governor.registry.get(p_b.idempotency_key).state.value == "failed"
 assert budget.consumed == consumed0 + 25.0 and budget.reserved == reserved0
 
@@ -376,7 +385,7 @@ assert "Duplicate" in r2["composed_rationale"]
 | `client.adjudicate_schema(passage, **kwargs)` | Adjudique — retourne le dict conforme schema 1.2 |
 | `client.dispatch(key, resource_id, amount)` | Claim atomique DISPATCHING |
 | `client.confirm(key)` | DISPATCHING → CONFIRMED |
-| `client.fail(key, resource_id, amount, authoritative_non_execution=False)` | → FAILED + libère/refund le budget. Après dispatch, exige la preuve de non-exécution ; sans elle → UNKNOWN, budget retenu, renvoie False |
+| `client.fail(key, resource_id, amount, non_execution_attested=None)` | → FAILED + libère/refund le budget. Après dispatch, exige une `NonExecutionAttestation` (source, attestation, horodatage), persistée avec l'opération ; sans elle → UNKNOWN, budget retenu, renvoie False |
 | `client.mark_unknown(key)` | DISPATCHING → UNKNOWN, budget retenu jusqu'à réconciliation |
 | `client.mark_unknown(key)` | DISPATCHING → UNKNOWN |
 | `client.resume_existing(key)` | Reprend une opération existante |

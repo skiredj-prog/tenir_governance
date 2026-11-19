@@ -22,14 +22,26 @@ Not tagged. 5.7.5 is the single-host pilot line (ROADMAP_90_DAYS, "5.7.5 — Aud
 #### Behaviour change
 - Inputs that used to produce a fail-closed `HOLD` with `scoring_decision = None` now produce `scoring_decision = HOLD` (or `HARD_VETO` when a conclusive veto applies) with the reason. Not documented in the guide before; no example changes.
 
+### Proof of non-execution is a persisted attestation, not a boolean (RFC-4 v0.3 §2.3, T7)
+
+#### Changed
+- Proof that a dispatched effect did not occur is now a `NonExecutionAttestation` (`tenir_governance.operations`): `idempotency_key`, `source`, `attestation`, `attested_at` (ISO 8601), `observed_effect_count = 0`, `verified_by_runtime = False`. It is validated, then persisted on the operation record as `OperationRecord.non_execution_attested` before the record leaves `DISPATCHING` or `UNKNOWN`. It survives a restart with `store_path`. A recorded attestation is never replaced; a replay for the same attempt keeps the first one.
+- `governor.fail(..., non_execution_attested=...)` takes the attestation (object or dict). It is refused when malformed, when it names another attempt, or when the record is not `DISPATCHING` / `UNKNOWN`.
+- The provider path (`dispatch_and_execute`, provider outcome `FAILED`) records an attestation with source `provider`; `reconcile_unknown` records one with source `provider-reconciliation` before `FAILED`, and leaves the operation and budget unchanged if it cannot be persisted.
+
+#### Behaviour change (5.7.5)
+- **`authoritative_non_execution=True` is no longer proof.** Passed alone to `governor.fail`, it emits a `DeprecationWarning`; after dispatch the call returns `False` and a `DISPATCHING` operation moves to `UNKNOWN`, budget kept (the B3 rule below, with the attestation as the only proof).
+- `DualKernelCompositionClient.fail(..., non_execution_attested=None)` replaces the `authoritative_non_execution` keyword added earlier on this branch (never released).
+- Guide §4 (step 3b) and the API table show the attestation.
+
 ### A failure after dispatch needs proof of non-execution (decision B3)
 
 #### Fixed
-- Without a consensus backend, `fail()` on a dispatched operation (`DISPATCHING`) moved it to `FAILED` and gave its budget back with no proof that the effect did not occur (fail-open). It now requires `authoritative_non_execution=True` once the operation is `DISPATCHING` or `UNKNOWN`. Without it, a `DISPATCHING` operation moves to `UNKNOWN` (reconciliation), keeps its budget, and `fail()` returns `False`; an `UNKNOWN` one is left unchanged. The backend path already refused. `tests/test_fail_after_dispatch_needs_proof.py` fails on the previous code.
+- Without a consensus backend, `fail()` on a dispatched operation (`DISPATCHING`) moved it to `FAILED` and gave its budget back with no proof that the effect did not occur (fail-open). It now requires proof of non-execution (since the section above, a persisted attestation) once the operation is `DISPATCHING` or `UNKNOWN`. Without it, a `DISPATCHING` operation moves to `UNKNOWN` (reconciliation), keeps its budget, and `fail()` returns `False`; an `UNKNOWN` one is left unchanged. The backend path already refused. `tests/test_fail_after_dispatch_needs_proof.py` fails on the previous code.
 - **Behaviour change**: a caller that called `fail()` after dispatch, without proof, now gets `False` and an `UNKNOWN` operation. Documented in the guide (§4, API table) before this release as "→ FAILED + libère le budget"; both are updated. `tests/test_fault_injection.py::test_reconciliation_finds_no_effect` now passes the proof its reconciliation established.
 
 #### Added
-- `DualKernelCompositionClient.fail(..., authoritative_non_execution=False)` passes the flag through, and `DualKernelCompositionClient.mark_unknown(key)` exposes the governor's method (DISPATCHING → UNKNOWN, budget kept).
+- `DualKernelCompositionClient.fail` passes the proof through (now `non_execution_attested`), and `DualKernelCompositionClient.mark_unknown(key)` exposes the governor's method (DISPATCHING → UNKNOWN, budget kept).
 
 ### Guide and demo examples run as written
 
