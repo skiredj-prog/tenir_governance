@@ -39,6 +39,7 @@ over TENIR doctrine.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import math
@@ -61,6 +62,14 @@ from ..operations.registry import (
 from ..operations.hold import HoldManager
 from ..operations.payload_binding import canonical_payload_hash
 from ..assessment.assessor import PostExecutionAssessor, AssessmentReport
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _utc_now_epoch() -> float:
+    return datetime.now(timezone.utc).timestamp()
 
 
 def _has_hypothesis_violated_signal(result) -> bool:
@@ -737,8 +746,16 @@ class DualKernelGovernor:
                 elif composed_decision == Decision.HOLD.value:
                     # Enter through HoldManager so the lifecycle record is initialized.
                     # Do not invent a τ_K here: this generic Governor has no
-                    # organization-owned SLA. Scenario callers pass their bound explicitly.
-                    hold_entry = self.hold_manager.enter_hold(idem_key)
+                    # organization-owned SLA. The bound reaches the HOLD only
+                    # when the versioned policy declares it (RN-001 §2a).
+                    if self.policy.hold_tau_k_seconds is not None:
+                        hold_entry = self.hold_manager.enter_hold(
+                            idem_key,
+                            tau_k_seconds=float(self.policy.hold_tau_k_seconds),
+                            tau_k_source=self.policy.hold_tau_k_source,
+                        )
+                    else:
+                        hold_entry = self.hold_manager.enter_hold(idem_key)
                     if not hold_entry["entered"]:
                         composed_rationale = (
                             "HOLD decision could not initialize the lifecycle record: "
@@ -1560,6 +1577,11 @@ class DualKernelGovernor:
         # authorization while an already-active quarantine blocks dispatch.
         actual_payload = metadata if payload is None else payload
         record = self.registry.get(idempotency_key)
+        if record is not None and self._tau_k_exhausted(record):
+            tau_k_refusal = self._fail_closed_on_tau_k_locked(idempotency_key, "dispatch")
+            if tau_k_refusal is not None:
+                return tau_k_refusal
+            record = self.registry.get(idempotency_key)
         if record is not None and record.commit_gate_required and record.state == OperationState.RESERVED:
             from ..experimental.ep02_commit_authorization import canonical_payload_bytes
 
@@ -3043,6 +3065,12 @@ class DualKernelGovernor:
                             "operation_state": current.state.value,
                             "reason": reason,
                         }
+                    # A policy-declared τ_K refuses alone: past it, no fresh
+                    # evidence can resolve the HOLD (RN-001 §2a).
+                    if self._tau_k_exhausted(current):
+                        return self._fail_closed_on_tau_k(
+                            idempotency_key, current, "resolve_hold",
+                        )
                     # First check avoids needless kernel evaluation under a
                     # known quarantine. Re-check under the shared gate at the
                     # actual HOLD -> RESERVED transition: scoring and membrane
@@ -3196,7 +3224,10 @@ class DualKernelGovernor:
                     else:
                         success, _prev = self.registry.transition_to(
                             idem_key, OperationState.RESERVED,
-                            hold_record_changes={"exit_reason": "resolved"},
+                            hold_record_changes={
+                                "exit_reason": "resolved",
+                                "resolved_at": _utc_now_iso(),
+                            },
                         )
                         if success:
                             hold_resolved = True
@@ -3456,6 +3487,10 @@ class DualKernelGovernor:
                             "budget_reconciliation_required": True,
                             "reason": "Durable budget settlement requires a persistent operation registry.",
                         }
+                    if approve and self._tau_k_exhausted(record):
+                        return self._fail_closed_on_tau_k(
+                            idempotency_key, record, "authorize_exit",
+                        )
                     if not approve:
                         release_error = self._release_hold_budget_before_terminal_transition(
                             idempotency_key, record,
@@ -3551,6 +3586,115 @@ class DualKernelGovernor:
                 "expired": False,
                 "operation_state": current.state.value if current else None,
                 "reason": "Could not acquire durable HOLD settlement lock; operation unchanged.",
+            }
+
+    # -- τ_K as a fail-safe bound (RN-001 §2a) ------------------------------
+    def _tau_k_exhausted(self, record: OperationRecord) -> bool:
+        """True when a held operation's τ_K is exhausted at an advance point.
+
+        HOLD / ESCALATED: the bound is exhausted now. RESERVED after a HOLD:
+        the resolution came after the bound, or its time is unknown. A record
+        without τ_K (none declared) is never exhausted: no bound is invented.
+        """
+        hold = record.hold_record
+        if hold is None or not hold.tau_k_seconds or hold.tau_k_seconds <= 0:
+            return False
+        try:
+            deadline = datetime.fromisoformat(hold.hold_start).timestamp() + float(hold.tau_k_seconds)
+        except (TypeError, ValueError):
+            # An unreadable HOLD start cannot show the bound was respected.
+            return record.state in (
+                OperationState.HOLD, OperationState.ESCALATED, OperationState.RESERVED,
+            )
+        if record.state in (OperationState.HOLD, OperationState.ESCALATED):
+            return _utc_now_epoch() >= deadline
+        if record.state == OperationState.RESERVED and hold.exit_reason == "resolved":
+            if not hold.resolved_at:
+                return True
+            try:
+                return datetime.fromisoformat(hold.resolved_at).timestamp() >= deadline
+            except (TypeError, ValueError):
+                return True
+        return False
+
+    def _fail_closed_on_tau_k(
+        self, idempotency_key: str, record: OperationRecord, point: str,
+    ) -> dict[str, Any]:
+        """Apply the fail-closed exhaustion policy. Caller holds the settlement lock.
+
+        The reservation is released first; the operation reaches FAILED only
+        once that is proven, otherwise it stays open for reconciliation.
+        """
+        hold = record.hold_record
+        bound = f"{hold.tau_k_seconds:g} s, source {hold.tau_k_source or 'unstated'}" if hold else "unknown"
+        release_error = self._release_hold_budget_before_terminal_transition(
+            idempotency_key, record,
+        )
+        base = {
+            "hold_resolved": False,
+            "exited": False,
+            "dispatched": False,
+            "tau_k_expired": True,
+            "advance_point": point,
+        }
+        if release_error:
+            return {
+                **base,
+                "operation_state": record.state.value,
+                "budget_reconciliation_required": True,
+                "reason": f"τ_K exhausted ({bound}) at {point}; " + release_error,
+            }
+        success, _prev = self.registry.transition_to(
+            idempotency_key,
+            OperationState.FAILED,
+            hold_record_changes={"exit_reason": "expired"},
+        )
+        current = self.registry.get(idempotency_key)
+        reason = (
+            f"τ_K exhausted ({bound}) at {point}: FAIL-CLOSED, no effect, "
+            "reservation released (not a resolution)."
+            if success else f"τ_K exhausted ({bound}) at {point}; transition to FAILED failed."
+        )
+        self.ledger.append(
+            kernel="hold_lifecycle",
+            decision=Decision.HARD_VETO.value,
+            rationale=reason,
+            passage_id=record.passage_id,
+            idempotency_key=idempotency_key,
+        )
+        return {
+            **base,
+            "operation_state": current.state.value if current else None,
+            "composed_decision": Decision.HARD_VETO.value,
+            "reason": reason,
+        }
+
+    def _fail_closed_on_tau_k_locked(self, idempotency_key: str, point: str) -> dict[str, Any] | None:
+        """Take the settlement lock, re-read, and fail closed if still exhausted.
+
+        Returns None when, under the lock, the bound no longer applies (the
+        operation moved on); the caller then proceeds with the current record.
+        """
+        try:
+            with self._settlement_lock:
+                with self.registry.settlement_lock(
+                    idempotency_key,
+                    require_persistent=(
+                        self.consensus_backend is not None and self.registry.is_persistent
+                    ),
+                ):
+                    current = self.registry.get(idempotency_key)
+                    if current is None or not self._tau_k_exhausted(current):
+                        return None
+                    return self._fail_closed_on_tau_k(idempotency_key, current, point)
+        except Exception:
+            current = self.registry.get(idempotency_key)
+            return {
+                "dispatched": False,
+                "tau_k_expired": True,
+                "operation_state": current.state.value if current else None,
+                "budget_reconciliation_required": True,
+                "reason": "τ_K exhausted; could not acquire durable settlement lock; no dispatch.",
             }
 
     def check_hold_expiry(self, idempotency_key: str) -> dict[str, Any]:
