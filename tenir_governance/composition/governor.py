@@ -208,6 +208,42 @@ class ScoringKernelAdapter:
         hard_reasons: list[str] = []
         soft_reasons: list[str] = []
 
+        # Decision 5: finiteness guard at the kernel's entry. A non-finite
+        # measure (NaN, ±inf, a non-number) is insufficient evidence, never
+        # PASS: it must not reach a comparison, where NaN compares false and
+        # admits. It is reported as unmeasured, and every conclusive veto the
+        # other inputs still support is evaluated and governs (RFC-0 §4).
+        def _finite(v):
+            if v is None:
+                return True  # absence is handled below as a missing measure
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                return False
+            return math.isfinite(v)
+        named = {"pressure": pressure, "velocity": velocity, "capacity": capacity,
+                 "option_space": option_space, "authority": authority,
+                 "context_fit": context_fit, "evidence_quality": evidence_quality,
+                 "irreversibility_materiality": irreversibility_materiality}
+        non_finite = [n for n, v in named.items() if not _finite(v)]
+        pvc_non_finite = [n for n in ("pressure", "velocity", "capacity") if n in non_finite]
+        if "option_space" in non_finite:
+            option_space = None
+        if "authority" in non_finite:
+            authority = 0.5
+        if "context_fit" in non_finite:
+            context_fit = 0.5
+        if "evidence_quality" in non_finite:
+            evidence_quality = 0.5
+        if "irreversibility_materiality" in non_finite:
+            irreversibility_materiality = 0.5
+        if pvc_non_finite:
+            # S cannot be computed: no S-based verdict is drawn from a placeholder.
+            return self._insufficient_evidence_without_s(
+                non_finite, option_space=option_space,
+                capacity=None if "capacity" in non_finite else capacity,
+                missing=[n for n in ("authority", "context_fit", "evidence_quality")
+                         if named[n] is None],
+            )
+
         # Compute the extra signals the prototype's ScoringKernel checked
         # but TenirKernel does not natively evaluate. These become gate reasons
         # injected into TenirKernel.adjudicate().
@@ -261,6 +297,10 @@ class ScoringKernelAdapter:
         # interpreted as evidence of safety on unmeasured dimensions.
         unmeasured = getattr(self, "_unmeasured_axes", [])
         unmeasured.extend(n for n in missing_pvc if n not in unmeasured)
+        for n in non_finite:
+            if n in unmeasured:
+                unmeasured.remove(n)  # it has a value, but not a measure
+            unmeasured.append(n)
         for axis in unmeasured:
             soft_reasons.append(f"unmeasured axis: {axis} (neutral default, not favorable)")
 
@@ -298,19 +338,56 @@ class ScoringKernelAdapter:
         else:
             decision = Decision.HOLD.value
 
+        rationale = tk_result.get("rationale", "")
+        if non_finite and decision in (Decision.PASS.value, Decision.FLAG.value):
+            # Insufficient evidence: no admission on a non-finite measure. A
+            # conclusive veto from the other inputs has already governed above.
+            decision = Decision.HOLD.value
+            rationale = (f"INSUFFICIENT_EVIDENCE: non-finite measure(s) {', '.join(non_finite)}; "
+                         "held, not scored as admissible. " + rationale).strip()
+
         return {
             "kernel": "scoring",
             "s_score": tk_result.get("s_score"),
             "decision": decision,
-            "rationale": tk_result.get("rationale", ""),
-            "authority": authority,
-            "context_fit": context_fit,
-            "evidence_quality": evidence_quality,
+            "rationale": rationale,
+            # A non-finite input is reported as null (decision 6), not as its placeholder.
+            "authority": None if "authority" in non_finite else authority,
+            "context_fit": None if "context_fit" in non_finite else context_fit,
+            "evidence_quality": None if "evidence_quality" in non_finite else evidence_quality,
             "constraint_geometry": tk_result.get("constraint_geometry"),
             "operating_mode": tk_result.get("operating_mode"),
             # Axes that carry no measurement: a neutral placeholder keeps the
             # geometry complete, but they are declared, not measured (decision 2).
             "declared_unmeasured": list(unmeasured),
+            "unmeasured_axes": list(non_finite),
+        }
+
+    def _insufficient_evidence_without_s(self, non_finite, *, option_space, capacity, missing):
+        """P, V or C is not finite: S is unknown. Veto on what is still
+        conclusive without S (a missing mandatory measure, option space at its
+        block floor, a measured capacity of zero, which makes S = 0 whatever P
+        and V are); otherwise HOLD for insufficient evidence."""
+        hard = [f"{n} missing: cannot adjudicate without it" for n in missing]
+        if capacity is not None and capacity <= 0:
+            hard.append(f"TAU BREACH: capacity={capacity} gives S=0 ≤ τ={self._tau_floor} "
+                        "whatever pressure and velocity are")
+        if option_space is not None and option_space <= self._option_space_block_floor:
+            hard.append(f"option_space={option_space:.3f} ≤ block floor")
+        reason = f"INSUFFICIENT_EVIDENCE: non-finite measure(s) {', '.join(non_finite)}; S not computed."
+        decision = Decision.HARD_VETO.value if hard else Decision.HOLD.value
+        return {
+            "kernel": "scoring",
+            "s_score": None,
+            "decision": decision,
+            "rationale": " ".join(hard + [reason]),
+            "authority": None,
+            "context_fit": None,
+            "evidence_quality": None,
+            "constraint_geometry": None,
+            "operating_mode": None,
+            "declared_unmeasured": list(non_finite) + [m for m in missing if m not in non_finite],
+            "unmeasured_axes": list(non_finite),
         }
 
 

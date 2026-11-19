@@ -96,6 +96,12 @@ def compose(
     if m == Decision.HOLD:
         return Decision.HOLD.value, "Membrane requests hold: pending evidence or reconciliation."
 
+    # Rule 2b: HOLD from scoring → HOLD. The most restrictive disposition
+    # governs (RFC-0 §4); a scoring HOLD (e.g. insufficient evidence) is never
+    # dropped in favour of a membrane PASS or FLAG.
+    if s == Decision.HOLD:
+        return Decision.HOLD.value, "Scoring requests hold: insufficient evidence."
+
     # Rule 3: FLAG + near-limit budget → HOLD (escalation)
     threshold = p.budget_escalation_threshold
     if s == Decision.FLAG or m == Decision.FLAG:

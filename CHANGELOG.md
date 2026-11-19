@@ -12,6 +12,16 @@ Not tagged. 5.7.5 is the single-host pilot line (ROADMAP_90_DAYS, "5.7.5 — Aud
 - **A call that does not supply `authority`, `context_fit` and `evidence_quality` (or `pressure`, `velocity`, `capacity`) is now refused with `HARD_VETO`**, and the operation reaches `FAILED`. On 5.7.0 the same call was admitted on the `1.0` / `0.5` defaults. The scoring rationale names each missing axis (`"authority missing: cannot adjudicate without authority assessment"`, ...), and `declared_unmeasured` lists them.
 - `docs/agentic-governance-guide.md` and `demo.py` now pass these axes explicitly. The guide shows a call without them (`HARD_VETO`, with its reason) and states the observed decision: `FLAG`, not `PASS` (§2, §4, §9, §10). Its "PASS" was already wrong on 5.7.0, which returned `FLAG` because four axes are never measured.
 
+### A non-finite measure is insufficient evidence and masks no veto (decision 5)
+
+#### Fixed
+- A non-finite measure (NaN, ±inf, or a non-number) made the scoring kernel raise; the governor then composed a fail-closed `HOLD`, which masked a conclusive `HARD_VETO` the other inputs supported (e.g. TAU breach with unknown evidence quality). The scoring adapter now checks finiteness at entry: the measure is reported as `null`, listed in `unmeasured_axes` and `declared_unmeasured`, and replaced by a neutral placeholder; every conclusive veto is still evaluated and governs (RFC-0 §4). Without a veto the result is `HOLD` with `INSUFFICIENT_EVIDENCE`, never `PASS` or `FLAG`. A non-finite pressure, velocity or capacity leaves S uncomputed: `HOLD`, except a veto that holds without S (missing mandatory measure, option space at its block floor, capacity 0).
+- Composition dropped a scoring `HOLD` when the membrane passed (`compose("HOLD", "PASS")` gave `PASS`). The adapter never produced a scoring `HOLD` before, so this was latent; it would have admitted on non-finite evidence with the guard above. New lattice rule: a scoring `HOLD` composes to `HOLD`.
+- `tests/test_non_finite_measure_guard.py` fails on the previous code.
+
+#### Behaviour change
+- Inputs that used to produce a fail-closed `HOLD` with `scoring_decision = None` now produce `scoring_decision = HOLD` (or `HARD_VETO` when a conclusive veto applies) with the reason. Not documented in the guide before; no example changes.
+
 ### A failure after dispatch needs proof of non-execution (decision B3)
 
 #### Fixed
