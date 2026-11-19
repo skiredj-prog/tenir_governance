@@ -296,6 +296,9 @@ class ScoringKernelAdapter:
             "evidence_quality": evidence_quality,
             "constraint_geometry": tk_result.get("constraint_geometry"),
             "operating_mode": tk_result.get("operating_mode"),
+            # Axes that carry no measurement: a neutral placeholder keeps the
+            # geometry complete, but they are declared, not measured (decision 2).
+            "declared_unmeasured": list(unmeasured),
         }
 
 
@@ -588,6 +591,7 @@ class DualKernelGovernor:
             budget_in_scope=budget_in_scope,
             policy=self.policy,
         )
+        composed_rationale = self._with_flag_conditions(composed_decision, composed_rationale)
 
         # 5. Ledger
         self.ledger.append(
@@ -785,6 +789,7 @@ class DualKernelGovernor:
                     "operation_state": self.registry.get(idem_key).state.value if self.registry.get(idem_key) else "unknown",
                     "ledger_entries": self.ledger.entry_count,
                     "ledger_valid": self.ledger.verify_chain(),
+                    **self._flag_fields(composed_decision, scoring_result),
                 }
 
         if external_reservation_attempted and composed_decision == Decision.HARD_VETO.value:
@@ -802,6 +807,20 @@ class DualKernelGovernor:
             if current is not None:
                 response["operation_state"] = current.state.value
         return response
+
+    def _flag_fields(self, composed_decision: str, scoring_result: dict | None) -> dict[str, Any]:
+        """RFC-0 §4 fields of a result: the FLAG's declared conditions, and the
+        axes the score did not measure. Conditions come only from the policy."""
+        is_flag = composed_decision == Decision.FLAG.value
+        return {
+            "flag_conditions": list(self.policy.flag_conditions) if is_flag else [],
+            "declared_unmeasured": list((scoring_result or {}).get("declared_unmeasured", [])),
+        }
+
+    def _with_flag_conditions(self, composed_decision: str, rationale: str) -> str:
+        if composed_decision == Decision.FLAG.value and self.policy.flag_conditions:
+            return rationale + " Conditions: " + "; ".join(self.policy.flag_conditions) + "."
+        return rationale
 
     def _prospective_utilization(self, idempotency_key: str, resource, amount: float) -> float:
         """Budget utilization as it will be once this operation holds its budget.
@@ -3157,6 +3176,7 @@ class DualKernelGovernor:
             budget_in_scope=budget_in_scope,
             policy=self.policy,
         )
+        composed_rationale = self._with_flag_conditions(composed_decision, composed_rationale)
 
         # 5. Ledger
         self.ledger.append(
@@ -3345,6 +3365,7 @@ class DualKernelGovernor:
             "operation_state": self.registry.get(idem_key).state.value if self.registry.get(idem_key) else "unknown",
             "ledger_entries": self.ledger.entry_count,
             "ledger_valid": self.ledger.verify_chain(),
+            **self._flag_fields(composed_decision, scoring_result),
             "hold_resolved": hold_resolved,
         }
 

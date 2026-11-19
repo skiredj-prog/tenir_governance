@@ -25,7 +25,7 @@ class TestAgent:
 
     def test_default_agent(self):
         a = Agent(agent_id="A1")
-        assert a.authority_score == 1.0
+        assert a.authority_score is None  # never a favorable default (decision 2)
         assert a.trusted_delegates == frozenset()
         assert a.can_delegate_to("anyone") is False
 

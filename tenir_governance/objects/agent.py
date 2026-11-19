@@ -19,12 +19,13 @@ class Agent:
 
     Attributes:
         agent_id: Unique identifier.
-        authority_score: Authority level in [0, 1].
+        authority_score: Authority level in [0, 1], or None when not assessed
+            (default). No kernel reads it; it is never a favorable default.
         trusted_delegates: Set of agent_ids this agent may delegate authority to.
         capabilities: Set of capability strings (e.g. {"payment", "read", "write"}).
     """
     agent_id: str
-    authority_score: float = 1.0
+    authority_score: float | None = None
     trusted_delegates: frozenset[str] = field(default_factory=frozenset)
     capabilities: frozenset[str] = field(default_factory=frozenset)
 

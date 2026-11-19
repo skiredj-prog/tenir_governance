@@ -6,6 +6,19 @@ Not tagged. 5.7.5 is the single-host pilot line (ROADMAP_90_DAYS, "5.7.5 — Aud
 
 **Not a strict-semver patch.** This line adds public API on top of 5.7.0: the policy fields and HoldRecord fields below, and `tenir_governance/quickstart.py` (with `tests/test_quickstart.py`), merged on `main` after the v5.7.0 tag.
 
+### No favorable default for an unmeasured axis; a FLAG states its declared conditions (decisions 2 and 3, 19 Nov)
+
+#### Changed
+- `DualKernelCompositionClient.adjudicate`: `authority`, `context_fit` and `evidence_quality` default to `None` (were `1.0`). An axis that is not supplied now reaches the scoring adapter as missing, which is a hard gate there: the request is not admitted. Callers that relied on the `1.0` defaults must now pass measured values.
+- `Agent.authority_score` defaults to `None` (was `1.0`). No kernel reads it.
+
+#### Added
+- Scoring and composed results carry `declared_unmeasured`: the axes the score did not measure (`option_space` when absent, the four axes with no measurement input, and any missing mandatory axis). Their neutral placeholders keep the geometry complete; they are declared, not measured.
+- `CompositionPolicy.flag_conditions` (tuple of non-empty strings, default empty): the conditions under which a FLAG authorizes (RFC-0 §4), declared by the deployment. Every FLAG result carries them in `flag_conditions`, and the composed ledger rationale names them. With the default policy a FLAG states no condition, as in 5.7.0; the runtime invents none and does not enforce them.
+
+#### Not changed
+- Other defaults that may favor the score (`pressure = velocity = 0.5`, `capacity = 1.0` in `adjudicate`; `confidence = 1.0` in the assessment helpers; `Relationship.trust_score = 1.0`) are not covered by the decision and are unchanged.
+
 ### τ_K as a policy-declared fail-safe bound on HOLD (fixes #140)
 
 Behaviour changes only for a deployment whose policy declares a τ_K; with the default policy, behaviour is the one of 5.7.0.
