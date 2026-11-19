@@ -371,3 +371,23 @@ def test_late_resolution_with_wrong_payload_still_closes_the_attempt(clock):
     assert res["tau_k_expired"] is True
     assert res["operation_state"] == OperationState.FAILED.value
     assert budget.reserved == 0.0
+
+
+def test_explicit_expire_hold_records_confirmed_nonexecution(clock, monkeypatch):
+    """Decision B3: an expired HOLD was never dispatched. expire_hold records
+    the disposition and CONFIRMED_NONEXECUTION, like the advance points."""
+    from tenir_governance.operations import hold as hold_mod
+    gov, budget = _governor(_policy())
+    p = _held(gov)
+    real = hold_mod._utc_now_seconds
+    monkeypatch.setattr(hold_mod, "_utc_now_seconds", lambda: real() + TAU + 1)
+    clock(TAU + 1)
+    result = gov.expire_hold(p.idempotency_key)
+    assert result["expired"] is True
+    assert result["execution_record"] == "CONFIRMED_NONEXECUTION"
+    hold = gov.registry.get(p.idempotency_key).hold_record
+    assert gov.registry.get(p.idempotency_key).state == OperationState.FAILED
+    assert hold.exit_reason == "expired"
+    assert hold.exhaustion_disposition == "fail-closed"
+    assert hold.execution_record == "CONFIRMED_NONEXECUTION"
+    assert budget.reserved == 0.0

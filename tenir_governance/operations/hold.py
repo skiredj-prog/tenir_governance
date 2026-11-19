@@ -325,15 +325,24 @@ class HoldManager:
                 "reason": expiry["reason"],
             }
 
+        # Decision B3: a HOLD was never dispatched, so its expiry establishes
+        # non-execution, recorded with the disposition, as the advance points
+        # and expire_escalated record theirs (RFC-4 v0.3 §2.2/§2.3).
         success, _prev = self._registry.transition_to(
             idempotency_key,
             OperationState.FAILED,
-            hold_record_changes={"exit_reason": "expired"},
+            hold_record_changes={
+                "exit_reason": "expired",
+                "exhaustion_disposition": "fail-closed",
+                "exhausted_at": "expire_hold",
+                "execution_record": "CONFIRMED_NONEXECUTION",
+            },
         )
         current = self._registry.get(idempotency_key)
         return {
             "expired": success,
             "operation_state": current.state.value if current else None,
+            "execution_record": "CONFIRMED_NONEXECUTION" if success else None,
             "reason": "τ_K exhausted — FAIL-CLOSED rejection (not a resolution)." if success
                       else "Transition HOLD → FAILED failed.",
         }

@@ -90,6 +90,7 @@ Behaviour changes only for a deployment whose policy declares a τ_K; with the d
 - `expire_escalated` is time-driven like `expire_hold`: it refuses before τ_K is exhausted, and when no τ_K is set. Past the bound it still gives `UNKNOWN` (runtime label, v7.1 §19) and now records `execution_record="CONFIRMED_NONEXECUTION"`: an escalation never reached dispatch. The reservation is still left to reconciliation.
 - New `cancel_escalation(key, cancelled_by, reason, decision)` (HoldManager and governor): an authority ends an escalation early. All three fields are required and kept in an `ExitReceipt`; the reservation is released first; the attempt reaches `FAILED` with `exit_reason="cancelled"` and `CONFIRMED_NONEXECUTION`. Calling `expire_escalated` early is no longer a way to end an escalation.
 - A denied exit (`authorize_exit(approve=False)`) from `ESCALATED` now records `execution_record="CONFIRMED_NONEXECUTION"` on the hold record and in its result, like the τ_K and `cancel_escalation` paths; the escalated attempt was never dispatched. It left the field empty before.
+- An explicit `expire_hold` past τ_K now records `exhaustion_disposition="fail-closed"`, `exhausted_at="expire_hold"` and `execution_record="CONFIRMED_NONEXECUTION"` on the hold record and returns `execution_record`, like the advance points and `expire_escalated`; a HOLD is never dispatched. It recorded only `exit_reason="expired"` before.
 - `test_hold_manager_expire_escalated`, which expired an escalation without waiting, is rewritten.
 
 #### Not changed
