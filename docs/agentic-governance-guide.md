@@ -43,12 +43,28 @@ p = Passage(agent_id="alice", action_type="payment", amount=10.0)
 result = client.adjudicate(
     p,
     pressure=0.2, velocity=0.3, capacity=1.0,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9,
     resource_id="budget", amount=10.0,
 )
 
-print(result["composed_decision"])  # "PASS"
+print(result["composed_decision"])  # "FLAG" : quatre axes ne sont jamais mesurés
 print(result["operation_state"])     # "reserved"
+print(result["declared_unmeasured"]) # les axes non mesurés, déclarés
+print(result["flag_conditions"])     # [] tant que la politique n'en déclare pas
 ```
+
+Depuis 5.7.5, aucun axe non mesuré ne reçoit de valeur favorable. Un appel sans `authority`, `context_fit` ou `evidence_quality` (ou sans `pressure`, `velocity`, `capacity`) n'est pas admis :
+
+```python
+p_missing = Passage(agent_id="alice", action_type="payment", amount=10.0)
+r = client.adjudicate(p_missing, pressure=0.2, velocity=0.3, capacity=1.0,
+                      resource_id="budget", amount=10.0)
+assert r["composed_decision"] == "HARD_VETO"
+assert "authority missing" in r["scoring_rationale"]
+assert "authority" in r["declared_unmeasured"]
+```
+
+Pour qu'un FLAG porte une condition explicite (RFC-0 §4), le déploiement la déclare dans `CompositionPolicy(flag_conditions=(...))`. Le runtime la recopie sur le résultat et au grand livre. Il ne la fait pas respecter.
 
 ---
 
@@ -78,32 +94,61 @@ CREATED → RESERVED → DISPATCHING → CONFIRMED
 ```python
 from tenir_governance.objects import Passage
 
-p = Passage(agent_id="alice", action_type="payment", amount=25.0)
+M = dict(pressure=0.2, velocity=0.3, capacity=1.0,
+         authority=0.9, context_fit=0.9, evidence_quality=0.9)
 
-# Étape 1 : Adjudiquer (CREATED → RESERVED si PASS)
-result = client.adjudicate(
-    p, pressure=0.2, velocity=0.3, capacity=1.0,
-    resource_id="budget", amount=25.0,
+def admit_and_dispatch(amount):
+    p = Passage(agent_id="alice", action_type="payment", amount=amount)
+    # Étape 1 : Adjudiquer (CREATED → RESERVED si PASS ou FLAG)
+    result = client.adjudicate(p, **M, resource_id="budget", amount=amount)
+    assert result["composed_decision"] == "FLAG"
+    assert result["operation_state"] == "reserved"
+    # Étape 2 : Dispatcher (RESERVED → DISPATCHING — claim atomique)
+    dispatch_result = client.dispatch(p.idempotency_key, resource_id="budget", amount=amount)
+    assert dispatch_result["dispatched"] is True
+    return p
+
+budget = client.governor.membrane.state.resources["budget"]
+consumed0, reserved0 = budget.consumed, budget.reserved
+
+# Étape 3, trois issues possibles, chacune sur sa propre opération.
+# 3a : Confirmer (DISPATCHING → CONFIRMED — l'effet a eu lieu)
+p_a = admit_and_dispatch(25.0)
+assert client.confirm(p_a.idempotency_key) is True
+assert client.governor.registry.get(p_a.idempotency_key).state.value == "confirmed"
+assert budget.consumed == consumed0 + 25.0
+
+# 3b : Échouer (→ FAILED — l'effet n'a pas eu lieu, budget libéré).
+# Après un dispatch, il faut une attestation de non-exécution (fournisseur ou
+# réconciliation). Sans elle, fail() refuse : l'opération passe en UNKNOWN
+# et garde son budget.
+p_b = admit_and_dispatch(10.0)
+from tenir_governance.operations import NonExecutionAttestation
+proof = NonExecutionAttestation(
+    idempotency_key=p_b.idempotency_key,
+    source="provider",                       # qui atteste
+    attestation="charge ch_123: never captured",  # la preuve elle-même
+    attested_at="2026-11-19T06:40:00+00:00",
 )
-assert result["composed_decision"] == "PASS"
-assert result["operation_state"] == "reserved"
+assert client.fail(p_b.idempotency_key, resource_id="budget", amount=10.0,
+                   non_execution_attested=proof) is True
+# La preuve est persistée avec l'opération (le runtime ne vérifie pas la signature)
+assert client.governor.registry.get(p_b.idempotency_key).non_execution_attested["source"] == "provider"
+assert client.governor.registry.get(p_b.idempotency_key).state.value == "failed"
+assert budget.consumed == consumed0 + 25.0 and budget.reserved == reserved0
 
-# Étape 2 : Dispatcher (RESERVED → DISPATCHING — claim atomique)
-dispatch_result = client.dispatch(
-    p.idempotency_key,
-    resource_id="budget", amount=25.0,
-)
-assert dispatch_result["dispatched"] is True
+p_b2 = admit_and_dispatch(10.0)
+assert client.fail(p_b2.idempotency_key, resource_id="budget", amount=10.0) is False
+assert client.governor.registry.get(p_b2.idempotency_key).state.value == "unknown"
+consumed0 += 10.0  # retenu jusqu'à la réconciliation
 
-# Étape 3a : Confirmer (DISPATCHING → CONFIRMED — l'effet a eu lieu)
-client.confirm(p.idempotency_key)
-
-# OU Étape 3b : Échouer (→ FAILED — l'effet n'a pas eu lieu, budget libéré)
-client.fail(p.idempotency_key, resource_id="budget", amount=25.0)
-
-# OU Étape 3c : Incertain (→ UNKNOWN — timeout, effet peut avoir eu lieu)
-client.mark_unknown(p.idempotency_key)  # → réconciliation humaine
+# 3c : Incertain (→ UNKNOWN — timeout, l'effet a pu avoir lieu)
+p_c = admit_and_dispatch(5.0)
+assert client.mark_unknown(p_c.idempotency_key) is True
+assert client.governor.registry.get(p_c.idempotency_key).state.value == "unknown"
+assert budget.consumed == consumed0 + 30.0  # compté comme consommé jusqu'à la réconciliation
 ```
+
 
 ---
 
@@ -175,52 +220,100 @@ Un `FLAG` combiné avec un budget près de la limite escalade en `HOLD` :
 ```python
 from tenir_governance.composition import CompositionPolicy
 
-# Seuil personnalisé à 50%
-client = DualKernelCompositionClient(
+# Seuil personnalisé à 50 %, client distinct : il faut enregistrer agent et budget
+client_50 = DualKernelCompositionClient(
     policy=CompositionPolicy(budget_escalation_threshold=0.50)
 )
+client_50.register_agent(Agent(agent_id="alice", authority_score=0.9))
+client_50.register_resource(Resource(resource_id="budget", capacity=100.0))
+M = dict(pressure=0.2, velocity=0.3, capacity=1.0,
+         authority=0.9, context_fit=0.9, evidence_quality=0.9)
 
-# Premier paiement : 60€ sur budget 100€ → PASS
-p1 = Passage(agent_id="alice", action_type="payment", amount=60.0)
-client.adjudicate(p1, pressure=0.2, velocity=0.3, capacity=1.0,
-                  resource_id="budget", amount=60.0)
-client.governor.membrane.commit_passage(p1, "budget", 60.0)
+# Premier paiement : 40 € sur 100 € → 40 % < 50 %, FLAG admis
+p1 = Passage(agent_id="alice", action_type="payment", amount=40.0)
+r1 = client_50.adjudicate(p1, **M, resource_id="budget", amount=40.0)
+assert r1["composed_decision"] == "FLAG"
+assert r1["operation_state"] == "reserved"
 
-# Second paiement avec stress modéré (FLAG) + budget 60% > seuil 50% → HOLD
-p2 = Passage(agent_id="alice", action_type="payment", amount=5.0)
-r2 = client.adjudicate(p2, pressure=0.9, velocity=0.9, capacity=0.7,
-                       resource_id="budget", amount=5.0)
+# Second paiement : 20 € → 60 % ≥ 50 %, le FLAG du scoring escalade en HOLD
+p2 = Passage(agent_id="alice", action_type="payment", amount=20.0)
+r2 = client_50.adjudicate(p2, **M, resource_id="budget", amount=20.0)
+assert r2["scoring_decision"] == "FLAG"
 assert r2["composed_decision"] == "HOLD"  # escalade
+print(r2["composed_rationale"])
+# "scoring FLAG + budget utilization 60% ≥ 50%: escalated to HOLD pending evidence."
 ```
 
 ---
 
 ## 8. Sortie conforme au schéma TENIR 2.0
 
-Pour obtenir une sortie conforme au schéma canonique 1.2 :
+Pour obtenir une sortie conforme au schéma canonique 1.2, l'appelant fournit le contexte canonique :
 
 ```python
+# Le schéma 1.2 exige des champs que l'adjudication ne produit pas
+# (identité, TAU, état épistémique, profils...). L'appelant les fournit
+# explicitement dans canonical_context ; sans lui, l'adaptateur refuse
+# (ValueError « canonical_context is required »).
+canonical_context = {
+    "rubric_version": "my-rubric-1",
+    "timestamp_utc": "2026-11-19T00:00:00Z",
+    "identity": {"unit_name": "payments-team", "entity_class": "organization",
+                 "declared_scale": "team"},
+    "tau": {"tau_hypothesis": "Preserve accountable human authority.",
+            "tau_integrity": "intact"},
+    "epistemic": {"status": "ok", "evidence_quality": 0.9, "manipulation_risk": 0.0,
+                  "drift": 0.0, "epistemic_surrender_risk": 0.0,
+                  "confidence_ceiling": "high"},
+    "scores": {"pressure": 0.2, "velocity": 0.3, "capacity": 1.0, "option_space": 0.8,
+               "stability": 1.0, "cooperative_control_score": 1.0,
+               "trajectory_risk_score": 0.0, "irreversible_pathway_materiality": 0.0},
+    "collapse_flags": [],
+    "active_profiles": ["agentic-governance-profile-v1.0.0"],
+    "suppressed_profiles": [],
+    "profile_conflicts": [],
+    "narrative_distortion_summary": {},
+    "irreversible_pathway_assessment": {
+        "materially_affects_irreversible_pathway": False,
+        "raw_data_human_verification_required": False,
+        "human_verified_raw_data": False},
+    "assumptions": [],
+    "constraint_geometry": {"geometry_id": "tenir-2.0-reference",
+                            "coordinates": {"authority": 0.9, "context_fit": 0.9,
+                                            "authority_source": "role registry",
+                                            "context_source": "payment policy"}},
+    "trace": {"trace_id": "trace-001", "stages": []},
+    "synthesis": {"structural_core": {"pressure": 0.2, "velocity": 0.3, "capacity": 1.0,
+                                      "option_space": 0.8, "tau_integrity": "intact",
+                                      "stability": 1.0},
+                  "epistemic_state": {"status": "ok"}, "final_posture": "CAUTION",
+                  "rationale": ["Caller-supplied context."], "degraded_inputs": []},
+    "schema_version": "1.2",
+    "degraded_mode": ["none"],
+}
+
+p = Passage(agent_id="alice", action_type="payment", amount=10.0)
 schema_result = client.adjudicate_schema(
     p, pressure=0.2, velocity=0.3, capacity=1.0,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9,
     resource_id="budget", amount=10.0,
+    canonical_context=canonical_context,
 )
 
-# Champs canoniques
-print(schema_result["posture"])            # "NORMAL"
-print(schema_result["execution_mode"])      # "enforce"
-print(schema_result["execution_allowed"])   # True
-print(schema_result["compliance_class"])    # "profile-bound"
-print(schema_result["degraded_mode"])       # False
+print(schema_result["posture"])               # "CAUTION" (FLAG composé)
+print(schema_result["execution_mode"])        # "enforce"
+print(schema_result["execution_allowed"])     # True
+print(schema_result["execution_disposition"]) # "allow_with_alert"
+print(schema_result["compliance_class"])      # "profile-bound"
+print(schema_result["degraded_mode"])         # ["none"]
 
 # Synthèse composite
-print(schema_result["synthesis"]["final_posture"])        # "NORMAL"
-print(schema_result["synthesis"]["structural_core"])      # scoring decision
-print(schema_result["synthesis"]["agency_state"])        # membrane decision
-print(schema_result["synthesis"]["principal_failure_mode"])  # None
+print(schema_result["synthesis"]["final_posture"])  # "CAUTION"
 
-# Trace
-print(schema_result["trace"]["trace_id"])   # idempotency key
-print(schema_result["trace"]["stages"])      # [scoring, membrane, composition, operation]
+# Trace : identifiant = clé d'idempotence, étapes scoring, membrane, composition, operation
+print(schema_result["trace"]["trace_id"])     # "op-..."
+print([st["stage"] for st in schema_result["trace"]["stages"]])
+# ["scoring", "membrane", "composition", "operation"]
 
 # Disclosure (versioning policy §6)
 print(schema_result["disclosure"]["active_profiles"])
@@ -245,11 +338,12 @@ delegation = Delegation(
 
 result = client.adjudicate(
     p, pressure=0.2, velocity=0.3, capacity=1.0,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9,
     delegation=delegation,
 )
 
-# Le scoring passe (stress faible) mais la membrane véto (I7 : délégation non trustée)
-assert result["scoring_decision"] == "PASS"
+# Le scoring admet sous FLAG (stress faible) mais la membrane véto (I7 : délégation non trustée)
+assert result["scoring_decision"] == "FLAG"
 assert result["membrane_decision"] == "HARD_VETO"
 assert result["composed_decision"] == "HARD_VETO"
 assert "I7" in result["membrane_rationale"]
@@ -265,15 +359,17 @@ La clé d'idempotence est claimée durablement avant toute évaluation.
 p = Passage(agent_id="alice", action_type="payment", amount=10.0,
             idempotency_key="op-unique-123")
 
-# Premier appel : PASS
+# Premier appel : admis (FLAG, quatre axes jamais mesurés)
 r1 = client.adjudicate(p, pressure=0.2, velocity=0.3, capacity=1.0,
-                        resource_id="budget", amount=10.0)
-assert r1["composed_decision"] == "PASS"
+                       authority=0.9, context_fit=0.9, evidence_quality=0.9,
+                       resource_id="budget", amount=10.0)
+assert r1["composed_decision"] == "FLAG"
 
 # Second appel avec la même clé : HARD_VETO (duplicate)
 p2 = Passage(agent_id="alice", action_type="payment", amount=10.0,
              idempotency_key="op-unique-123")
 r2 = client.adjudicate(p2, pressure=0.2, velocity=0.3, capacity=1.0,
+                       authority=0.9, context_fit=0.9, evidence_quality=0.9,
                        resource_id="budget", amount=10.0)
 assert r2["composed_decision"] == "HARD_VETO"
 assert "Duplicate" in r2["composed_rationale"]
@@ -289,7 +385,8 @@ assert "Duplicate" in r2["composed_rationale"]
 | `client.adjudicate_schema(passage, **kwargs)` | Adjudique — retourne le dict conforme schema 1.2 |
 | `client.dispatch(key, resource_id, amount)` | Claim atomique DISPATCHING |
 | `client.confirm(key)` | DISPATCHING → CONFIRMED |
-| `client.fail(key, resource_id, amount)` | → FAILED + libère/refund le budget |
+| `client.fail(key, resource_id, amount, non_execution_attested=None)` | → FAILED + libère/refund le budget. Après dispatch, exige une `NonExecutionAttestation` (source, attestation, horodatage), persistée avec l'opération ; sans elle → UNKNOWN, budget retenu, renvoie False |
+| `client.mark_unknown(key)` | DISPATCHING → UNKNOWN, budget retenu jusqu'à réconciliation |
 | `client.mark_unknown(key)` | DISPATCHING → UNKNOWN |
 | `client.resume_existing(key)` | Reprend une opération existante |
 | `client.recover()` | Liste les opérations non résolues |

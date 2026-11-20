@@ -521,13 +521,13 @@ class DualKernelCompositionClient:
     def adjudicate(
         self,
         passage,
-        pressure: float = 0.5,
-        velocity: float = 0.5,
-        capacity: float = 1.0,
+        pressure: float | None = None,
+        velocity: float | None = None,
+        capacity: float | None = None,
         option_space: float | None = None,
-        authority: float = 1.0,
-        context_fit: float = 1.0,
-        evidence_quality: float = 1.0,
+        authority: float | None = None,
+        context_fit: float | None = None,
+        evidence_quality: float | None = None,
         irreversibility_materiality: float = 0.0,
         delegation=None,
         resource_id: str | None = None,
@@ -582,9 +582,22 @@ class DualKernelCompositionClient:
         return self._governor.confirm(idempotency_key)
 
     def fail(self, idempotency_key: str, resource_id: str | None = None,
-             amount: float = 0.0) -> bool:
-        """Mark the operation as failed and release/refund budget."""
-        return self._governor.fail(idempotency_key, resource_id, amount)
+             amount: float = 0.0, *, non_execution_attested=None) -> bool:
+        """Mark the operation as failed and release/refund budget.
+
+        Once the operation was dispatched (DISPATCHING or UNKNOWN), this needs
+        ``non_execution_attested``: a ``NonExecutionAttestation`` (source,
+        attestation, time, effect count 0) bound to this operation, persisted
+        before any budget change. Without it, a DISPATCHING operation moves to
+        UNKNOWN, keeps its budget, and False is returned.
+        """
+        return self._governor.fail(idempotency_key, resource_id, amount,
+                                   non_execution_attested=non_execution_attested)
+
+    def mark_unknown(self, idempotency_key: str) -> bool:
+        """DISPATCHING → UNKNOWN: the outcome is uncertain, the budget is kept
+        until reconciliation."""
+        return self._governor.mark_unknown(idempotency_key)
 
     def resume_existing(self, idempotency_key: str, **kwargs) -> dict:
         """Resume an existing operation for recovery."""

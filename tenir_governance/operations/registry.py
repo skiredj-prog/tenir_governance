@@ -205,6 +205,16 @@ class HoldRecord:
         exit_reason: why the hold ended ("resolved", "expired", "escalated",
                      "authorized_exit", "failed")
         exit_receipt: receipt for authorized exits (None for expired/failed)
+        resolved_at: ISO timestamp when re-adjudication resolved the HOLD to
+                     admission (empty if never resolved). Lets dispatch tell
+                     a resolution inside τ_K from one outside it.
+        exhaustion_disposition: disposition applied when τ_K was exhausted
+                     ("fail-closed"), empty otherwise.
+        exhausted_at: advance point where the exhaustion was applied
+                     (resolve_hold, escalate_hold, authorize_exit, dispatch).
+        execution_record: canonical record of what is known of the effect at
+                     closure ("CONFIRMED_NONEXECUTION" when the attempt was
+                     never dispatched). The runtime label stays FAILED.
     """
     hold_start: str = ""
     tau_k_seconds: float = 0.0
@@ -213,6 +223,10 @@ class HoldRecord:
     escalated_by: str = ""
     exit_reason: str = ""
     exit_receipt: ExitReceipt | None = None
+    resolved_at: str = ""
+    exhaustion_disposition: str = ""
+    exhausted_at: str = ""
+    execution_record: str = ""
 
     @property
     def is_escalated(self) -> bool:
@@ -230,6 +244,49 @@ class HoldRecord:
         exit_receipt = ExitReceipt.from_dict(er) if er else None
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__},
                    exit_receipt=exit_receipt)
+
+
+@dataclass(frozen=True)
+class NonExecutionAttestation:
+    """Proof that a dispatched attempt produced no effect (RFC-4 v0.3 §2.3,
+    manuscript v7.2 §4.4 ``non_execution_attested``, decision T7).
+
+    It is bound to one attempt (``idempotency_key``), names who attests
+    (``source``: provider, provider-reconciliation, operator, ...), carries the
+    attestation itself (a provider reference, a signed statement, ...) and when
+    it was made. It is persisted with the operation and never replaced.
+
+    The runtime records the attestation; it does not verify a signature or a
+    key (``verified_by_runtime`` stays False). Whether non-execution is true of
+    the external world remains assumption A.
+    """
+    idempotency_key: str
+    source: str
+    attestation: str
+    attested_at: str
+    observed_effect_count: int = 0
+    verified_by_runtime: bool = False
+
+    def validate(self) -> None:
+        for name in ("idempotency_key", "source", "attestation", "attested_at"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"non_execution_attested.{name} is required")
+        try:
+            datetime.fromisoformat(self.attested_at)
+        except ValueError as e:
+            raise ValueError("non_execution_attested.attested_at must be an ISO 8601 time") from e
+        if isinstance(self.observed_effect_count, bool) or self.observed_effect_count != 0:
+            raise ValueError("non_execution_attested requires an observed effect count of 0")
+        if self.verified_by_runtime is not False:
+            raise ValueError("the runtime does not verify attestations; verified_by_runtime must be False")
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "NonExecutionAttestation":
+        return cls(**{k: d[k] for k in cls.__dataclass_fields__ if k in d})
 
 
 @dataclass
@@ -290,6 +347,9 @@ class OperationRecord:
     commit_consumption_status: str = ""
     commit_gate_last_reason: str = ""
     commit_gate_events: list[dict] = field(default_factory=list)
+    # Persisted proof of non-execution for a dispatched attempt (T7), as
+    # NonExecutionAttestation.to_dict(). None unless one was accepted.
+    non_execution_attested: dict | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -915,12 +975,14 @@ class DurableOperationRegistry:
             raise TypeError("hold_record must be a HoldRecord")
         changes = dict(hold_record_changes or {})
         allowed_hold_fields = {
-            "escalated_at", "escalated_by", "exit_reason", "exit_receipt",
+            "escalated_at", "escalated_by", "exit_reason", "exit_receipt", "resolved_at",
+            "exhaustion_disposition", "exhausted_at", "execution_record",
         }
         unknown_hold_fields = set(changes) - allowed_hold_fields
         if unknown_hold_fields:
             raise ValueError(f"unsupported hold record field(s): {sorted(unknown_hold_fields)}")
-        for name in ("escalated_at", "escalated_by", "exit_reason"):
+        for name in ("escalated_at", "escalated_by", "exit_reason", "resolved_at",
+                     "exhaustion_disposition", "exhausted_at", "execution_record"):
             if name in changes and not isinstance(changes[name], str):
                 raise TypeError(f"{name} must be a string")
         if "exit_receipt" in changes and changes["exit_receipt"] is not None and not isinstance(changes["exit_receipt"], ExitReceipt):
@@ -1105,6 +1167,45 @@ class DurableOperationRegistry:
                 setattr(record, field_name, value)
                 if status_field:
                     setattr(record, status_field, status)
+                self._persist()
+                return True
+            finally:
+                if flock:
+                    flock.close()
+
+    def record_non_execution_attested(
+        self, idempotency_key: str, attestation: "NonExecutionAttestation",
+    ) -> bool:
+        """Persist the proof of non-execution of a dispatched attempt, once.
+
+        Accepted only on DISPATCHING or UNKNOWN (the paths eligible for T7 /
+        reconcile-FAILED) and only for this attempt. Once recorded it is never
+        replaced; a later call (replay after a crash) is accepted and the first
+        attestation stands.
+        """
+        attestation.validate()
+        if attestation.idempotency_key != idempotency_key:
+            return False
+        value = json.loads(json.dumps(attestation.to_dict(), sort_keys=True))
+        with self._lock:
+            if self._corrupted:
+                raise RuntimeError(
+                    "Registry store is corrupted — refuse to record a non-execution attestation."
+                )
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                record = self._records.get(idempotency_key)
+                if record is None:
+                    return False
+                if record.non_execution_attested not in (None, {}):
+                    # Established once and never replaced: a replay (crash
+                    # recovery, a second worker) relies on the first proof.
+                    return record.non_execution_attested.get("idempotency_key") == idempotency_key
+                if record.state not in (OperationState.DISPATCHING, OperationState.UNKNOWN):
+                    return False
+                record.non_execution_attested = value
                 self._persist()
                 return True
             finally:

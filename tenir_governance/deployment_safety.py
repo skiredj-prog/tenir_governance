@@ -8,7 +8,7 @@ from typing import Mapping
 
 
 MULTI_HOST_DISABLED_MESSAGE = (
-    "Multi-host is disabled in v5.7.0 due to open FM-20 "
+    "Multi-host is disabled in v5.7.x due to open FM-20 "
     "(PySyncObj transport). See Threat Model."
 )
 RAFT_PRODUCTION_DISABLED_MESSAGE = (
@@ -29,7 +29,7 @@ def current_release_version() -> str:
         try:
             return version("tenir-governance")
         except PackageNotFoundError:
-            return "5.7.0"
+            return "5.7.5"
 
 
 def runtime_environment(environ: Mapping[str, str] | None = None) -> str:

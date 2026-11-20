@@ -7,7 +7,7 @@ Compliance class: profile-bound
 from .budget import BudgetCoordinator, InProcessBudgetCoordinator
 from .registry import (
     DurableOperationRegistry, OperationRecord, OperationState,
-    HoldRecord, ExitReceipt,
+    HoldRecord, ExitReceipt, NonExecutionAttestation,
 )
 from .hold import HoldManager
 from .provider import (
@@ -20,7 +20,7 @@ from .._profile_meta import DISCLOSURE
 __all__ = [
     "BudgetCoordinator", "InProcessBudgetCoordinator", "DISCLOSURE",
     "DurableOperationRegistry", "OperationRecord", "OperationState",
-    "HoldRecord", "ExitReceipt", "HoldManager",
+    "HoldRecord", "ExitReceipt", "NonExecutionAttestation", "HoldManager",
     "DispatchProvider", "DispatchResult", "ProviderOutcome",
     "ReconciliationResult", "MockProvider", "StripeProvider",
     "SQLiteConsensusBackend",

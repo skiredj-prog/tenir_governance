@@ -120,7 +120,7 @@ def _enforce_raft_dev_loopback(self_addr, other_addrs):
         if (value := os.environ.get(key)) is not None
     }
     if any(value != "single-host" for value in scopes):
-        raise RuntimeError("FM-20: Raft multi-host scope is prohibited in v5.7.0.")
+        raise RuntimeError("FM-20: Raft multi-host scope is prohibited in v5.7.x.")
     if not isinstance(other_addrs, (list, tuple)) or not _raft_loopback_address(self_addr) or any(
         not _raft_loopback_address(peer) for peer in other_addrs
     ):

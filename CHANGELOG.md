@@ -1,5 +1,129 @@
 # Changelog
 
+## [5.7.5] — 2026-11-20 — Single-host pilot line: fail-closed hardening of 5.7.0
+
+First release of the 5.7.5 single-host pilot line (ROADMAP_90_DAYS, "5.7.5 — Auditable Evidence & Pilot Readiness"). It hardens 5.7.0: no favorable default for an unmeasured axis, no conclusive veto masked by an invalid measure, no `fail()` after dispatch without a persisted proof of non-execution, and a HOLD bound (τ_K) that a deployment can declare and that refuses alone. FM-20 stays Open and multi-host stays disabled; remediation target 5.8.0, as announced in 5.7.0.
+
+**What this release is.** A technical release of the single-host line, with bounded guarantees, for a controlled pilot on one host. It is not a REG certification (the REG harness result on this code is `NOT_CERTIFIABLE`, see "Scope, known limits and trust boundaries"), not a general production qualification, and not the completion of the "Auditable Evidence & Pilot Readiness" milestone: the evidence package, the report exports, the rehearsals and the pilot acceptance that ROADMAP_90_DAYS lists for 5.7.5 are not in it.
+
+**Not a strict-semver patch.** This release adds public API on top of 5.7.0: the policy fields and HoldRecord fields below, `NonExecutionAttestation`, `cancel_escalation`, `DualKernelCompositionClient.mark_unknown`, and `tenir_governance/quickstart.py` (with `tests/test_quickstart.py`), merged on `main` after the v5.7.0 tag. It also changes documented behaviour; each change is listed under "Behaviour change" below. A 5.7.0 caller that relied on the axis defaults, on `fail()` after dispatch without proof, or on an early `expire_escalated` does not run unchanged on 5.7.5: read "Upgrading from 5.7.0".
+
+### Upgrading from 5.7.0
+
+- Pass measured `authority`, `context_fit` and `evidence_quality`, and `pressure`, `velocity` and `capacity`: a call without them is now refused with `HARD_VETO`.
+- After dispatch, `fail()` needs a `NonExecutionAttestation` (`non_execution_attested=`). Without it, `fail()` returns `False` and a `DISPATCHING` operation moves to `UNKNOWN` with its budget kept. `authoritative_non_execution=True` alone is deprecated and is no longer proof.
+- `expire_escalated` now refuses before τ_K is exhausted, and when no τ_K is set. An authority ends an escalation early with `cancel_escalation`.
+- Inputs that produced a fail-closed `HOLD` with `scoring_decision = None` (a non-finite or out-of-range measure) now give `scoring_decision = HOLD`, or `HARD_VETO` when a conclusive veto applies.
+
+### Scope, known limits and trust boundaries
+
+Read before deploying. Each limit below was observed on this code, by a script driving the public API; none is inferred.
+
+- **Deployment scope.** One controlled host and one governor process, with the in-memory, JSON-file or SQLite WAL registry on that host (Profile S). Raft stays restricted to development/test loopback nodes while FM-20 is Open. Not exercised: the SQLite WAL backend under concurrent processes, and clock skew between processes.
+- **The proof of non-execution is asserted by its caller; the runtime does not authenticate it.** `NonExecutionAttestation` is checked for form (the four fields, an ISO 8601 time, `observed_effect_count = 0`) and for the attempt it names; `verified_by_runtime` is always `False`. Any caller that can call `fail()` releases the budget of a dispatched operation with a well-formed attestation, whatever its `source` says: the runtime does not check that the source observed the provider. The trust boundary is the deployment's: restrict `fail(..., non_execution_attested=...)` to the component that reconciles against the provider, and prefer the runtime's own paths (`dispatch_and_execute` and `reconcile_unknown` record their attestation from the provider's answer). Against 5.7.0, which released the budget after dispatch with no proof at all, this is a stronger gate, not an end-to-end guarantee.
+- **A FLAG's conditions are declared, not enforced.** `CompositionPolicy.flag_conditions` is carried on every FLAG result and named in the ledger; the runtime does not check that they are met before dispatch, and the default policy declares none. Under RFC-0 §4 a FLAG that states no condition is an implementation gap, which the deployment's policy has to fill.
+- **`option_space` is not a hard gate.** When absent it is replaced by a neutral `0.5`, listed in `declared_unmeasured` with a soft gate reason, and the call can still reach `PASS` or `FLAG`; the six axes under "Upgrading from 5.7.0" are hard gates. The REG harness vector PX-REG-STATE-010 fails for this reason (on 5.7.0 it failed for four axes).
+- **No re-validation of the mandate between admission and dispatch on the default path.** `dispatch` and `dispatch_and_execute` re-check the payload digest, the quarantine lock and the presence of the budget reservation. They do not re-check a budget limit lowered below the amount, the removal of the acting agent, a withdrawn delegation, or a change of the governor's `CompositionPolicy` version after admission: the operation dispatches. 5.7.5 does not guarantee the dynamic revocation of a mandate up to dispatch. The experimental Profile S commit gate (`require_commit_authorization=True`, off by default) refuses on any change of the signed trust state, but not on the governor's own policy version.
+- **A budget HOLD above half the remaining capacity cannot be resolved (#141, open, unchanged from 5.7.0).** On re-adjudication, I8 counts the operation's own reservation: with capacity 100, held amounts 50.5, 60 and 90 are refused with `HARD_VETO` ("Aggregate budget violation"), the reservation is released and the operation reaches `FAILED`, whatever the new evidence; 10 and 50 resolve and dispatch. The failure is closed (no effect), and `resolve_hold` still returns `hold_resolved = True` on that path.
+- **REG conformance is not demonstrated.** The reg-conformance harness (skiredj-prog/reg-conformance#81, `7ee03ab`, level 2) gives `NOT_CERTIFIABLE` on this code. With the default port, its 61 vectors, 4 effect probes and 17 property checks give the same results as on 5.7.0 (10 PASS and 50 ADAPTER_REQUIRED among the vectors; one FAIL among the property checks, PX-REG-STATE-010, above). With the τ_K port (τ_K = 1 s), CT-R4-004b passes with the reserve that its FLAG states no condition, and CT-R4-005 is INCONCLUSIVE: a refusal under quarantine lock states neither a terminal disposition nor a resumption condition, and the adapter contract has no field for one.
+
+### No favorable default for an unmeasured axis; a FLAG states its declared conditions (decisions 2 and 3, 19 Nov)
+
+#### Behaviour change (5.7.5)
+- **A call that does not supply `authority`, `context_fit` and `evidence_quality` (or `pressure`, `velocity`, `capacity`) is now refused with `HARD_VETO`**, and the operation reaches `FAILED`. On 5.7.0 the same call was admitted on the `1.0` / `0.5` defaults. The scoring rationale names each missing axis (`"authority missing: cannot adjudicate without authority assessment"`, ...), and `declared_unmeasured` lists them.
+- `docs/agentic-governance-guide.md` and `demo.py` now pass these axes explicitly. The guide shows a call without them (`HARD_VETO`, with its reason) and states the observed decision: `FLAG`, not `PASS` (§2, §4, §9, §10). Its "PASS" was already wrong on 5.7.0, which returned `FLAG` because four axes are never measured.
+
+#### Changed
+- `DualKernelCompositionClient.adjudicate`: `authority`, `context_fit` and `evidence_quality` default to `None` (were `1.0`). An axis that is not supplied now reaches the scoring adapter as missing, which is a hard gate there: the request is not admitted. Callers that relied on the `1.0` defaults must now pass measured values.
+- `Agent.authority_score` defaults to `None` (was `1.0`). No kernel reads it.
+- Same rule applied to S: `pressure`, `velocity` and `capacity` of `DualKernelGovernor.adjudicate`, `resolve_hold` and `DualKernelCompositionClient.adjudicate` default to `None` (were `0.5`, `0.5`, `1.0`, which give S ≈ 4, far above τ). A missing one is a hard gate and is listed in `declared_unmeasured`.
+- `Relationship.trust_score` defaults to `None` (was `1.0`). No kernel reads it.
+
+#### Added
+- Scoring and composed results carry `declared_unmeasured`: the axes the score did not measure (`option_space` when absent, the four axes with no measurement input, and any missing mandatory axis). Their neutral placeholders keep the geometry complete; they are declared, not measured.
+- `CompositionPolicy.flag_conditions` (tuple of non-empty strings, default empty): the conditions under which a FLAG authorizes (RFC-0 §4), declared by the deployment. Every FLAG result carries them in `flag_conditions`, and the composed ledger rationale names them. With the default policy a FLAG states no condition, as in 5.7.0; the runtime invents none and does not enforce them.
+
+#### Not changed
+- `confidence = 1.0` in the post-execution value assessment (`assessment/evp.py`, `assessor.py`, `assess_post_execution`) is unchanged: it weighs the expected value of an operation already terminal, not its admission.
+
+### A non-finite measure is insufficient evidence and masks no veto (decision 5)
+
+#### Fixed
+- A non-finite measure (NaN, ±inf, or a non-number) made the scoring kernel raise; the governor then composed a fail-closed `HOLD`, which masked a conclusive `HARD_VETO` the other inputs supported (e.g. TAU breach with unknown evidence quality). The scoring adapter now checks finiteness at entry: the measure is reported as `null`, listed in `unmeasured_axes` and `declared_unmeasured`, and replaced by a neutral placeholder; every conclusive veto is still evaluated and governs (RFC-0 §4). Without a veto the result is `HOLD` with `INSUFFICIENT_EVIDENCE`, never `PASS` or `FLAG`. A non-finite pressure, velocity or capacity leaves S uncomputed: `HOLD`, except a veto that holds without S (missing mandatory measure, option space at its block floor, capacity 0).
+- Composition dropped a scoring `HOLD` when the membrane passed (`compose("HOLD", "PASS")` gave `PASS`). The adapter never produced a scoring `HOLD` before, so this was latent; it would have admitted on non-finite evidence with the guard above. New lattice rule: a scoring `HOLD` composes to `HOLD`.
+- `tests/test_non_finite_measure_guard.py` fails on the previous code.
+- Two cases were still masked after the guard (reproduced by a 63-row veto-masking script on this branch): (a) a finite value outside [0, 1] (1.5, -0.1) passed the guard, then made the kernel raise, so the fail-closed `HOLD` masked a TAU breach; it is now invalid like a non-finite value (`null`, `unmeasured_axes`, `HOLD` unless a veto governs). (b) With P, V or C invalid, authority 0 or context_fit 0 was not evaluated, so the result was `HOLD` and a later favourable `resolve_hold` could admit; every hard geometry facet whose axes are all validly measured is now evaluated on that path. A facet that reads an invalid axis is not used. New tests in the same file.
+
+#### Behaviour change
+- Inputs that used to produce a fail-closed `HOLD` with `scoring_decision = None` now produce `scoring_decision = HOLD` (or `HARD_VETO` when a conclusive veto applies) with the reason. Not documented in the guide before; no example changes.
+
+### Proof of non-execution is a persisted attestation, not a boolean (RFC-4 v0.3 §2.3, T7)
+
+#### Changed
+- Proof that a dispatched effect did not occur is now a `NonExecutionAttestation` (`tenir_governance.operations`): `idempotency_key`, `source`, `attestation`, `attested_at` (ISO 8601), `observed_effect_count = 0`, `verified_by_runtime = False`. It is validated, then persisted on the operation record as `OperationRecord.non_execution_attested` before the record leaves `DISPATCHING` or `UNKNOWN`. It survives a restart with `store_path`. A recorded attestation is never replaced; a replay for the same attempt keeps the first one.
+- `governor.fail(..., non_execution_attested=...)` takes the attestation (object or dict). It is refused when malformed, when it names another attempt, or when the record is not `DISPATCHING` / `UNKNOWN`.
+- The provider path (`dispatch_and_execute`, provider outcome `FAILED`) records an attestation with source `provider`; `reconcile_unknown` records one with source `provider-reconciliation` before `FAILED`, and leaves the operation and budget unchanged if it cannot be persisted.
+
+#### Behaviour change (5.7.5)
+- **`authoritative_non_execution=True` is no longer proof.** Passed alone to `governor.fail`, it emits a `DeprecationWarning`; after dispatch the call returns `False` and a `DISPATCHING` operation moves to `UNKNOWN`, budget kept (the B3 rule below, with the attestation as the only proof).
+- `DualKernelCompositionClient.fail(..., non_execution_attested=None)` replaces the `authoritative_non_execution` keyword added earlier on this branch (never released).
+- Guide §4 (step 3b) and the API table show the attestation.
+
+### A failure after dispatch needs proof of non-execution (decision B3)
+
+#### Fixed
+- Without a consensus backend, `fail()` on a dispatched operation (`DISPATCHING`) moved it to `FAILED` and gave its budget back with no proof that the effect did not occur (fail-open). It now requires proof of non-execution (since the section above, a persisted attestation) once the operation is `DISPATCHING` or `UNKNOWN`. Without it, a `DISPATCHING` operation moves to `UNKNOWN` (reconciliation), keeps its budget, and `fail()` returns `False`; an `UNKNOWN` one is left unchanged. The backend path already refused. `tests/test_fail_after_dispatch_needs_proof.py` fails on the previous code.
+- **Behaviour change**: a caller that called `fail()` after dispatch, without proof, now gets `False` and an `UNKNOWN` operation. Documented in the guide (§4, API table) before this release as "→ FAILED + libère le budget"; both are updated. `tests/test_fault_injection.py::test_reconciliation_finds_no_effect` now passes the proof its reconciliation established.
+
+#### Added
+- `DualKernelCompositionClient.fail` passes the proof through (now `non_execution_attested`), and `DualKernelCompositionClient.mark_unknown(key)` exposes the governor's method (DISPATCHING → UNKNOWN, budget kept).
+
+### Guide and demo examples run as written
+
+Three guide examples and one demo step already failed on 5.7.0. Each is rewritten and its result written as observed:
+- §4 (lifecycle): confirm, fail and the uncertain outcome were chained on one operation; each now runs on its own. An UNKNOWN operation counts its amount as consumed until reconciliation.
+- §7 (budget escalation): the new client registered no agent or budget, so the first payment was vetoed. It now registers them; 40 on 100 gives `FLAG`, then 20 more (60 % ≥ 50 %) escalates to `HOLD`.
+- §8 (schema 1.2): `adjudicate_schema` requires an explicit `canonical_context`; the example supplies one and prints the observed fields (`CAUTION`, `allow_with_alert`).
+- `demo.py`: an approved authorized exit returns the operation to `HOLD` (fresh re-adjudication required), as `authorize_exit` documents; the demo expected `RESERVED` or `FAILED`.
+- `tests/test_guide_examples.py` runs every Python block of the guide in order.
+
+### τ_K as a policy-declared fail-safe bound on HOLD (fixes #140)
+
+The τ_K checks below (Added, Fixed) act only when the deployment's policy declares a τ_K; with the default policy no HOLD carries a bound and they do nothing. The escalation changes under "Changed" apply to every deployment.
+
+#### Added
+- `CompositionPolicy.hold_tau_k_seconds` (default `None`) and `CompositionPolicy.hold_tau_k_source`. When the policy declares a τ_K, every HOLD created by `DualKernelGovernor.adjudicate` carries it, with its source. A τ_K without a source is rejected at policy validation. The governor still invents no τ_K when the policy declares none.
+- `HoldRecord.resolved_at`: time at which re-adjudication resolved the HOLD to admission.
+- `HoldRecord.exhaustion_disposition`, `exhausted_at`, `execution_record`: the disposition applied at the bound, the advance point, and the canonical record (`CONFIRMED_NONEXECUTION`), persisted with the operation.
+
+#### Fixed
+- An exhausted τ_K now refuses alone wherever a held operation could advance, without a timer (RN-001 §2a, RFC-5 §2):
+  - `resolve_hold`: no re-adjudication after the bound, whatever the new evidence;
+  - `escalate_hold`: a HOLD past its bound is closed, not escalated;
+  - `authorize_exit(approve=True)`: a late approval is not accepted;
+  - `dispatch` / `dispatch_and_execute`: a HOLD still unanswered past the bound, or a RESERVED operation whose HOLD was resolved after the bound (or at an unrecorded time), is not dispatched.
+  In each case the reservation is released first, the operation reaches `FAILED` with `exit_reason="expired"`, and the ledger records a `HARD_VETO` entry naming the bound, its source and the advance point. If the release cannot be proven, the operation stays open for reconciliation and the ledger records the refusal with `budget reconciliation required`. In `resolve_hold` the bound is checked before identity and payload: a late call closes the attempt whoever makes it.
+- The bound counts from HOLD entry. An escalation or an authorized exit does not restart it.
+- The refusal is terminal for that attempt identity; a later effect needs a new attempt. Every advance point checks before any dispatch claim, so the attempt was never dispatched: the result carries `execution_record="CONFIRMED_NONEXECUTION"` and the ledger entry says so. `FAILED` stays the runtime's label.
+
+#### Changed (decision B2/B3, 19 Nov)
+- `expire_escalated` is time-driven like `expire_hold`: it refuses before τ_K is exhausted, and when no τ_K is set. Past the bound it still gives `UNKNOWN` (runtime label, v7.1 §19) and now records `execution_record="CONFIRMED_NONEXECUTION"`: an escalation never reached dispatch. The reservation is still left to reconciliation.
+- New `cancel_escalation(key, cancelled_by, reason, decision)` (HoldManager and governor): an authority ends an escalation early. All three fields are required and kept in an `ExitReceipt`; the reservation is released first; the attempt reaches `FAILED` with `exit_reason="cancelled"` and `CONFIRMED_NONEXECUTION`. Calling `expire_escalated` early is no longer a way to end an escalation.
+- A denied exit (`authorize_exit(approve=False)`) from `ESCALATED` now records `execution_record="CONFIRMED_NONEXECUTION"` on the hold record and in its result, like the τ_K and `cancel_escalation` paths; the escalated attempt was never dispatched. It left the field empty before.
+- An explicit `expire_hold` past τ_K now records `exhaustion_disposition="fail-closed"`, `exhausted_at="expire_hold"` and `execution_record="CONFIRMED_NONEXECUTION"` on the hold record and returns `execution_record`, like the advance points and `expire_escalated`; a HOLD is never dispatched. It recorded only `exit_reason="expired"` before.
+- `test_hold_manager_expire_escalated`, which expired an escalation without waiting, is rewritten.
+
+#### Not changed
+- `expire_hold` keeps its transition (HOLD → `FAILED`, `exit_reason="expired"`); only its record is completed (see "Changed" above). `expire_escalated` still yields `UNKNOWN` per v7.1 §19 (see "Changed" above).
+- A late denial (`authorize_exit(approve=False)`) still denies.
+- No τ_K default anywhere; a HOLD created without a declared bound carries `tau_k_seconds = 0.0` as before.
+
+#### Verification scope
+- 29 tests in `tests/test_hold_tau_k_fail_safe.py` (28 at the τ_K fix, one added with the `expire_hold` record); the enforcement ones fail when the advance-point check is disabled. Time is moved through the governor's clock, not by editing a HOLD record.
+- Single process, in-memory and JSON-file registries. Not exercised: the SQLite WAL backend under concurrent processes, and clock skew between processes.
+
+---
+
 ## [5.7.0] — Single-host safety, durable accounting and deployment evidence
 
 This version targets single-host deployments with explicitly bounded guarantees. Any Harv activity is an independent review, not a certification.

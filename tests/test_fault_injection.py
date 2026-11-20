@@ -258,8 +258,14 @@ class TestCrashAfterExternalAcceptance:
         gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0)
         assert state.resources["budget"].consumed == 25.0
 
-        # Reconciliation finds no effect → FAILED
-        assert gov.fail(p.idempotency_key, resource_id="budget", amount=25.0)
+        # Reconciliation finds no effect → FAILED. The finding is the proof of
+        # non-execution that a dispatched operation needs (decision B3).
+        from tenir_governance.operations.registry import NonExecutionAttestation
+        assert gov.fail(p.idempotency_key, resource_id="budget", amount=25.0,
+                        non_execution_attested=NonExecutionAttestation(
+                            idempotency_key=p.idempotency_key, source="provider-reconciliation",
+                            attestation="no charge found for this attempt",
+                            attested_at="2026-11-19T06:40:00+00:00"))
         record = gov.registry.get(p.idempotency_key)
         assert record.state == OperationState.FAILED
 

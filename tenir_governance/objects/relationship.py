@@ -29,12 +29,13 @@ class Relationship:
         from_agent_id: The source agent.
         to_agent_id: The target agent.
         rel_type: The relationship type.
-        trust_score: Trust level in [0, 1].
+        trust_score: Trust level in [0, 1], or None when not assessed (default).
+            No kernel reads it; it is never a favorable default.
     """
     from_agent_id: str
     to_agent_id: str
     rel_type: RelationshipType = RelationshipType.COORDINATION
-    trust_score: float = 1.0
+    trust_score: float | None = None
 
 
 @dataclass

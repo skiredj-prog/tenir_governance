@@ -39,6 +39,7 @@ over TENIR doctrine.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import math
@@ -57,10 +58,19 @@ from ..operations.registry import (
     OperationState,
     HoldRecord,
     ExitReceipt,
+    NonExecutionAttestation,
 )
 from ..operations.hold import HoldManager
 from ..operations.payload_binding import canonical_payload_hash
 from ..assessment.assessor import PostExecutionAssessor, AssessmentReport
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _utc_now_epoch() -> float:
+    return datetime.now(timezone.utc).timestamp()
 
 
 def _has_hypothesis_violated_signal(result) -> bool:
@@ -199,9 +209,62 @@ class ScoringKernelAdapter:
         hard_reasons: list[str] = []
         soft_reasons: list[str] = []
 
+        # Decision 5: finiteness guard at the kernel's entry. A non-finite
+        # measure (NaN, ±inf, a non-number) is insufficient evidence, never
+        # PASS: it must not reach a comparison, where NaN compares false and
+        # admits. It is reported as unmeasured, and every conclusive veto the
+        # other inputs still support is evaluated and governs (RFC-0 §4).
+        # A finite value outside the normalized range [0, 1] is just as
+        # invalid: the kernel rejects it, and a raise would end in the
+        # fail-closed HOLD that masks a veto. It is handled the same way.
+        def _finite(v):
+            if v is None:
+                return True  # absence is handled below as a missing measure
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                return False
+            return math.isfinite(v) and 0.0 <= v <= 1.0
+        named = {"pressure": pressure, "velocity": velocity, "capacity": capacity,
+                 "option_space": option_space, "authority": authority,
+                 "context_fit": context_fit, "evidence_quality": evidence_quality,
+                 "irreversibility_materiality": irreversibility_materiality}
+        non_finite = [n for n, v in named.items() if not _finite(v)]
+        pvc_non_finite = [n for n in ("pressure", "velocity", "capacity") if n in non_finite]
+        if "option_space" in non_finite:
+            option_space = None
+        if "authority" in non_finite:
+            authority = 0.5
+        if "context_fit" in non_finite:
+            context_fit = 0.5
+        if "evidence_quality" in non_finite:
+            evidence_quality = 0.5
+        if "irreversibility_materiality" in non_finite:
+            irreversibility_materiality = 0.5
+        if pvc_non_finite:
+            # S cannot be computed: no S-based verdict is drawn from a placeholder.
+            measured = {n: v for n, v in named.items()
+                        if v is not None and n not in non_finite}
+            return self._insufficient_evidence_without_s(
+                non_finite, option_space=option_space,
+                capacity=None if "capacity" in non_finite else capacity,
+                missing=[n for n in ("authority", "context_fit", "evidence_quality")
+                         if named[n] is None],
+                measured=measured,
+            )
+
         # Compute the extra signals the prototype's ScoringKernel checked
         # but TenirKernel does not natively evaluate. These become gate reasons
         # injected into TenirKernel.adjudicate().
+        # No favorable default for S (decision 2): a missing P, V or C is a hard
+        # gate. The placeholders only keep the arithmetic defined; capacity 0
+        # is the conservative bound, so the S preview cannot read as safe.
+        missing_pvc = [n for n, v in (("pressure", pressure), ("velocity", velocity),
+                                      ("capacity", capacity)) if v is None]
+        for n in missing_pvc:
+            hard_reasons.append(f"{n} missing: cannot score S without it")
+        if missing_pvc:
+            pressure = 0.5 if pressure is None else pressure
+            velocity = 0.5 if velocity is None else velocity
+            capacity = 0.0 if capacity is None else capacity
         s_preview = capacity / (pressure * velocity + 1e-6)
         if s_preview <= self._tau_floor:
             hard_reasons.append(
@@ -240,6 +303,11 @@ class ScoringKernelAdapter:
         # measurements. This prevents a favorable score from being
         # interpreted as evidence of safety on unmeasured dimensions.
         unmeasured = getattr(self, "_unmeasured_axes", [])
+        unmeasured.extend(n for n in missing_pvc if n not in unmeasured)
+        for n in non_finite:
+            if n in unmeasured:
+                unmeasured.remove(n)  # it has a value, but not a measure
+            unmeasured.append(n)
         for axis in unmeasured:
             soft_reasons.append(f"unmeasured axis: {axis} (neutral default, not favorable)")
 
@@ -277,16 +345,77 @@ class ScoringKernelAdapter:
         else:
             decision = Decision.HOLD.value
 
+        rationale = tk_result.get("rationale", "")
+        if non_finite and decision in (Decision.PASS.value, Decision.FLAG.value):
+            # Insufficient evidence: no admission on a non-finite measure. A
+            # conclusive veto from the other inputs has already governed above.
+            decision = Decision.HOLD.value
+            rationale = (f"INSUFFICIENT_EVIDENCE: invalid measure(s) (non-finite or outside [0, 1]) {', '.join(non_finite)}; "
+                         "held, not scored as admissible. " + rationale).strip()
+
         return {
             "kernel": "scoring",
             "s_score": tk_result.get("s_score"),
             "decision": decision,
-            "rationale": tk_result.get("rationale", ""),
-            "authority": authority,
-            "context_fit": context_fit,
-            "evidence_quality": evidence_quality,
+            "rationale": rationale,
+            # A non-finite input is reported as null (decision 6), not as its placeholder.
+            "authority": None if "authority" in non_finite else authority,
+            "context_fit": None if "context_fit" in non_finite else context_fit,
+            "evidence_quality": None if "evidence_quality" in non_finite else evidence_quality,
             "constraint_geometry": tk_result.get("constraint_geometry"),
             "operating_mode": tk_result.get("operating_mode"),
+            # Axes that carry no measurement: a neutral placeholder keeps the
+            # geometry complete, but they are declared, not measured (decision 2).
+            "declared_unmeasured": list(unmeasured),
+            "unmeasured_axes": list(non_finite),
+        }
+
+    # Adapter input name -> geometry axis name, where they differ.
+    _GEOMETRY_AXIS = {"irreversibility_materiality": "irreversible_pathway_materiality"}
+
+    def _conclusive_geometry_vetoes(self, measured):
+        """Hard facets of the kernel's geometry whose every axis carries a
+        valid measure. Such a facet does not depend on an unknown value, so
+        its violation is conclusive and must govern (RFC-0 §4)."""
+        point = {self._GEOMETRY_AXIS.get(n, n): float(v) for n, v in measured.items()}
+        policy = getattr(getattr(self._kernel, "policy", None), "geometry", None)
+        reasons = []
+        for facet in getattr(policy, "facets", ()):
+            if facet.severity != "hard" or not set(facet.normal) <= set(point):
+                continue
+            if sum(w * point[a] for a, w in facet.normal.items()) > facet.bound:
+                reasons.append(facet.rationale)
+        return reasons
+
+    def _insufficient_evidence_without_s(self, non_finite, *, option_space, capacity, missing,
+                                         measured=None):
+        """P, V or C is invalid: S is unknown. Veto on what is still
+        conclusive without S (a missing mandatory measure, a hard geometry
+        facet whose axes are all measured, such as authority or context_fit
+        below its floor, option space at its block floor, a measured capacity
+        of zero, which makes S = 0 whatever P and V are); otherwise HOLD for
+        insufficient evidence."""
+        hard = [f"{n} missing: cannot adjudicate without it" for n in missing]
+        hard.extend(self._conclusive_geometry_vetoes(measured or {}))
+        if capacity is not None and capacity <= 0:
+            hard.append(f"TAU BREACH: capacity={capacity} gives S=0 ≤ τ={self._tau_floor} "
+                        "whatever pressure and velocity are")
+        if option_space is not None and option_space <= self._option_space_block_floor:
+            hard.append(f"option_space={option_space:.3f} ≤ block floor")
+        reason = f"INSUFFICIENT_EVIDENCE: invalid measure(s) (non-finite or outside [0, 1]) {', '.join(non_finite)}; S not computed."
+        decision = Decision.HARD_VETO.value if hard else Decision.HOLD.value
+        return {
+            "kernel": "scoring",
+            "s_score": None,
+            "decision": decision,
+            "rationale": " ".join(hard + [reason]),
+            "authority": None,
+            "context_fit": None,
+            "evidence_quality": None,
+            "constraint_geometry": None,
+            "operating_mode": None,
+            "declared_unmeasured": list(non_finite) + [m for m in missing if m not in non_finite],
+            "unmeasured_axes": list(non_finite),
         }
 
 
@@ -363,9 +492,9 @@ class DualKernelGovernor:
     def adjudicate(
         self,
         passage,
-        pressure: float = 0.5,
-        velocity: float = 0.5,
-        capacity: float = 1.0,
+        pressure: float | None = None,
+        velocity: float | None = None,
+        capacity: float | None = None,
         option_space: float | None = None,
         authority: float | None = None,
         context_fit: float | None = None,
@@ -579,6 +708,7 @@ class DualKernelGovernor:
             budget_in_scope=budget_in_scope,
             policy=self.policy,
         )
+        composed_rationale = self._with_flag_conditions(composed_decision, composed_rationale)
 
         # 5. Ledger
         self.ledger.append(
@@ -737,8 +867,16 @@ class DualKernelGovernor:
                 elif composed_decision == Decision.HOLD.value:
                     # Enter through HoldManager so the lifecycle record is initialized.
                     # Do not invent a τ_K here: this generic Governor has no
-                    # organization-owned SLA. Scenario callers pass their bound explicitly.
-                    hold_entry = self.hold_manager.enter_hold(idem_key)
+                    # organization-owned SLA. The bound reaches the HOLD only
+                    # when the versioned policy declares it (RN-001 §2a).
+                    if self.policy.hold_tau_k_seconds is not None:
+                        hold_entry = self.hold_manager.enter_hold(
+                            idem_key,
+                            tau_k_seconds=float(self.policy.hold_tau_k_seconds),
+                            tau_k_source=self.policy.hold_tau_k_source,
+                        )
+                    else:
+                        hold_entry = self.hold_manager.enter_hold(idem_key)
                     if not hold_entry["entered"]:
                         composed_rationale = (
                             "HOLD decision could not initialize the lifecycle record: "
@@ -768,6 +906,7 @@ class DualKernelGovernor:
                     "operation_state": self.registry.get(idem_key).state.value if self.registry.get(idem_key) else "unknown",
                     "ledger_entries": self.ledger.entry_count,
                     "ledger_valid": self.ledger.verify_chain(),
+                    **self._flag_fields(composed_decision, scoring_result),
                 }
 
         if external_reservation_attempted and composed_decision == Decision.HARD_VETO.value:
@@ -785,6 +924,20 @@ class DualKernelGovernor:
             if current is not None:
                 response["operation_state"] = current.state.value
         return response
+
+    def _flag_fields(self, composed_decision: str, scoring_result: dict | None) -> dict[str, Any]:
+        """RFC-0 §4 fields of a result: the FLAG's declared conditions, and the
+        axes the score did not measure. Conditions come only from the policy."""
+        is_flag = composed_decision == Decision.FLAG.value
+        return {
+            "flag_conditions": list(self.policy.flag_conditions) if is_flag else [],
+            "declared_unmeasured": list((scoring_result or {}).get("declared_unmeasured", [])),
+        }
+
+    def _with_flag_conditions(self, composed_decision: str, rationale: str) -> str:
+        if composed_decision == Decision.FLAG.value and self.policy.flag_conditions:
+            return rationale + " Conditions: " + "; ".join(self.policy.flag_conditions) + "."
+        return rationale
 
     def _prospective_utilization(self, idempotency_key: str, resource, amount: float) -> float:
         """Budget utilization as it will be once this operation holds its budget.
@@ -1560,6 +1713,11 @@ class DualKernelGovernor:
         # authorization while an already-active quarantine blocks dispatch.
         actual_payload = metadata if payload is None else payload
         record = self.registry.get(idempotency_key)
+        if record is not None and self._tau_k_exhausted(record):
+            tau_k_refusal = self._fail_closed_on_tau_k_locked(idempotency_key, "dispatch")
+            if tau_k_refusal is not None:
+                return tau_k_refusal
+            record = self.registry.get(idempotency_key)
         if record is not None and record.commit_gate_required and record.state == OperationState.RESERVED:
             from ..experimental.ep02_commit_authorization import canonical_payload_bytes
 
@@ -2089,7 +2247,14 @@ class DualKernelGovernor:
             try:
                 failed = self.fail(
                     idempotency_key, resource_id, amount,
-                    authoritative_non_execution=True,
+                    non_execution_attested=NonExecutionAttestation(
+                        idempotency_key=idempotency_key,
+                        source="provider",
+                        attestation=(f"provider outcome FAILED; reference="
+                                     f"{prov_result.provider_reference or '-'}; "
+                                     f"error={prov_result.error or '-'}"),
+                        attested_at=_utc_now_iso(),
+                    ),
                 )
             finally:
                 with self._active_dispatches_lock:
@@ -2338,6 +2503,28 @@ class DualKernelGovernor:
                         "provider_reference": recon.provider_reference,
                     }
                 elif recon.resolved and recon.outcome == ProviderOutcome.FAILED:
+                    # T7: persist the proof of non-execution before any settlement.
+                    try:
+                        attested = self.registry.record_non_execution_attested(
+                            idempotency_key,
+                            NonExecutionAttestation(
+                                idempotency_key=idempotency_key,
+                                source="provider-reconciliation",
+                                attestation=(f"reconciliation outcome FAILED; reference="
+                                             f"{recon.provider_reference or '-'}"),
+                                attested_at=_utc_now_iso(),
+                            ),
+                        )
+                    except (ValueError, RuntimeError):
+                        attested = False
+                    if not attested:
+                        return {
+                            "reconciled": False,
+                            "idempotency_key": idempotency_key,
+                            "operation_state": current.state.value,
+                            "reason": "Non-execution attestation could not be persisted; budget unchanged.",
+                        }
+                    record = self.registry.get(idempotency_key) or record
                     committed = record.budget_committed
                     if self.consensus_backend is not None and record.amount > 0:
                         # The backend is authoritative when a crash occurred between
@@ -2646,8 +2833,24 @@ class DualKernelGovernor:
         success, _prev = self.registry.transition_to(idempotency_key, OperationState.CONFIRMED)
         return success
 
-    def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, authoritative_non_execution: bool = False) -> bool:
-        """Serialize failure compensation with confirmation for this governor instance."""
+    def fail(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *,
+             non_execution_attested=None, authoritative_non_execution: bool = False) -> bool:
+        """Serialize failure compensation with confirmation for this governor instance.
+
+        Once the attempt was dispatched (DISPATCHING or UNKNOWN), only a
+        ``NonExecutionAttestation`` (or its dict form) closes it as FAILED and
+        gives the budget back; it is persisted on the operation first. Without
+        it, DISPATCHING moves to UNKNOWN, the budget is kept, and False is
+        returned. ``authoritative_non_execution`` (a bare boolean) is no longer
+        accepted as proof and is kept only so that older callers do not break.
+        """
+        if authoritative_non_execution and non_execution_attested is None:
+            import warnings
+            warnings.warn(
+                "fail(authoritative_non_execution=True) is not proof of non-execution; "
+                "pass non_execution_attested=NonExecutionAttestation(...)",
+                DeprecationWarning, stacklevel=2,
+            )
         with self._settlement_lock:
             try:
                 with self.registry.settlement_lock(
@@ -2656,21 +2859,40 @@ class DualKernelGovernor:
                 ):
                     return self._fail_under_settlement_lock(
                         idempotency_key, resource_id, amount,
-                        authoritative_non_execution=authoritative_non_execution,
+                        non_execution_attested=non_execution_attested,
                     )
             except Exception:
                 # Do not mutate budget if cross-process coordination is uncertain.
                 return False
 
-    def _fail_under_settlement_lock(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, authoritative_non_execution: bool = False) -> bool:
+    def _fail_under_settlement_lock(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, non_execution_attested=None) -> bool:
         """Transition to FAILED and mutate only this operation's budget.
 
-        authoritative_non_execution must be true only when the provider or
-        reconciliation protocol explicitly confirms that no external effect occurred.
+        After dispatch, non_execution_attested is required: the provider or
+        reconciliation protocol confirms that no external effect occurred, and
+        the attestation is persisted on the operation before any budget change.
         """
         record = self.registry.get(idempotency_key)
         if record is None:
             return False
+        authoritative_non_execution = False
+        if non_execution_attested is not None:
+            att = non_execution_attested
+            if isinstance(att, dict):
+                att = NonExecutionAttestation.from_dict(att)
+            if not isinstance(att, NonExecutionAttestation):
+                return False
+            if record.state not in (OperationState.DISPATCHING, OperationState.UNKNOWN):
+                return False  # an attestation is for a dispatched attempt only
+            try:
+                authoritative_non_execution = self.registry.record_non_execution_attested(
+                    idempotency_key, att,
+                )
+            except (ValueError, RuntimeError):
+                return False
+            if not authoritative_non_execution:
+                return False
+            record = self.registry.get(idempotency_key)
         recorded_resource = record.resource_id or None
         if resource_id is None:
             resource_id = recorded_resource
@@ -2775,6 +2997,16 @@ class DualKernelGovernor:
                 idempotency_key, OperationState.FAILED,
             )
             return success
+        # Decision B3: once dispatch was possible, only proof of non-execution
+        # may close the attempt as FAILED and give its budget back. Without it,
+        # a DISPATCHING operation becomes UNKNOWN (reconciliation) and keeps
+        # its budget; an UNKNOWN one is left as it is.
+        if record.state in (OperationState.DISPATCHING, OperationState.UNKNOWN) \
+                and not authoritative_non_execution:
+            if record.state == OperationState.DISPATCHING:
+                self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+            return False
+
         if recorded_resource and recorded_amount > 0 and owns_budget:
             resource = self.membrane.state.resources.get(recorded_resource)
             if resource is None:
@@ -2822,7 +3054,7 @@ class DualKernelGovernor:
         return success
 
     def mark_unknown(self, idempotency_key: str) -> bool:
-        """Transition DISPATCHING → UNKNOWN. Outcome is uncertain."""
+        """Transition DISPATCHING → UNKNOWN. Outcome is uncertain; the budget is kept."""
         success, _prev = self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
         return success
 
@@ -2881,9 +3113,9 @@ class DualKernelGovernor:
         self,
         idempotency_key: str,
         passage=None,
-        pressure: float = 0.5,
-        velocity: float = 0.5,
-        capacity: float = 1.0,
+        pressure: float | None = None,
+        velocity: float | None = None,
+        capacity: float | None = None,
         option_space: float | None = None,
         authority: float | None = None,
         context_fit: float | None = None,
@@ -3004,6 +3236,13 @@ class DualKernelGovernor:
                             "reason": "Durable HOLD re-adjudication requires a persistent operation registry.",
                         }
 
+                    # A policy-declared τ_K refuses alone: past it, no fresh
+                    # evidence can resolve the HOLD (RN-001 §2a). Checked before
+                    # identity: the attempt is closed at its bound, whoever calls.
+                    if self._tau_k_exhausted(current):
+                        return self._fail_closed_on_tau_k(
+                            idempotency_key, current, "resolve_hold",
+                        )
                     # Bind HOLD resolution to the exact durable operation.
                     # Recheck under the lock so a stale caller cannot
                     # substitute identity while another worker settles HOLD.
@@ -3128,6 +3367,7 @@ class DualKernelGovernor:
             budget_in_scope=budget_in_scope,
             policy=self.policy,
         )
+        composed_rationale = self._with_flag_conditions(composed_decision, composed_rationale)
 
         # 5. Ledger
         self.ledger.append(
@@ -3196,7 +3436,10 @@ class DualKernelGovernor:
                     else:
                         success, _prev = self.registry.transition_to(
                             idem_key, OperationState.RESERVED,
-                            hold_record_changes={"exit_reason": "resolved"},
+                            hold_record_changes={
+                                "exit_reason": "resolved",
+                                "resolved_at": _utc_now_iso(),
+                            },
                         )
                         if success:
                             hold_resolved = True
@@ -3313,6 +3556,7 @@ class DualKernelGovernor:
             "operation_state": self.registry.get(idem_key).state.value if self.registry.get(idem_key) else "unknown",
             "ledger_entries": self.ledger.entry_count,
             "ledger_valid": self.ledger.verify_chain(),
+            **self._flag_fields(composed_decision, scoring_result),
             "hold_resolved": hold_resolved,
         }
 
@@ -3398,6 +3642,12 @@ class DualKernelGovernor:
                         self.consensus_backend is not None and self.registry.is_persistent
                     ),
                 ):
+                    record = self.registry.get(idempotency_key)
+                    if (record is not None and record.state == OperationState.HOLD
+                            and self._tau_k_exhausted(record)):
+                        return self._fail_closed_on_tau_k(
+                            idempotency_key, record, "escalate_hold",
+                        )
                     return self.hold_manager.escalate_hold(idempotency_key, escalated_by)
         except Exception:
             current = self.registry.get(idempotency_key)
@@ -3456,6 +3706,10 @@ class DualKernelGovernor:
                             "budget_reconciliation_required": True,
                             "reason": "Durable budget settlement requires a persistent operation registry.",
                         }
+                    if approve and self._tau_k_exhausted(record):
+                        return self._fail_closed_on_tau_k(
+                            idempotency_key, record, "authorize_exit",
+                        )
                     if not approve:
                         release_error = self._release_hold_budget_before_terminal_transition(
                             idempotency_key, record,
@@ -3531,10 +3785,12 @@ class DualKernelGovernor:
             }
 
     def expire_escalated(self, idempotency_key: str) -> dict[str, Any]:
-        """Expire an ESCALATED operation when τ_K expires → UNKNOWN.
+        """Expire an ESCALATED operation once τ_K is exhausted → UNKNOWN.
 
-        Per v7.1 §19: a time-based exit from ESCALATED is rejected.
-        Expiry produces UNKNOWN, not resolution.
+        Refuses before the bound, like ``expire_hold``. Per v7.1 §19 the runtime
+        label is UNKNOWN; the operation never reached dispatch, so the record says
+        CONFIRMED_NONEXECUTION. The reservation is left to reconciliation, as before.
+        An early end goes through ``cancel_escalation``.
         """
         try:
             with self._settlement_lock:
@@ -3551,6 +3807,181 @@ class DualKernelGovernor:
                 "expired": False,
                 "operation_state": current.state.value if current else None,
                 "reason": "Could not acquire durable HOLD settlement lock; operation unchanged.",
+            }
+
+    def cancel_escalation(
+        self, idempotency_key: str, cancelled_by: str, reason: str, decision: str,
+    ) -> dict[str, Any]:
+        """End an escalation before its bound, by an authority → FAILED.
+
+        Releases the reservation first (never dispatched), then records actor,
+        reason and decision. If the release cannot be proven, nothing changes.
+        """
+        try:
+            with self._settlement_lock:
+                with self.registry.settlement_lock(
+                    idempotency_key,
+                    require_persistent=(
+                        self.consensus_backend is not None and self.registry.is_persistent
+                    ),
+                ):
+                    record = self.registry.get(idempotency_key)
+                    if record is None or record.state != OperationState.ESCALATED:
+                        return self.hold_manager.cancel_escalation(
+                            idempotency_key, cancelled_by, reason, decision)
+                    if not all(str(v or "").strip() for v in (cancelled_by, reason, decision)):
+                        return self.hold_manager.cancel_escalation(
+                            idempotency_key, cancelled_by, reason, decision)
+                    release_error = self._release_hold_budget_before_terminal_transition(
+                        idempotency_key, record,
+                    )
+                    if release_error:
+                        return {
+                            "cancelled": False,
+                            "operation_state": record.state.value,
+                            "budget_reconciliation_required": True,
+                            "reason": release_error,
+                        }
+                    return self.hold_manager.cancel_escalation(
+                        idempotency_key, cancelled_by, reason, decision)
+        except Exception:
+            current = self.registry.get(idempotency_key)
+            return {
+                "cancelled": False,
+                "operation_state": current.state.value if current else None,
+                "budget_reconciliation_required": True,
+                "reason": "Could not acquire durable HOLD settlement lock; operation unchanged.",
+            }
+
+    # -- τ_K as a fail-safe bound (RN-001 §2a) ------------------------------
+    def _tau_k_exhausted(self, record: OperationRecord) -> bool:
+        """True when a held operation's τ_K is exhausted at an advance point.
+
+        HOLD / ESCALATED: the bound is exhausted now. RESERVED after a HOLD:
+        the resolution came after the bound, or its time is unknown. A record
+        without τ_K (none declared) is never exhausted: no bound is invented.
+        """
+        hold = record.hold_record
+        if hold is None or not hold.tau_k_seconds or hold.tau_k_seconds <= 0:
+            return False
+        try:
+            deadline = datetime.fromisoformat(hold.hold_start).timestamp() + float(hold.tau_k_seconds)
+        except (TypeError, ValueError):
+            # An unreadable HOLD start cannot show the bound was respected.
+            return record.state in (
+                OperationState.HOLD, OperationState.ESCALATED, OperationState.RESERVED,
+            )
+        if record.state in (OperationState.HOLD, OperationState.ESCALATED):
+            return _utc_now_epoch() >= deadline
+        if record.state == OperationState.RESERVED and hold.exit_reason == "resolved":
+            if not hold.resolved_at:
+                return True
+            try:
+                return datetime.fromisoformat(hold.resolved_at).timestamp() >= deadline
+            except (TypeError, ValueError):
+                return True
+        return False
+
+    def _fail_closed_on_tau_k(
+        self, idempotency_key: str, record: OperationRecord, point: str,
+    ) -> dict[str, Any]:
+        """Apply the fail-closed exhaustion policy. Caller holds the settlement lock.
+
+        The reservation is released first; the operation reaches FAILED only
+        once that is proven, otherwise it stays open for reconciliation.
+        """
+        hold = record.hold_record
+        bound = f"{hold.tau_k_seconds:g} s, source {hold.tau_k_source or 'unstated'}" if hold else "unknown"
+        release_error = self._release_hold_budget_before_terminal_transition(
+            idempotency_key, record,
+        )
+        base = {
+            "hold_resolved": False,
+            "exited": False,
+            "escalated": False,
+            "dispatched": False,
+            "tau_k_expired": True,
+            "advance_point": point,
+        }
+        if release_error:
+            reason = (f"τ_K exhausted ({bound}) at {point}: no effect; attempt not closed, "
+                      "budget reconciliation required; " + release_error)
+            self.ledger.append(
+                kernel="hold_lifecycle",
+                decision=Decision.HARD_VETO.value,
+                rationale=reason,
+                passage_id=record.passage_id,
+                idempotency_key=idempotency_key,
+                composed_decision=Decision.HARD_VETO.value,
+            )
+            return {
+                **base,
+                "operation_state": record.state.value,
+                "budget_reconciliation_required": True,
+                "reason": reason,
+            }
+        success, _prev = self.registry.transition_to(
+            idempotency_key,
+            OperationState.FAILED,
+            hold_record_changes={
+                "exit_reason": "expired",
+                "exhaustion_disposition": "fail-closed",
+                "exhausted_at": point,
+                "execution_record": "CONFIRMED_NONEXECUTION",
+            },
+        )
+        current = self.registry.get(idempotency_key)
+        # Every advance point checks before any DISPATCHING claim: the attempt
+        # was never dispatched, so its non-execution is established. FAILED is
+        # this runtime's label; the canonical record is CONFIRMED_NONEXECUTION.
+        reason = (
+            f"τ_K exhausted ({bound}) at {point}: FAIL-CLOSED, terminal for this attempt "
+            "identity, never dispatched (CONFIRMED_NONEXECUTION), reservation released "
+            "(not a resolution)."
+            if success else f"τ_K exhausted ({bound}) at {point}; transition to FAILED failed."
+        )
+        self.ledger.append(
+            kernel="hold_lifecycle",
+            decision=Decision.HARD_VETO.value,
+            rationale=reason,
+            passage_id=record.passage_id,
+            idempotency_key=idempotency_key,
+            composed_decision=Decision.HARD_VETO.value,
+        )
+        return {
+            **base,
+            "operation_state": current.state.value if current else None,
+            "composed_decision": Decision.HARD_VETO.value,
+            "execution_record": "CONFIRMED_NONEXECUTION" if success else None,
+            "reason": reason,
+        }
+
+    def _fail_closed_on_tau_k_locked(self, idempotency_key: str, point: str) -> dict[str, Any] | None:
+        """Take the settlement lock, re-read, and fail closed if still exhausted.
+
+        Returns None when, under the lock, the bound no longer applies (the
+        operation moved on); the caller then proceeds with the current record.
+        """
+        try:
+            with self._settlement_lock:
+                with self.registry.settlement_lock(
+                    idempotency_key,
+                    require_persistent=(
+                        self.consensus_backend is not None and self.registry.is_persistent
+                    ),
+                ):
+                    current = self.registry.get(idempotency_key)
+                    if current is None or not self._tau_k_exhausted(current):
+                        return None
+                    return self._fail_closed_on_tau_k(idempotency_key, current, point)
+        except Exception:
+            current = self.registry.get(idempotency_key)
+            return {
+                "dispatched": False,
+                "tau_k_expired": True,
+                "operation_state": current.state.value if current else None,
+                "budget_reconciliation_required": True,
+                "reason": "τ_K exhausted; could not acquire durable settlement lock; no dispatch.",
             }
 
     def check_hold_expiry(self, idempotency_key: str) -> dict[str, Any]:

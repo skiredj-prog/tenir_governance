@@ -174,8 +174,9 @@ class HoldManager:
         """Transition HOLD → ESCALATED.
 
         Per v7.1 §19: ESCALATED has no time-based resolution. It remains
-        pending authorization; if τ_K expires, expire_escalated() transitions
-        it to UNKNOWN, not to a resolved or executable state.
+        pending authorization; once τ_K is exhausted, expire_escalated()
+        transitions it to UNKNOWN, not to a resolved or executable state. An
+        early end is cancel_escalation(), by an authority.
 
         Per Blueprint v4.4: Escalate strategy = HOLD global + escalation
         to Risk Officer.
@@ -271,19 +272,23 @@ class HoldManager:
         )
 
         target_state = OperationState.HOLD if approve else OperationState.FAILED
+        changes = {"exit_receipt": receipt, "exit_reason": "authorized_exit"}
+        if not approve:
+            # Decision B3: an escalated attempt was never dispatched, so a
+            # denial establishes its non-execution, as τ_K and
+            # cancel_escalation already record. FAILED is the runtime label.
+            changes["execution_record"] = "CONFIRMED_NONEXECUTION"
         success, _prev = self._registry.transition_to(
             idempotency_key,
             target_state,
-            hold_record_changes={
-                "exit_receipt": receipt,
-                "exit_reason": "authorized_exit",
-            },
+            hold_record_changes=changes,
         )
         current = self._registry.get(idempotency_key)
 
         return {
             "exited": success,
             "operation_state": current.state.value if current else None,
+            "execution_record": ("CONFIRMED_NONEXECUTION" if success and not approve else None),
             "exit_receipt": receipt.to_dict() if success else None,
             "reason": f"Authorized exit ({'approved' if approve else 'denied'}) by {authorized_by}." if success
                       else f"Transition ESCALATED → {target_state.value} failed.",
@@ -320,51 +325,131 @@ class HoldManager:
                 "reason": expiry["reason"],
             }
 
+        # Decision B3: a HOLD was never dispatched, so its expiry establishes
+        # non-execution, recorded with the disposition, as the advance points
+        # and expire_escalated record theirs (RFC-4 v0.3 §2.2/§2.3).
         success, _prev = self._registry.transition_to(
             idempotency_key,
             OperationState.FAILED,
-            hold_record_changes={"exit_reason": "expired"},
+            hold_record_changes={
+                "exit_reason": "expired",
+                "exhaustion_disposition": "fail-closed",
+                "exhausted_at": "expire_hold",
+                "execution_record": "CONFIRMED_NONEXECUTION",
+            },
         )
         current = self._registry.get(idempotency_key)
         return {
             "expired": success,
             "operation_state": current.state.value if current else None,
+            "execution_record": "CONFIRMED_NONEXECUTION" if success else None,
             "reason": "τ_K exhausted — FAIL-CLOSED rejection (not a resolution)." if success
                       else "Transition HOLD → FAILED failed.",
         }
 
     def expire_escalated(self, idempotency_key: str) -> dict[str, Any]:
-        """Transition ESCALATED → UNKNOWN when τ_K expires on an escalated hold.
+        """Transition ESCALATED → UNKNOWN when τ_K is exhausted on an escalated hold.
 
-        Per v7.1 §19: a time-based exit from ESCALATED is rejected. Expiry
-        produces UNKNOWN, not resolution. This is the fail-closed path for
-        escalated operations where no authorized exit was provided in time.
+        Time-driven, like ``expire_hold``: it refuses before the bound (and when
+        no bound is set). Ending an escalation early is an authority's act and
+        goes through ``cancel_escalation`` (actor, reason, decision), never
+        through this verb, so that no expiry is recorded that did not happen.
+
+        Per v7.1 §19 the runtime label stays UNKNOWN. An ESCALATED operation
+        has not reached dispatch, so the record also says
+        ``execution_record="CONFIRMED_NONEXECUTION"``.
 
         Returns a dict with:
             - expired: bool
             - operation_state: str
+            - execution_record: str | None
             - reason: str
         """
         record = self._registry.get(idempotency_key)
         if record is None:
-            return {"expired": False, "operation_state": None,
+            return {"expired": False, "operation_state": None, "execution_record": None,
                     "reason": f"Operation '{idempotency_key}' not found."}
 
         if record.state != OperationState.ESCALATED:
             return {"expired": False, "operation_state": record.state.value,
+                    "execution_record": None,
                     "reason": f"Operation is in state {record.state.value}, not ESCALATED."}
+
+        expiry = self.check_tau_k_expiry(idempotency_key)
+        if not expiry["expired"]:
+            return {"expired": False, "operation_state": record.state.value,
+                    "execution_record": None, "reason": expiry["reason"]}
 
         success, _prev = self._registry.transition_to(
             idempotency_key,
             OperationState.UNKNOWN,
-            hold_record_changes={"exit_reason": "expired_escalated"},
+            hold_record_changes={
+                "exit_reason": "expired_escalated",
+                "execution_record": "CONFIRMED_NONEXECUTION",
+            },
         )
         current = self._registry.get(idempotency_key)
         return {
             "expired": success,
             "operation_state": current.state.value if current else None,
-            "reason": "τ_K expired on ESCALATED — UNKNOWN (time-based exit rejected, needs human)." if success
+            "execution_record": "CONFIRMED_NONEXECUTION" if success else None,
+            "reason": "τ_K exhausted on ESCALATED — UNKNOWN (runtime label), never dispatched "
+                      "(CONFIRMED_NONEXECUTION)." if success
                       else "Transition ESCALATED → UNKNOWN failed.",
+        }
+
+    def cancel_escalation(
+        self,
+        idempotency_key: str,
+        cancelled_by: str,
+        reason: str,
+        decision: str,
+    ) -> dict[str, Any]:
+        """End an escalation before its bound, by an authority: ESCALATED → FAILED.
+
+        Requires an actor, a reason and a decision reference; all three are kept
+        in an ExitReceipt on the HoldRecord. Terminal for this attempt identity;
+        never dispatched, so ``execution_record="CONFIRMED_NONEXECUTION"``.
+        """
+        record = self._registry.get(idempotency_key)
+        if record is None:
+            return {"cancelled": False, "operation_state": None, "execution_record": None,
+                    "reason": f"Operation '{idempotency_key}' not found."}
+        if record.state != OperationState.ESCALATED:
+            return {"cancelled": False, "operation_state": record.state.value,
+                    "execution_record": None,
+                    "reason": f"Operation is in state {record.state.value}, not ESCALATED."}
+        missing = [name for name, value in (("cancelled_by", cancelled_by), ("reason", reason),
+                                            ("decision", decision)) if not str(value or "").strip()]
+        if missing:
+            return {"cancelled": False, "operation_state": record.state.value,
+                    "execution_record": None,
+                    "reason": f"cancel_escalation requires {', '.join(missing)}."}
+
+        receipt = ExitReceipt(
+            authorized_by=cancelled_by,
+            scope="cancel_escalation",
+            timestamp=_utc_now(),
+            authorization=decision,
+            reason=reason,
+        )
+        success, _prev = self._registry.transition_to(
+            idempotency_key,
+            OperationState.FAILED,
+            hold_record_changes={
+                "exit_receipt": receipt,
+                "exit_reason": "cancelled",
+                "execution_record": "CONFIRMED_NONEXECUTION",
+            },
+        )
+        current = self._registry.get(idempotency_key)
+        return {
+            "cancelled": success,
+            "operation_state": current.state.value if current else None,
+            "execution_record": "CONFIRMED_NONEXECUTION" if success else None,
+            "exit_receipt": receipt.to_dict() if success else None,
+            "reason": f"Escalation cancelled by {cancelled_by}: {reason}" if success
+                      else "Transition ESCALATED → FAILED failed.",
         }
 
     def check_tau_k_expiry(self, idempotency_key: str, current_epoch: float | None = None) -> dict[str, Any]:
