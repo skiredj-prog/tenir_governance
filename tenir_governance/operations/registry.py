@@ -256,9 +256,17 @@ class NonExecutionAttestation:
     attestation itself (a provider reference, a signed statement, ...) and when
     it was made. It is persisted with the operation and never replaced.
 
-    The runtime records the attestation; it does not verify a signature or a
-    key (``verified_by_runtime`` stays False). Whether non-execution is true of
-    the external world remains assumption A.
+    Since 5.7.6 the runtime authenticates an attestation before it counts as
+    proof. An attestation supplied by a caller carries ``key_id`` and
+    ``signature`` over :meth:`signing_payload`; the governor verifies it with
+    the verifier it was configured with (``attestation_verifier``) and records
+    a copy with ``verified_by_runtime=True`` and ``verification`` naming the
+    method. An attestation the runtime builds itself from the provider's own
+    answer (``dispatch_and_execute``, ``reconcile_unknown``) is verified by
+    construction (``verification="provider-channel"``). The registry persists
+    verified attestations only. Whether non-execution is true of the external
+    world remains assumption A: verification binds the proof to a declared
+    attester, it does not observe the world.
     """
     idempotency_key: str
     source: str
@@ -266,6 +274,14 @@ class NonExecutionAttestation:
     attested_at: str
     observed_effect_count: int = 0
     verified_by_runtime: bool = False
+    # Authentication of a caller-supplied attestation (5.7.6). key_id names a
+    # key the governor's attestation verifier knows; signature is the hex
+    # signature of signing_payload() under that key.
+    key_id: str = ""
+    signature: str = ""
+    # How the runtime verified it, set by the runtime only (e.g.
+    # "hmac-sha256:ops-key", "provider-channel"). Empty while unverified.
+    verification: str = ""
 
     def validate(self) -> None:
         for name in ("idempotency_key", "source", "attestation", "attested_at"):
@@ -278,8 +294,39 @@ class NonExecutionAttestation:
             raise ValueError("non_execution_attested.attested_at must be an ISO 8601 time") from e
         if isinstance(self.observed_effect_count, bool) or self.observed_effect_count != 0:
             raise ValueError("non_execution_attested requires an observed effect count of 0")
-        if self.verified_by_runtime is not False:
-            raise ValueError("the runtime does not verify attestations; verified_by_runtime must be False")
+        for name in ("key_id", "signature", "verification"):
+            if not isinstance(getattr(self, name), str):
+                raise ValueError(f"non_execution_attested.{name} must be a string")
+        if self.verified_by_runtime not in (True, False):
+            raise ValueError("non_execution_attested.verified_by_runtime must be a boolean")
+        if self.verified_by_runtime and not self.verification.strip():
+            raise ValueError("a verified attestation names its verification method")
+        if not self.verified_by_runtime and self.verification:
+            raise ValueError("verification is set by the runtime once it has verified the attestation")
+
+    def signing_payload(self) -> bytes:
+        """Canonical bytes an attester signs: the attested facts, nothing else.
+
+        Neither the signature nor the runtime's verification fields are part
+        of it, so a verified copy keeps the same payload as the signed input.
+        """
+        return json.dumps(
+            {
+                "idempotency_key": self.idempotency_key,
+                "source": self.source,
+                "attestation": self.attestation,
+                "attested_at": self.attested_at,
+                "observed_effect_count": self.observed_effect_count,
+                "key_id": self.key_id,
+            },
+            sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ).encode("utf-8")
+
+    def verified(self, method: str) -> "NonExecutionAttestation":
+        """The runtime's verified copy of this attestation (same facts)."""
+        if not isinstance(method, str) or not method.strip():
+            raise ValueError("a verification method is required")
+        return replace(self, verified_by_runtime=True, verification=method)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -350,6 +397,17 @@ class OperationRecord:
     # Persisted proof of non-execution for a dispatched attempt (T7), as
     # NonExecutionAttestation.to_dict(). None unless one was accepted.
     non_execution_attested: dict | None = None
+    # Mandate recorded at admission (5.7.6), re-validated before dispatch:
+    # the delegation in scope, whether the acting agent was registered, and
+    # the version of the composition policy that admitted the operation.
+    delegating_agent_id: str = ""
+    delegatee_agent_id: str = ""
+    agent_registered_at_admission: bool = False
+    policy_version: str = ""
+    # RFC-0 §4: the conditions a FLAG admission declared (from the policy),
+    # and how each was acknowledged at dispatch (condition -> statement).
+    flag_conditions: list[str] = field(default_factory=list)
+    flag_conditions_met: dict | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -901,6 +959,7 @@ class DurableOperationRegistry:
         hold_record: HoldRecord | None = None,
         hold_record_changes: Mapping[str, Any] | None = None,
         commit_gate_verified: bool = False,
+        admission_terms: Mapping[str, Any] | None = None,
     ) -> tuple[bool, OperationState | None]:
         """Enforce shared quarantine even for direct registry admission calls.
 
@@ -921,6 +980,7 @@ class DurableOperationRegistry:
                     hold_record=hold_record,
                     hold_record_changes=hold_record_changes,
                     commit_gate_verified=commit_gate_verified,
+                    admission_terms=admission_terms,
                 )
         return self._transition_to_unchecked_quarantine(
             idempotency_key,
@@ -929,6 +989,7 @@ class DurableOperationRegistry:
             hold_record=hold_record,
             hold_record_changes=hold_record_changes,
             commit_gate_verified=commit_gate_verified,
+            admission_terms=admission_terms,
         )
 
     def _transition_to_unchecked_quarantine(
@@ -940,6 +1001,7 @@ class DurableOperationRegistry:
         hold_record: HoldRecord | None = None,
         hold_record_changes: Mapping[str, Any] | None = None,
         commit_gate_verified: bool = False,
+        admission_terms: Mapping[str, Any] | None = None,
     ) -> tuple[bool, OperationState | None]:
         """Atomically transition an operation to a new state.
 
@@ -968,7 +1030,33 @@ class DurableOperationRegistry:
         as a new ``hold_record`` or as ``hold_record_changes``. The metadata
         is applied only after the transition is legal and persisted in the
         same registry write as the state change.
+
+        ``admission_terms`` (5.7.6) records, in the same write as a RESERVED
+        transition, the terms under which the operation was admitted: the
+        ``composed_decision`` (PASS or FLAG) and the ``flag_conditions`` the
+        policy declared for a FLAG. They are what dispatch later enforces, so
+        they are never persisted apart from the admission itself.
         """
+        terms: dict[str, Any] = {}
+        if admission_terms is not None:
+            if new_state != OperationState.RESERVED:
+                raise ValueError("admission_terms apply only to a RESERVED transition")
+            unknown_terms = set(admission_terms) - {"composed_decision", "flag_conditions"}
+            if unknown_terms:
+                raise ValueError(f"unsupported admission term(s): {sorted(unknown_terms)}")
+            decision = admission_terms.get("composed_decision", "")
+            if not isinstance(decision, str) or decision not in ("PASS", "FLAG"):
+                raise ValueError("admission_terms.composed_decision must be PASS or FLAG")
+            conditions = admission_terms.get("flag_conditions", ())
+            if isinstance(conditions, str) or not all(
+                isinstance(c, str) and c.strip() for c in conditions
+            ):
+                raise ValueError("admission_terms.flag_conditions must be non-empty strings")
+            conditions = list(conditions)
+            if decision == "FLAG" and not conditions:
+                raise ValueError("a FLAG admission must record at least one condition")
+            terms = {"composed_decision": decision,
+                     "flag_conditions": conditions if decision == "FLAG" else []}
         if hold_record is not None and hold_record_changes:
             raise ValueError("provide hold_record or hold_record_changes, not both")
         if hold_record is not None and not isinstance(hold_record, HoldRecord):
@@ -1039,6 +1127,8 @@ class DurableOperationRegistry:
 
                 previous_hold_record = record.hold_record
                 previous_claimed_by = record.dispatch_claimed_by
+                previous_terms = (record.composed_decision, list(record.flag_conditions),
+                                  record.flag_conditions_met)
                 record.state = new_state
                 if hold_record is not None:
                     record.hold_record = hold_record
@@ -1046,6 +1136,12 @@ class DurableOperationRegistry:
                     record.hold_record = replace(record.hold_record, **changes)
                 if claimed_by:
                     record.dispatch_claimed_by = claimed_by
+                if terms:
+                    record.composed_decision = terms["composed_decision"]
+                    record.flag_conditions = list(terms["flag_conditions"])
+                    # A fresh admission (first or after HOLD) starts with no
+                    # acknowledgement: dispatch must obtain it again.
+                    record.flag_conditions_met = None
                 try:
                     self._persist()
                 except BaseException:
@@ -1059,6 +1155,8 @@ class DurableOperationRegistry:
                         record.state = prev_state
                         record.hold_record = previous_hold_record
                         record.dispatch_claimed_by = previous_claimed_by
+                        (record.composed_decision, record.flag_conditions,
+                         record.flag_conditions_met) = previous_terms
                     raise
                 return True, prev_state
             finally:
@@ -1182,8 +1280,16 @@ class DurableOperationRegistry:
         reconcile-FAILED) and only for this attempt. Once recorded it is never
         replaced; a later call (replay after a crash) is accepted and the first
         attestation stands.
+
+        Only an attestation the runtime has verified is persisted (5.7.6): a
+        caller-asserted one raises ``ValueError`` and nothing is recorded.
         """
         attestation.validate()
+        if not attestation.verified_by_runtime:
+            raise ValueError(
+                "non_execution_attested must be verified by the runtime before it is "
+                "recorded; a caller-asserted attestation is not proof"
+            )
         if attestation.idempotency_key != idempotency_key:
             return False
         value = json.loads(json.dumps(attestation.to_dict(), sort_keys=True))
@@ -1206,6 +1312,48 @@ class DurableOperationRegistry:
                 if record.state not in (OperationState.DISPATCHING, OperationState.UNKNOWN):
                     return False
                 record.non_execution_attested = value
+                self._persist()
+                return True
+            finally:
+                if flock:
+                    flock.close()
+
+    def record_flag_conditions_met(self, idempotency_key: str, met: Mapping[str, str]) -> bool:
+        """Persist how each declared FLAG condition was acknowledged at dispatch.
+
+        ``met`` maps every condition recorded at admission to a non-empty
+        statement of who or what established it. Accepted once, on a RESERVED
+        operation, and only when it covers every declared condition exactly.
+        """
+        if not isinstance(met, Mapping) or not met:
+            raise ValueError("flag_conditions_met must map each declared condition to a statement")
+        for condition, statement in met.items():
+            if not isinstance(condition, str) or not condition.strip():
+                raise ValueError("flag_conditions_met keys must be the declared conditions")
+            if not isinstance(statement, str) or not statement.strip():
+                raise ValueError(f"flag_conditions_met[{condition!r}] must say how the condition was met")
+        value = json.loads(json.dumps(dict(met), sort_keys=True))
+        with self._lock:
+            if self._corrupted:
+                raise RuntimeError(
+                    "Registry store is corrupted — refuse to record FLAG condition acknowledgement."
+                )
+            flock = self._lock_file()
+            try:
+                if self._store_path and os.path.exists(self._store_path):
+                    self._load()
+                record = self._records.get(idempotency_key)
+                if record is None:
+                    return False
+                if record.flag_conditions_met not in (None, {}):
+                    # Recorded once: a replay of the same statement is accepted
+                    # in any state, another statement never replaces it.
+                    return record.flag_conditions_met == value
+                if record.state != OperationState.RESERVED:
+                    return False
+                if set(record.flag_conditions) != set(value):
+                    return False
+                record.flag_conditions_met = value
                 self._persist()
                 return True
             finally:

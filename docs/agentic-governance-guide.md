@@ -1,4 +1,4 @@
-# Guide pratique — Composition deux-noyaux (v5.3.0)
+# Guide pratique — Composition deux-noyaux (v5.7.6)
 
 **Profil :** agentic-governance-profile-v1.0.0
 **Compliance :** profile-bound
@@ -23,9 +23,19 @@ Aucune dépendance supplémentaire — la composition utilise le `TenirKernel` e
 ```python
 from tenir_governance.sdk import DualKernelCompositionClient
 from tenir_governance.objects import Agent, Passage, Resource
+from tenir_governance.composition import CompositionPolicy
+from tenir_governance.operations import HmacAttestationVerifier
 
-# 1. Créer le client
-client = DualKernelCompositionClient()
+# 1. Créer le client. Depuis 5.7.6, deux déclarations du déploiement :
+#  - les conditions sous lesquelles un FLAG autorise (RFC-0 §4) ; sans elles,
+#    un FLAG est tenu (HOLD), pas admis ;
+#  - la clé avec laquelle le composant de réconciliation signe ses attestations
+#    de non-exécution ; sans vérificateur, aucune attestation d'appelant ne vaut preuve.
+OPS_SECRET = b"ops-reconciliation-key-0123456789"   # 16 octets minimum, tenu secret
+client = DualKernelCompositionClient(
+    policy=CompositionPolicy(flag_conditions=("revue humaine de l'effet sous 24 h",)),
+    attestation_verifier=HmacAttestationVerifier({"ops": OPS_SECRET}),
+)
 
 # 2. Enregistrer les agents et ressources
 client.register_agent(
@@ -43,14 +53,16 @@ p = Passage(agent_id="alice", action_type="payment", amount=10.0)
 result = client.adjudicate(
     p,
     pressure=0.2, velocity=0.3, capacity=1.0,
-    authority=0.9, context_fit=0.9, evidence_quality=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     resource_id="budget", amount=10.0,
 )
 
 print(result["composed_decision"])  # "FLAG" : quatre axes ne sont jamais mesurés
 print(result["operation_state"])     # "reserved"
 print(result["declared_unmeasured"]) # les axes non mesurés, déclarés
-print(result["flag_conditions"])     # [] tant que la politique n'en déclare pas
+print(result["flag_conditions"])     # ["revue humaine de l'effet sous 24 h"] : la condition déclarée
+assert result["composed_decision"] == "FLAG"
+assert result["flag_conditions"] == ["revue humaine de l'effet sous 24 h"]
 ```
 
 Depuis 5.7.5, aucun axe non mesuré ne reçoit de valeur favorable. Un appel sans `authority`, `context_fit` ou `evidence_quality` (ou sans `pressure`, `velocity`, `capacity`) n'est pas admis :
@@ -58,13 +70,38 @@ Depuis 5.7.5, aucun axe non mesuré ne reçoit de valeur favorable. Un appel san
 ```python
 p_missing = Passage(agent_id="alice", action_type="payment", amount=10.0)
 r = client.adjudicate(p_missing, pressure=0.2, velocity=0.3, capacity=1.0,
-                      resource_id="budget", amount=10.0)
+                      option_space=0.9, resource_id="budget", amount=10.0)
 assert r["composed_decision"] == "HARD_VETO"
 assert "authority missing" in r["scoring_rationale"]
 assert "authority" in r["declared_unmeasured"]
 ```
 
-Pour qu'un FLAG porte une condition explicite (RFC-0 §4), le déploiement la déclare dans `CompositionPolicy(flag_conditions=(...))`. Le runtime la recopie sur le résultat et au grand livre. Il ne la fait pas respecter.
+Depuis 5.7.6, `option_space` compte aussi : sans lui, la preuve est insuffisante et l'opération est tenue (`HOLD`, réservation conservée), jamais admise. Elle se ré-adjudique avec la mesure (`client.governor.resolve_hold`) :
+
+```python
+p_no_os = Passage(agent_id="alice", action_type="payment", amount=10.0)
+r = client.adjudicate(p_no_os, pressure=0.2, velocity=0.3, capacity=1.0,
+                      authority=0.9, context_fit=0.9, evidence_quality=0.9,
+                      resource_id="budget", amount=10.0)
+assert r["composed_decision"] == "HOLD" and r["operation_state"] == "hold"
+assert "option_space unmeasured" in r["scoring_rationale"]
+assert client.fail(p_no_os.idempotency_key, resource_id="budget", amount=10.0) is True  # libère la réservation
+```
+
+Un FLAG n'autorise que sous des conditions explicites (RFC-0 §4). Le déploiement les déclare dans `CompositionPolicy(flag_conditions=(...))` ; le runtime les recopie sur le résultat et au grand livre, et depuis 5.7.6 les fait respecter : avec la politique par défaut (aucune condition), un FLAG compose en `HOLD` ; et le dispatch d'une opération admise sous FLAG exige l'acquittement de chaque condition (`flag_conditions_met`, §4). Le runtime n'invente aucune condition.
+
+```python
+from tenir_governance.sdk import DualKernelCompositionClient as _Client
+client_default = _Client()  # politique par défaut : flag_conditions=()
+client_default.register_agent(Agent(agent_id="alice", authority_score=0.9))
+client_default.register_resource(Resource(resource_id="budget", capacity=100.0))
+r = client_default.adjudicate(Passage(agent_id="alice", action_type="payment", amount=10.0),
+                              pressure=0.2, velocity=0.3, capacity=1.0,
+                              authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
+                              resource_id="budget", amount=10.0)
+assert r["scoring_decision"] == "FLAG" and r["composed_decision"] == "HOLD"
+assert "FLAG states no condition" in r["composed_rationale"]
+```
 
 ---
 
@@ -95,7 +132,9 @@ CREATED → RESERVED → DISPATCHING → CONFIRMED
 from tenir_governance.objects import Passage
 
 M = dict(pressure=0.2, velocity=0.3, capacity=1.0,
-         authority=0.9, context_fit=0.9, evidence_quality=0.9)
+         authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
+# L'acquittement des conditions du FLAG : qui ou quoi a établi chaque condition déclarée.
+ACK = {"revue humaine de l'effet sous 24 h": "ticket OPS-12, revue par dana"}
 
 def admit_and_dispatch(amount):
     p = Passage(agent_id="alice", action_type="payment", amount=amount)
@@ -103,9 +142,15 @@ def admit_and_dispatch(amount):
     result = client.adjudicate(p, **M, resource_id="budget", amount=amount)
     assert result["composed_decision"] == "FLAG"
     assert result["operation_state"] == "reserved"
-    # Étape 2 : Dispatcher (RESERVED → DISPATCHING — claim atomique)
-    dispatch_result = client.dispatch(p.idempotency_key, resource_id="budget", amount=amount)
+    # Étape 2 : Dispatcher (RESERVED → DISPATCHING — claim atomique).
+    # Admise sous FLAG, l'opération ne part qu'avec l'acquittement de chaque
+    # condition déclarée ; il est persisté sur l'opération et inscrit au grand livre.
+    refused = client.dispatch(p.idempotency_key, resource_id="budget", amount=amount)
+    assert refused["dispatched"] is False and "not acknowledged" in refused["reason"]
+    dispatch_result = client.dispatch(p.idempotency_key, resource_id="budget", amount=amount,
+                                      flag_conditions_met=ACK)
     assert dispatch_result["dispatched"] is True
+    assert client.governor.registry.get(p.idempotency_key).flag_conditions_met == ACK
     return p
 
 budget = client.governor.membrane.state.resources["budget"]
@@ -119,28 +164,48 @@ assert client.governor.registry.get(p_a.idempotency_key).state.value == "confirm
 assert budget.consumed == consumed0 + 25.0
 
 # 3b : Échouer (→ FAILED — l'effet n'a pas eu lieu, budget libéré).
-# Après un dispatch, il faut une attestation de non-exécution (fournisseur ou
-# réconciliation). Sans elle, fail() refuse : l'opération passe en UNKNOWN
-# et garde son budget.
+# Après un dispatch, il faut une attestation de non-exécution, signée par le
+# composant qui a observé le fournisseur avec une clé que le client connaît
+# (attestation_verifier). Le runtime vérifie la signature, persiste sa copie
+# vérifiée et libère le budget. Sans attestation, ou si elle ne se vérifie pas,
+# fail() refuse : l'opération passe en UNKNOWN et garde son budget.
 p_b = admit_and_dispatch(10.0)
-from tenir_governance.operations import NonExecutionAttestation
-proof = NonExecutionAttestation(
-    idempotency_key=p_b.idempotency_key,
-    source="provider",                       # qui atteste
-    attestation="charge ch_123: never captured",  # la preuve elle-même
-    attested_at="2026-11-19T06:40:00+00:00",
+from tenir_governance.operations import NonExecutionAttestation, sign_non_execution_attestation
+proof = sign_non_execution_attestation(
+    NonExecutionAttestation(
+        idempotency_key=p_b.idempotency_key,
+        source="ops-reconciliation",                  # qui atteste
+        attestation="charge ch_123: never captured",  # la preuve elle-même
+        attested_at="2026-11-19T06:40:00+00:00",
+    ),
+    "ops", OPS_SECRET,                                # la clé déclarée au client
 )
 assert client.fail(p_b.idempotency_key, resource_id="budget", amount=10.0,
                    non_execution_attested=proof) is True
-# La preuve est persistée avec l'opération (le runtime ne vérifie pas la signature)
-assert client.governor.registry.get(p_b.idempotency_key).non_execution_attested["source"] == "provider"
-assert client.governor.registry.get(p_b.idempotency_key).state.value == "failed"
+record_b = client.governor.registry.get(p_b.idempotency_key)
+assert record_b.state.value == "failed"
+assert record_b.non_execution_attested["verified_by_runtime"] is True
+assert record_b.non_execution_attested["verification"] == "hmac-sha256:ops"
 assert budget.consumed == consumed0 + 25.0 and budget.reserved == reserved0
 
+# Sans attestation : UNKNOWN, budget retenu.
 p_b2 = admit_and_dispatch(10.0)
 assert client.fail(p_b2.idempotency_key, resource_id="budget", amount=10.0) is False
 assert client.governor.registry.get(p_b2.idempotency_key).state.value == "unknown"
 consumed0 += 10.0  # retenu jusqu'à la réconciliation
+
+# Attestation non signée (ou signée avec une autre clé) : refusée, UNKNOWN,
+# refus inscrit au grand livre. UNKNOWN n'est pas terminal : une attestation
+# vérifiée peut encore clore la tentative.
+p_b3 = admit_and_dispatch(10.0)
+unsigned = NonExecutionAttestation(idempotency_key=p_b3.idempotency_key, source="ops-reconciliation",
+                                   attestation="no charge", attested_at="2026-11-19T06:40:00+00:00")
+assert client.fail(p_b3.idempotency_key, resource_id="budget", amount=10.0,
+                   non_execution_attested=unsigned) is False
+assert client.governor.registry.get(p_b3.idempotency_key).state.value == "unknown"
+assert any("NON_EXECUTION_ATTESTATION_REFUSED" in e.rationale for e in client.governor.ledger.entries)
+assert client.fail(p_b3.idempotency_key, resource_id="budget", amount=10.0,
+                   non_execution_attested=sign_non_execution_attestation(unsigned, "ops", OPS_SECRET)) is True
 
 # 3c : Incertain (→ UNKNOWN — timeout, l'effet a pu avoir lieu)
 p_c = admit_and_dispatch(5.0)
@@ -148,6 +213,35 @@ assert client.mark_unknown(p_c.idempotency_key) is True
 assert client.governor.registry.get(p_c.idempotency_key).state.value == "unknown"
 assert budget.consumed == consumed0 + 30.0  # compté comme consommé jusqu'à la réconciliation
 ```
+
+### Le mandat est revalidé au dispatch (5.7.6)
+
+Entre l'admission et le dispatch, le mandat peut changer : agent retiré, délégation révoquée, limite de budget abaissée, version de politique modifiée. Sur la politique par défaut (`revalidate_mandate_at_dispatch=True`), `dispatch` et `dispatch_and_execute` le revérifient avant la revendication `DISPATCHING`. Un changement refuse en fail-closed : la réservation est libérée, la tentative se termine `FAILED` avec `execution_record = "CONFIRMED_NONEXECUTION"`, le fournisseur n'est jamais appelé, le refus est au grand livre (`HARD_VETO`, `MANDATE_REVALIDATION_FAILED`).
+
+```python
+client_rv = DualKernelCompositionClient(
+    policy=CompositionPolicy(flag_conditions=("revue humaine de l'effet sous 24 h",)))
+client_rv.register_agent(Agent(agent_id="alice", authority_score=0.9))
+client_rv.register_resource(Resource(resource_id="budget", capacity=100.0))
+budget_rv = client_rv.governor.membrane.state.resources["budget"]
+
+p_rv = Passage(agent_id="alice", action_type="payment", amount=60.0)
+assert client_rv.adjudicate(p_rv, **M, resource_id="budget", amount=60.0)["operation_state"] == "reserved"
+budget_rv.capacity = 50.0   # la limite est abaissée sous la réservation
+out = client_rv.dispatch(p_rv.idempotency_key, resource_id="budget", amount=60.0, flag_conditions_met=ACK)
+assert out["dispatched"] is False and out["mandate_revalidation_failed"] is True
+assert out["execution_record"] == "CONFIRMED_NONEXECUTION" and out["operation_state"] == "failed"
+assert budget_rv.reserved == 0.0 and budget_rv.consumed == 0.0
+
+p_rv2 = Passage(agent_id="alice", action_type="payment", amount=10.0)
+assert client_rv.adjudicate(p_rv2, **M, resource_id="budget", amount=10.0)["operation_state"] == "reserved"
+del client_rv.governor.membrane.state.agents["alice"]   # l'agent est retiré
+out = client_rv.dispatch(p_rv2.idempotency_key, resource_id="budget", amount=10.0, flag_conditions_met=ACK)
+assert out["dispatched"] is False
+assert out["mandate_changes"] == ["acting agent 'alice' is no longer registered"]
+```
+
+`CompositionPolicy(revalidate_mandate_at_dispatch=False)` rétablit le comportement de 5.7.5 (le mandat retiré après admission dispatche encore).
 
 
 ---
@@ -203,6 +297,10 @@ if resume["action"] == "dispatch":
     # L'opération est RESERVED — safe à dispatcher
     client.dispatch(resume["idempotency_key"],
                     resume["resource_id"], resume["amount"])
+elif resume["action"] == "acknowledge_flag_conditions":
+    # RESERVED sous FLAG : chaque condition de resume["flag_conditions"] doit être
+    # acquittée au dispatch (flag_conditions_met)
+    pass
 elif resume["action"] == "re_adjudicate":
     # CREATED — aucun check n'a été lancé, safe à ré-adjudiquer
     pass
@@ -222,12 +320,13 @@ from tenir_governance.composition import CompositionPolicy
 
 # Seuil personnalisé à 50 %, client distinct : il faut enregistrer agent et budget
 client_50 = DualKernelCompositionClient(
-    policy=CompositionPolicy(budget_escalation_threshold=0.50)
+    policy=CompositionPolicy(budget_escalation_threshold=0.50,
+                             flag_conditions=("revue humaine de l'effet sous 24 h",))
 )
 client_50.register_agent(Agent(agent_id="alice", authority_score=0.9))
 client_50.register_resource(Resource(resource_id="budget", capacity=100.0))
 M = dict(pressure=0.2, velocity=0.3, capacity=1.0,
-         authority=0.9, context_fit=0.9, evidence_quality=0.9)
+         authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
 
 # Premier paiement : 40 € sur 100 € → 40 % < 50 %, FLAG admis
 p1 = Passage(agent_id="alice", action_type="payment", amount=40.0)
@@ -295,7 +394,7 @@ canonical_context = {
 p = Passage(agent_id="alice", action_type="payment", amount=10.0)
 schema_result = client.adjudicate_schema(
     p, pressure=0.2, velocity=0.3, capacity=1.0,
-    authority=0.9, context_fit=0.9, evidence_quality=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     resource_id="budget", amount=10.0,
     canonical_context=canonical_context,
 )
@@ -338,7 +437,7 @@ delegation = Delegation(
 
 result = client.adjudicate(
     p, pressure=0.2, velocity=0.3, capacity=1.0,
-    authority=0.9, context_fit=0.9, evidence_quality=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     delegation=delegation,
 )
 
@@ -361,7 +460,7 @@ p = Passage(agent_id="alice", action_type="payment", amount=10.0,
 
 # Premier appel : admis (FLAG, quatre axes jamais mesurés)
 r1 = client.adjudicate(p, pressure=0.2, velocity=0.3, capacity=1.0,
-                       authority=0.9, context_fit=0.9, evidence_quality=0.9,
+                       authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
                        resource_id="budget", amount=10.0)
 assert r1["composed_decision"] == "FLAG"
 
@@ -369,7 +468,7 @@ assert r1["composed_decision"] == "FLAG"
 p2 = Passage(agent_id="alice", action_type="payment", amount=10.0,
              idempotency_key="op-unique-123")
 r2 = client.adjudicate(p2, pressure=0.2, velocity=0.3, capacity=1.0,
-                       authority=0.9, context_fit=0.9, evidence_quality=0.9,
+                       authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
                        resource_id="budget", amount=10.0)
 assert r2["composed_decision"] == "HARD_VETO"
 assert "Duplicate" in r2["composed_rationale"]
@@ -383,11 +482,10 @@ assert "Duplicate" in r2["composed_rationale"]
 |---------|------|
 | `client.adjudicate(passage, **kwargs)` | Adjudique — retourne le dict implementation-level |
 | `client.adjudicate_schema(passage, **kwargs)` | Adjudique — retourne le dict conforme schema 1.2 |
-| `client.dispatch(key, resource_id, amount)` | Claim atomique DISPATCHING |
+| `client.dispatch(key, resource_id, amount, flag_conditions_met=None)` | Claim atomique DISPATCHING. Admise sous FLAG, l'opération exige l'acquittement de chaque condition déclarée (persisté, au grand livre). Sur la politique par défaut, le mandat (agent, délégation, limite de budget, version de politique) est revalidé avant la revendication ; un changement refuse en fail-closed et libère la réservation |
 | `client.confirm(key)` | DISPATCHING → CONFIRMED |
-| `client.fail(key, resource_id, amount, non_execution_attested=None)` | → FAILED + libère/refund le budget. Après dispatch, exige une `NonExecutionAttestation` (source, attestation, horodatage), persistée avec l'opération ; sans elle → UNKNOWN, budget retenu, renvoie False |
+| `client.fail(key, resource_id, amount, non_execution_attested=None)` | → FAILED + libère/refund le budget. Après dispatch, exige une `NonExecutionAttestation` signée (`sign_non_execution_attestation`) que l'`attestation_verifier` du client authentifie ; la copie vérifiée est persistée avec l'opération. Sans elle, ou si elle ne se vérifie pas → UNKNOWN, budget retenu, refus au grand livre, renvoie False |
 | `client.mark_unknown(key)` | DISPATCHING → UNKNOWN, budget retenu jusqu'à réconciliation |
-| `client.mark_unknown(key)` | DISPATCHING → UNKNOWN |
 | `client.resume_existing(key)` | Reprend une opération existante |
 | `client.recover()` | Liste les opérations non résolues |
 | `client.register_agent(agent)` | Enregistre un agent |

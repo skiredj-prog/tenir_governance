@@ -19,6 +19,15 @@ import pytest
 from tenir_governance.operations import (
     DurableOperationRegistry, OperationRecord, OperationState,
 )
+from tenir_governance.composition.policy import CompositionPolicy
+from tenir_governance.operations.attestation import HmacAttestationVerifier, sign_non_execution_attestation
+
+# 5.7.6 (RFC-0 §4): a FLAG admits only under conditions the policy declares, and
+# their acknowledgement is required at dispatch. The test deployment declares one.
+TEST_FLAG_CONDITIONS = ("test supervision",)
+TEST_FLAG_ACK = {"test supervision": "acknowledged by the test"}
+TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS)
+
 
 # These imports require modules not yet built in the kernel repo
 # (ScoringKernel, TransitionMembrane, MembraneState, DualKernelGovernor).
@@ -60,7 +69,12 @@ def _setup_governor(budget_capacity=100.0, registry=None):
     tenir_kernel = TenirKernel()
     scoring = ScoringKernelAdapter(tenir_kernel)
     membrane = TransitionMembrane(state)
-    return DualKernelGovernor(scoring, membrane, registry=registry), state
+    return DualKernelGovernor(scoring, membrane, registry=registry, policy=CompositionPolicy(**TEST_POLICY_KW),
+                              attestation_verifier=HmacAttestationVerifier(TEST_ATTESTATION_KEYS)), state
+
+
+# 5.7.6: a caller's attestation is proof once it authenticates under a declared key.
+TEST_ATTESTATION_KEYS = {"reconciliation": b"test-reconciliation-key-0123456789"}
 
 
 def _adjudicate(gov, passage, **kwargs):
@@ -68,6 +82,7 @@ def _adjudicate(gov, passage, **kwargs):
     kwargs.setdefault("authority", 0.9)
     kwargs.setdefault("context_fit", 1.0)
     kwargs.setdefault("evidence_quality", 1.0)
+    kwargs.setdefault("option_space", 0.9)
     return gov.adjudicate(passage, **kwargs)
 
 
@@ -138,7 +153,7 @@ class TestCrashAfterReserve:
         # Recovery: this operation was authorized but not dispatched.
         # It's safe to dispatch.
         dispatch_result = gov.dispatch(p.idempotency_key,
-                                        resource_id="budget", amount=25.0)
+                                        resource_id="budget", amount=25.0, flag_conditions_met=TEST_FLAG_ACK)
         assert dispatch_result["dispatched"] is True
         assert dispatch_result["operation_state"] == OperationState.DISPATCHING.value
 
@@ -166,7 +181,7 @@ class TestCrashAfterDispatchClaim:
         assert r["composed_decision"] in (Decision.PASS.value, Decision.FLAG.value)
 
         dispatch_result = gov.dispatch(p.idempotency_key,
-                                        resource_id="budget", amount=25.0)
+                                        resource_id="budget", amount=25.0, flag_conditions_met=TEST_FLAG_ACK)
         assert dispatch_result["dispatched"] is True
 
         # Simulate crash: process dies here. External response is lost.
@@ -202,7 +217,7 @@ class TestCrashAfterDispatchClaim:
         def try_dispatch():
             barrier.wait()
             result = gov.dispatch(p.idempotency_key,
-                                  resource_id="budget", amount=25.0)
+                                  resource_id="budget", amount=25.0, flag_conditions_met=TEST_FLAG_ACK)
             results.append(result["dispatched"])
 
         t1 = threading.Thread(target=try_dispatch)
@@ -231,7 +246,7 @@ class TestCrashAfterExternalAcceptance:
         p = Passage(agent_id="alice", action_type="payment", amount=25.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
                        resource_id="budget", amount=25.0)
-        gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0)
+        gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0, flag_conditions_met=TEST_FLAG_ACK)
 
         # Simulate: external system accepted, but response lost.
         # Reconciliation (in a real system) would query the provider.
@@ -255,17 +270,20 @@ class TestCrashAfterExternalAcceptance:
         p = Passage(agent_id="alice", action_type="payment", amount=25.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
                        resource_id="budget", amount=25.0)
-        gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0)
+        gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0, flag_conditions_met=TEST_FLAG_ACK)
         assert state.resources["budget"].consumed == 25.0
 
         # Reconciliation finds no effect → FAILED. The finding is the proof of
         # non-execution that a dispatched operation needs (decision B3).
         from tenir_governance.operations.registry import NonExecutionAttestation
+        proof = sign_non_execution_attestation(
+            NonExecutionAttestation(
+                idempotency_key=p.idempotency_key, source="provider-reconciliation",
+                attestation="no charge found for this attempt",
+                attested_at="2026-11-19T06:40:00+00:00"),
+            "reconciliation", TEST_ATTESTATION_KEYS["reconciliation"])
         assert gov.fail(p.idempotency_key, resource_id="budget", amount=25.0,
-                        non_execution_attested=NonExecutionAttestation(
-                            idempotency_key=p.idempotency_key, source="provider-reconciliation",
-                            attestation="no charge found for this attempt",
-                            attested_at="2026-11-19T06:40:00+00:00"))
+                        non_execution_attested=proof)
         record = gov.registry.get(p.idempotency_key)
         assert record.state == OperationState.FAILED
 
@@ -279,7 +297,7 @@ class TestCrashAfterExternalAcceptance:
         p = Passage(agent_id="alice", action_type="payment", amount=25.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
                        resource_id="budget", amount=25.0)
-        gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0)
+        gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0, flag_conditions_met=TEST_FLAG_ACK)
 
         # Reconciliation is uncertain → UNKNOWN
         assert gov.mark_unknown(p.idempotency_key)
@@ -312,7 +330,7 @@ class TestCrashBeforeConfirmation:
         p = Passage(agent_id="alice", action_type="payment", amount=25.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
                        resource_id="budget", amount=25.0)
-        gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0)
+        gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0, flag_conditions_met=TEST_FLAG_ACK)
 
         # Crash: external effect occurred but not recorded.
         # Recovery finds DISPATCHING.

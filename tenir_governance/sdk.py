@@ -435,6 +435,7 @@ class DualKernelCompositionClient:
         store_path: str | None = None,
         require_persistence: bool = False,
         enable_assessor: bool = False,
+        attestation_verifier=None,
     ) -> None:
         """Initialize the dual-kernel composition client.
 
@@ -452,6 +453,11 @@ class DualKernelCompositionClient:
             enable_assessor: If True, enable the post-execution assessor
                 (τ⁻¹ and EVP). The assessor runs AFTER terminal states and
                 does NOT feed back into admissibility.
+            attestation_verifier: Optional verifier (``verify(attestation)``,
+                e.g. ``HmacAttestationVerifier``) that authenticates the
+                ``NonExecutionAttestation`` a caller passes to ``fail()``
+                after dispatch (5.7.6). Without one, only the runtime's own
+                provider observation can close a dispatched attempt as FAILED.
         """
         from .composition.governor import DualKernelGovernor, ScoringKernelAdapter
         from .composition.lattice import HashChainedLedger
@@ -498,6 +504,7 @@ class DualKernelCompositionClient:
             policy=self._policy,
             registry=self._registry,
             assessor=assessor,
+            attestation_verifier=attestation_verifier,
         )
 
     @property
@@ -573,9 +580,21 @@ class DualKernelCompositionClient:
         return conform_to_schema(result)
 
     def dispatch(self, idempotency_key: str, resource_id: str | None = None,
-                 amount: float = 0.0) -> dict:
-        """Atomically claim the dispatch slot."""
-        return self._governor.dispatch(idempotency_key, resource_id, amount)
+                 amount: float = 0.0, *, payload: dict | None = None,
+                 flag_conditions_met: dict | None = None) -> dict:
+        """Atomically claim the dispatch slot (RESERVED → DISPATCHING).
+
+        ``flag_conditions_met`` (5.7.6, RFC-0 §4) is required for an operation
+        admitted under FLAG: a mapping of every condition recorded at admission
+        to how it was met. It is persisted and ledgered before the claim; the
+        dispatch is refused while a condition is unacknowledged. On the default
+        policy the admitting mandate is also re-validated first: a withdrawn
+        agent or delegation, a lowered budget limit, or a changed policy
+        version refuses fail-closed and releases the reservation.
+        """
+        return self._governor.dispatch(idempotency_key, resource_id, amount,
+                                       payload=payload,
+                                       flag_conditions_met=flag_conditions_met)
 
     def confirm(self, idempotency_key: str) -> bool:
         """Confirm the external effect occurred."""
@@ -587,9 +606,11 @@ class DualKernelCompositionClient:
 
         Once the operation was dispatched (DISPATCHING or UNKNOWN), this needs
         ``non_execution_attested``: a ``NonExecutionAttestation`` (source,
-        attestation, time, effect count 0) bound to this operation, persisted
-        before any budget change. Without it, a DISPATCHING operation moves to
-        UNKNOWN, keeps its budget, and False is returned.
+        attestation, time, effect count 0) bound to this operation, signed with
+        a key the client's ``attestation_verifier`` knows (5.7.6), persisted
+        before any budget change. Without it, or when it does not verify, a
+        DISPATCHING operation moves to UNKNOWN, keeps its budget, and False is
+        returned.
         """
         return self._governor.fail(idempotency_key, resource_id, amount,
                                    non_execution_attested=non_execution_attested)

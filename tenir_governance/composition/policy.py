@@ -48,9 +48,21 @@ class CompositionPolicy:
         flag_conditions: The explicit conditions or supervision under which a
             FLAG authorizes (RFC-0 §4), declared by the deployment. Copied onto
             every FLAG result (``flag_conditions``) and into its ledgered
-            rationale. Empty (default): the runtime invents none, and a FLAG
-            then states no condition, which REG records as an implementation
-            gap. The runtime records these conditions; it does not enforce them.
+            rationale. Since 5.7.6 they are enforced: a FLAG admits only when
+            the policy declares at least one condition (with the empty default
+            a FLAG is held, not admitted), and the dispatch of a FLAG-admitted
+            operation requires every declared condition to be acknowledged
+            (``flag_conditions_met``), which is persisted and ledgered. The
+            runtime still invents no condition.
+        revalidate_mandate_at_dispatch: If True (default), the default dispatch
+            path re-validates, before the DISPATCHING claim, the mandate that
+            admitted the operation: the acting agent is still registered, the
+            delegation in scope is still trusted, the budget still covers the
+            amount (a lowered limit refuses), and the composition policy
+            version is the one that admitted. A change refuses fail-closed:
+            the reservation is released and the attempt ends FAILED with
+            CONFIRMED_NONEXECUTION. False restores the 5.7.5 behaviour, where
+            a mandate withdrawn after admission could still dispatch.
     """
     version: str = "composition-v1.0.0"
     budget_escalation_threshold: float = 0.85
@@ -60,8 +72,11 @@ class CompositionPolicy:
     hold_tau_k_seconds: float | None = None
     hold_tau_k_source: str = ""
     flag_conditions: tuple[str, ...] = ()
+    revalidate_mandate_at_dispatch: bool = True
 
     def validate(self) -> None:
+        if not isinstance(self.revalidate_mandate_at_dispatch, bool):
+            raise ValueError("revalidate_mandate_at_dispatch must be a bool")
         assert 0.0 <= self.budget_escalation_threshold <= 1.0, (
             "budget_escalation_threshold must be in [0.0, 1.0]"
         )

@@ -21,6 +21,14 @@ from tenir_governance.operations.registry import DurableOperationRegistry, Opera
 from tenir_kernel.kernel import TenirKernel
 from tenir_governance.composition import ScoringKernelAdapter
 from tenir_governance.objects import Agent, Passage
+from tenir_governance.composition.policy import CompositionPolicy
+
+# 5.7.6 (RFC-0 §4): a FLAG admits only under conditions the policy declares, and
+# their acknowledgement is required at dispatch. The test deployment declares one.
+TEST_FLAG_CONDITIONS = ("test supervision",)
+TEST_FLAG_ACK = {"test supervision": "acknowledged by the test"}
+TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS)
+
 
 _TEST_SIGNING_KEY = b"quarantine-test-only-nonproduction-authentication-key"
 
@@ -48,7 +56,7 @@ def _governor(path, *, verifier=None):
     scoring = ScoringKernelAdapter(TenirKernel())
     membrane = TransitionMembrane(state)
     registry = DurableOperationRegistry(str(path), quarantine_release_verifier=verifier)
-    return DualKernelGovernor(scoring, membrane, registry=registry)
+    return DualKernelGovernor(scoring, membrane, registry=registry, policy=CompositionPolicy(**TEST_POLICY_KW))
 
 
 def _register_reserved(governor, key="op-q"):
@@ -78,7 +86,7 @@ def _child_dispatch(path, key, queue):
     """Executed under spawn: independent interpreter, state, and registry."""
     try:
         governor = _governor(path)
-        result = governor.dispatch(key)
+        result = governor.dispatch(key, flag_conditions_met=TEST_FLAG_ACK)
         queue.put({
             "dispatched": result["dispatched"],
             "reason": result.get("reason", ""),
@@ -104,7 +112,7 @@ def test_second_registry_blocks_dispatch_until_verified_release(tmp_path):
     other = _governor(store)
     assert other.membrane.state.quarantine_active is True
     assert other.registry.quarantine_is_active() is True
-    blocked = other.dispatch("op-q")
+    blocked = other.dispatch("op-q", flag_conditions_met=TEST_FLAG_ACK)
     assert blocked["dispatched"] is False
     assert "QUARANTINE_LOCK" in blocked["reason"]
     assert other.registry.get("op-q").state == OperationState.RESERVED
@@ -116,7 +124,7 @@ def test_second_registry_blocks_dispatch_until_verified_release(tmp_path):
     assert released["released"] is True
     assert released["receipt"]["authorization_id"].startswith("test-hmac-")
     assert other.registry.quarantine_is_active() is False
-    assert other.dispatch("op-q")["dispatched"] is True
+    assert other.dispatch("op-q", flag_conditions_met=TEST_FLAG_ACK)["dispatched"] is True
 
 
 def test_unconfigured_verifier_denies_release_and_direct_false_write(tmp_path):
@@ -177,7 +185,7 @@ def test_dispatch_claim_and_quarantine_activation_are_atomically_ordered(tmp_pat
         return original(key, state, **kwargs)
 
     monkeypatch.setattr(worker.registry, "transition_to", paused_claim)
-    attempt = threading.Thread(target=lambda: outcome.update(worker.dispatch("op-q")), daemon=True)
+    attempt = threading.Thread(target=lambda: outcome.update(worker.dispatch("op-q", flag_conditions_met=TEST_FLAG_ACK)), daemon=True)
     attempt.start()
     assert entered.wait(5)
     locker = threading.Thread(
@@ -194,7 +202,7 @@ def test_dispatch_claim_and_quarantine_activation_are_atomically_ordered(tmp_pat
     assert outcome["dispatched"] is True  # earlier claim remains valid
     assert activation_done.is_set()
     assert owner.registry.quarantine_is_active() is True
-    assert worker.dispatch("op-after")["dispatched"] is False
+    assert worker.dispatch("op-after", flag_conditions_met=TEST_FLAG_ACK)["dispatched"] is False
     assert owner.registry.get("op-after").state == OperationState.RESERVED
 
 
@@ -222,7 +230,7 @@ def test_admission_and_quarantine_activation_are_atomically_ordered(tmp_path, mo
     def run_adjudication():
         outcome.update(worker.adjudicate(
             passage, pressure=0.2, velocity=0.3, capacity=1.0,
-            authority=0.9, context_fit=0.9, evidence_quality=0.9,
+            authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
         ))
     attempt = threading.Thread(target=run_adjudication, daemon=True)
     attempt.start()
@@ -243,7 +251,7 @@ def test_admission_and_quarantine_activation_are_atomically_ordered(tmp_path, mo
     late = worker.adjudicate(
         Passage(agent_id="alice", action_type="read_only", idempotency_key="late"),
         pressure=0.2, velocity=0.3, capacity=1.0,
-        authority=0.9, context_fit=0.9, evidence_quality=0.9,
+        authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     )
     assert late["composed_decision"] == "HARD_VETO"
     assert late["operation_state"] != OperationState.RESERVED.value
@@ -260,7 +268,7 @@ def test_activation_survives_process_crash_and_restart(tmp_path):
     assert proc.exitcode == 0
     fresh = _governor(store)
     assert fresh.membrane.quarantine_active is True
-    assert fresh.dispatch("op-q")["dispatched"] is False
+    assert fresh.dispatch("op-q", flag_conditions_met=TEST_FLAG_ACK)["dispatched"] is False
     assert fresh.registry.get("op-q").state == OperationState.RESERVED
 
 
@@ -272,7 +280,7 @@ def test_corrupt_quarantine_mark_fails_closed_and_cannot_be_released(tmp_path):
     Path(str(store) + ".quarantine.json").write_text("{invalid JSON", encoding="utf-8")
     fresh = _governor(store, verifier=_trusted_test_verifier)
     assert fresh.registry.quarantine_is_active() is True
-    assert fresh.dispatch("op-q")["dispatched"] is False
+    assert fresh.dispatch("op-q", flag_conditions_met=TEST_FLAG_ACK)["dispatched"] is False
     refused = fresh.release_quarantine("operator", "lei", "anything")
     assert refused["released"] is False
     assert "corrupt" in refused["reason"]
@@ -301,7 +309,7 @@ def test_hold_readjudication_cannot_admit_under_shared_quarantine(tmp_path):
             passage_id="passage-held", idempotency_key=key,
             agent_id="alice", action_type="read_only",
         ),
-        authority=0.9, context_fit=0.9, evidence_quality=0.9,
+        authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     )
     assert result["hold_resolved"] is False
     assert "QUARANTINE_LOCK" in result["reason"]
@@ -323,7 +331,7 @@ def test_originating_worker_observes_release_by_independent_worker(tmp_path):
     assert origin.membrane.state.quarantine is True
     assert origin.registry.quarantine_is_active() is False
     assert origin.membrane.state.quarantine_active is False
-    assert origin.dispatch("op-stale")["dispatched"] is True
+    assert origin.dispatch("op-stale", flag_conditions_met=TEST_FLAG_ACK)["dispatched"] is True
 
     # A new incident on the same worker must reactivate the shared gate.
     origin.lock_quarantine("next-incident")
@@ -344,7 +352,7 @@ def test_removed_quarantine_mark_is_not_interpreted_as_unlocked(tmp_path):
     mark.unlink()
     fresh = _governor(store, verifier=_trusted_test_verifier)
     assert fresh.registry.quarantine_is_active() is True
-    assert fresh.dispatch("op-deleted-mark")["dispatched"] is False
+    assert fresh.dispatch("op-deleted-mark", flag_conditions_met=TEST_FLAG_ACK)["dispatched"] is False
     denied = fresh.release_quarantine("operator", "lei", "ceremony-G-R5-001")
     assert denied["released"] is False
     assert "corrupt" in denied["reason"]
@@ -508,7 +516,7 @@ def test_slow_hold_kernel_does_not_delay_emergency_quarantine(tmp_path):
     resolution = threading.Thread(
         target=lambda: outcome.update(resolver.resolve_hold(
             key, passage=passage,
-            authority=0.9, context_fit=0.9, evidence_quality=0.9,
+            authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
         )), daemon=True,
     )
     resolution.start()
@@ -884,7 +892,7 @@ def test_release_mark_write_error_remains_locked_across_workers(tmp_path, monkey
 
     second = _governor(store, verifier=_trusted_test_verifier)
     assert second.registry.quarantine_is_active() is True
-    assert second.dispatch("pending-release")["dispatched"] is False
+    assert second.dispatch("pending-release", flag_conditions_met=TEST_FLAG_ACK)["dispatched"] is False
     refused = _release(second, store)
     assert refused["released"] is False
     assert "corrupt" in refused["reason"]
@@ -907,7 +915,7 @@ def test_release_crash_after_inactive_write_remains_locked_on_restart(tmp_path):
     assert Path(str(store) + ".quarantine.release-pending").exists()
     restarted = _governor(store)
     assert restarted.registry.quarantine_is_active() is True
-    assert restarted.dispatch("crash-release")["dispatched"] is False
+    assert restarted.dispatch("crash-release", flag_conditions_met=TEST_FLAG_ACK)["dispatched"] is False
 
 
 def test_successful_quarantine_release_cleans_pending_guard(tmp_path):
@@ -1049,7 +1057,7 @@ def test_slow_durable_backend_does_not_block_emergency_quarantine(
     claimant.consensus_backend = PausedBackend()
     outcome = {}
     worker = threading.Thread(
-        target=lambda: outcome.update(claimant.dispatch(key)), daemon=True,
+        target=lambda: outcome.update(claimant.dispatch(key, flag_conditions_met=TEST_FLAG_ACK)), daemon=True,
     )
     worker.start()
     try:
@@ -1073,7 +1081,7 @@ def test_slow_durable_backend_does_not_block_emergency_quarantine(
     assert claimant.registry.get(key).state == OperationState.DISPATCHING
     assert claimant.registry.get(key).budget_committed is True
     assert locker.registry.quarantine_is_active() is True
-    assert locker.dispatch(key)["dispatched"] is False
+    assert locker.dispatch(key, flag_conditions_met=TEST_FLAG_ACK)["dispatched"] is False
 
 
 def test_failed_claimed_backend_commit_does_not_expose_provider_execution(tmp_path):
@@ -1103,7 +1111,7 @@ def test_failed_claimed_backend_commit_does_not_expose_provider_execution(tmp_pa
             return SimpleNamespace(status="REFUSED")
 
     gov.consensus_backend = RefusingBackend()
-    result = gov.dispatch(key)
+    result = gov.dispatch(key, flag_conditions_met=TEST_FLAG_ACK)
     assert result["dispatched"] is False
     assert result["operation_state"] == OperationState.DISPATCHING.value
     assert "refused commit" in result["reason"]

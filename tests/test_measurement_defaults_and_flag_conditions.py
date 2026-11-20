@@ -39,18 +39,30 @@ def test_missing_mandatory_measure_is_not_admitted():
     assert "authority" in r["declared_unmeasured"]
 
 
-def test_absent_option_space_is_declared_unmeasured():
+def test_absent_option_space_is_declared_unmeasured_and_held():
+    """5.7.6: an unmeasured option space is insufficient evidence (decision 2
+    applied in full): HOLD, never PASS or FLAG; the axis stays declared."""
     kw = dict(FULL)
     kw.pop("option_space")
-    r = _gov().adjudicate(Passage(agent_id="alice", action_type="read"), **kw)
+    r = _gov(CompositionPolicy(flag_conditions=("review",))).adjudicate(
+        Passage(agent_id="alice", action_type="read"), **kw)
     assert "option_space" in r["declared_unmeasured"]
     assert ALWAYS_UNMEASURED <= set(r["declared_unmeasured"])
+    assert r["scoring_decision"] == Decision.HOLD.value
+    assert r["composed_decision"] == Decision.HOLD.value
+    assert "option_space unmeasured" in r["scoring_rationale"]
 
 
-def test_flag_without_declared_conditions_states_none():
+def test_flag_without_declared_conditions_is_held_not_admitted():
+    """5.7.6 (RFC-0 §4): with the default policy a FLAG states no condition, so
+    the runtime holds the operation instead of admitting it (decision 3)."""
     r = _gov().adjudicate(Passage(agent_id="alice", action_type="read"), **FULL)
-    assert r["composed_decision"] == Decision.FLAG.value
+    assert r["scoring_decision"] == Decision.FLAG.value
+    assert r["composed_decision"] == Decision.HOLD.value
+    assert r["operation_state"] == "hold"
     assert r["flag_conditions"] == []
+    assert "FLAG states no condition" in r["composed_rationale"]
+    assert "flag_conditions" in r["composed_rationale"]
 
 
 def test_flag_carries_the_policy_declared_conditions_and_ledgers_them():

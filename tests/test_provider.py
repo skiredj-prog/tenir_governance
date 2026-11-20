@@ -30,6 +30,13 @@ from tenir_governance.operations.registry import (
 from tenir_governance.objects import Passage
 from tenir_kernel.kernel import TenirKernel
 
+# 5.7.6 (RFC-0 §4): a FLAG admits only under conditions the policy declares, and
+# their acknowledgement is required at dispatch. The test deployment declares one.
+TEST_FLAG_CONDITIONS = ("test supervision",)
+TEST_FLAG_ACK = {"test supervision": "acknowledged by the test"}
+TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS)
+
+
 
 def test_indeterminate_reconciliation_normalizes_dispatching_to_unknown():
     gov, _state = _setup_governor()
@@ -90,7 +97,7 @@ def test_concurrent_failed_reconciliation_refunds_only_once():
         p, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
-    dispatched = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+    dispatched = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert dispatched["operation_state"] == OperationState.UNKNOWN.value
     assert state.resources["budget"].consumed == 10.0
 
@@ -143,6 +150,7 @@ def _adjudicate(gov, passage, **kwargs):
     kwargs.setdefault("authority", 0.9)
     kwargs.setdefault("context_fit", 1.0)
     kwargs.setdefault("evidence_quality", 1.0)
+    kwargs.setdefault("option_space", 0.9)
     return gov.adjudicate(passage, **kwargs)
 
 
@@ -157,7 +165,7 @@ def _setup_governor(provider=None, budget_capacity=100.0):
     state.register_agent(alice)
     membrane = TransitionMembrane(state)
     registry = DurableOperationRegistry()
-    gov = DualKernelGovernor(scoring, membrane, registry=registry, provider=provider)
+    gov = DualKernelGovernor(scoring, membrane, registry=registry, provider=provider, policy=CompositionPolicy(**TEST_POLICY_KW))
     return gov, state
 
 
@@ -178,7 +186,7 @@ def test_i5_provider_failure_with_hypothesis_violation_returns_hold_without_refu
     )
     assert authorization["operation_state"] == OperationState.RESERVED.value
 
-    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
 
     assert result["decision"] == "HOLD"
     assert result["operation_state"] == OperationState.UNKNOWN.value
@@ -195,7 +203,7 @@ def test_i5_contradictory_reconciliation_does_not_refund_or_fail():
         gov, passage, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
-    first = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    first = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert first["operation_state"] == OperationState.UNKNOWN.value
 
     class ContradictoryReconciliationProvider:
@@ -316,7 +324,7 @@ class TestDispatchAndExecute:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
-        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["dispatched"] is True
         assert result["executed"] is True
         assert result["operation_state"] == OperationState.CONFIRMED.value
@@ -329,7 +337,7 @@ class TestDispatchAndExecute:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
-        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["dispatched"] is True
         assert result["executed"] is False
         assert result["operation_state"] == OperationState.FAILED.value
@@ -342,7 +350,7 @@ class TestDispatchAndExecute:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
-        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["dispatched"] is True
         assert result["executed"] is False
         assert result["operation_state"] == OperationState.UNKNOWN.value
@@ -355,7 +363,7 @@ class TestDispatchAndExecute:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
-        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["dispatched"] is True
         assert result["operation_state"] == OperationState.DISPATCHING.value
         assert "PENDING" in result["reason"]
@@ -366,7 +374,7 @@ class TestDispatchAndExecute:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
-        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["dispatched"] is True
         assert result["operation_state"] == OperationState.DISPATCHING.value
 
@@ -380,7 +388,7 @@ class TestDispatchAndExecute:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
-        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["dispatched"] is True
         assert result["operation_state"] == OperationState.UNKNOWN.value
         assert "Connection refused" in result["provider_error"]
@@ -392,7 +400,7 @@ class TestDispatchAndExecute:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
-        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert len(provider.calls) == 1
         assert provider.calls[0]["idempotency_key"] == p.idempotency_key
 
@@ -405,7 +413,7 @@ class TestDispatchAndExecute:
                        resource_id="budget", amount=10.0,
                        payload={"order_id": "ORD-123"})
         gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0,
-                                metadata={"order_id": "ORD-123"})
+                                metadata={"order_id": "ORD-123"}, flag_conditions_met=TEST_FLAG_ACK)
         assert provider.calls[0]["metadata"] == {"order_id": "ORD-123"}
 
 
@@ -422,7 +430,7 @@ class TestReconciliation:
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         # Dispatch → UNKNOWN
-        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         record = gov.registry.get(p.idempotency_key)
         assert record.state == OperationState.UNKNOWN
         # Reconcile → CONFIRMED
@@ -437,7 +445,7 @@ class TestReconciliation:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
-        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         result = gov.reconcile_unknown(p.idempotency_key)
         assert result["reconciled"] is True
         assert result["operation_state"] == OperationState.FAILED.value
@@ -450,7 +458,7 @@ class TestReconciliation:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
-        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         result = gov.reconcile_unknown(p.idempotency_key)
         assert result["reconciled"] is False
         assert result["operation_state"] == OperationState.UNKNOWN.value
@@ -505,7 +513,7 @@ class TestFullLifecycle:
         assert adj["composed_decision"] in ("PASS", "FLAG")
         assert adj["operation_state"] == OperationState.RESERVED.value
         # Dispatch + execute
-        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["operation_state"] == OperationState.CONFIRMED.value
         # Verify final state
         record = gov.registry.get(p.idempotency_key)
@@ -519,7 +527,7 @@ class TestFullLifecycle:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
-        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["operation_state"] == OperationState.FAILED.value
         record = gov.registry.get(p.idempotency_key)
         assert record.state == OperationState.FAILED
@@ -533,7 +541,7 @@ class TestFullLifecycle:
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         # Dispatch → UNKNOWN
-        dispatch_result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        dispatch_result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert dispatch_result["operation_state"] == OperationState.UNKNOWN.value
         # Reconcile → CONFIRMED
         recon_result = gov.reconcile_unknown(p.idempotency_key)
@@ -549,7 +557,7 @@ class TestFullLifecycle:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
-        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         resource = state.resources["budget"]
         assert resource.consumed == 10.0
         assert resource.reserved == 0.0
@@ -561,7 +569,7 @@ class TestFullLifecycle:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
-        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         resource = state.resources["budget"]
         # After failed dispatch, budget should be refunded
         assert resource.consumed == 0.0
@@ -602,7 +610,7 @@ class TestRecoveryWithProvider:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
-        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+        gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         recovery = gov.recover()
         assert recovery["unresolved_count"] >= 1
         unknown_entries = [r for r in recovery["unresolved"] if r["state"] == "unknown"]

@@ -28,6 +28,14 @@ import tempfile
 import time
 
 import pytest
+from tenir_governance.composition.policy import CompositionPolicy
+
+# 5.7.6 (RFC-0 §4): a FLAG admits only under conditions the policy declares, and
+# their acknowledgement is required at dispatch. The test deployment declares one.
+TEST_FLAG_CONDITIONS = ("test supervision",)
+TEST_FLAG_ACK = {"test supervision": "acknowledged by the test"}
+TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS)
+
 
 # Ensure the package is importable in child processes
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -67,13 +75,13 @@ def _child_adjudicate(store_path, key, result_queue):
 
     gov = DualKernelGovernor(
         ScoringKernelAdapter(TenirKernel()), TransitionMembrane(state),
-        registry=reg,
+        registry=reg, policy=CompositionPolicy(**TEST_POLICY_KW),
     )
 
     p = Passage(agent_id="alice", action_type="payment", amount=25.0,
                 idempotency_key=key)
     r = gov.adjudicate(p, pressure=0.2, velocity=0.3, capacity=1.0,
-                       authority=0.9, context_fit=1.0, evidence_quality=1.0,
+                       authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
                        resource_id="budget", amount=25.0)
     result_queue.put(("adjudicate", key, r["composed_decision"]))
 
