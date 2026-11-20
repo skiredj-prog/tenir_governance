@@ -1,6 +1,6 @@
 # TENIR-Gov developer quickstart
 
-This source preview uses the TENIR-Gov 5.7.0 runtime. Install from a checkout containing this guide. The published 5.7.0 package predates the quickstart.
+The quickstart ships with TENIR-Gov 5.7.5 (`tenir_governance/quickstart.py`); the 5.7.0 package predates it. The setup below installs from a checkout containing this guide.
 
 ## Setup
 

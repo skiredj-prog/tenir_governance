@@ -1,16 +1,38 @@
 # Changelog
 
-## [5.7.5] — Unreleased (single-host pilot line, in preparation)
+## [5.7.5] — 2026-11-20 — Single-host pilot line: fail-closed hardening of 5.7.0
 
-Not tagged. 5.7.5 is the single-host pilot line (ROADMAP_90_DAYS, "5.7.5 — Auditable Evidence & Pilot Readiness"); FM-20 stays Open and multi-host stays disabled, remediation target 5.8.0 as announced in 5.7.0. This entry lists what is on the branch so far; the rest of the 5.7.5 scope is not in it yet.
+First release of the 5.7.5 single-host pilot line (ROADMAP_90_DAYS, "5.7.5 — Auditable Evidence & Pilot Readiness"). It hardens 5.7.0: no favorable default for an unmeasured axis, no conclusive veto masked by an invalid measure, no `fail()` after dispatch without a persisted proof of non-execution, and a HOLD bound (τ_K) that a deployment can declare and that refuses alone. FM-20 stays Open and multi-host stays disabled; remediation target 5.8.0, as announced in 5.7.0.
 
-**Not a strict-semver patch.** This line adds public API on top of 5.7.0: the policy fields and HoldRecord fields below, and `tenir_governance/quickstart.py` (with `tests/test_quickstart.py`), merged on `main` after the v5.7.0 tag.
+This release does not contain the evidence package, the report exports, the rehearsals or the pilot acceptance that ROADMAP_90_DAYS lists for 5.7.5.
+
+**Not a strict-semver patch.** This release adds public API on top of 5.7.0: the policy fields and HoldRecord fields below, `NonExecutionAttestation`, `cancel_escalation`, `DualKernelCompositionClient.mark_unknown`, and `tenir_governance/quickstart.py` (with `tests/test_quickstart.py`), merged on `main` after the v5.7.0 tag. It also changes documented behaviour; each change is listed under "Behaviour change" below.
+
+### Upgrading from 5.7.0
+
+- Pass measured `authority`, `context_fit` and `evidence_quality`, and `pressure`, `velocity` and `capacity`: a call without them is now refused with `HARD_VETO`.
+- After dispatch, `fail()` needs a `NonExecutionAttestation` (`non_execution_attested=`). Without it, `fail()` returns `False` and a `DISPATCHING` operation moves to `UNKNOWN` with its budget kept. `authoritative_non_execution=True` alone is deprecated and is no longer proof.
+- `expire_escalated` now refuses before τ_K is exhausted, and when no τ_K is set. An authority ends an escalation early with `cancel_escalation`.
+- Inputs that produced a fail-closed `HOLD` with `scoring_decision = None` (a non-finite or out-of-range measure) now give `scoring_decision = HOLD`, or `HARD_VETO` when a conclusive veto applies.
 
 ### No favorable default for an unmeasured axis; a FLAG states its declared conditions (decisions 2 and 3, 19 Nov)
 
 #### Behaviour change (5.7.5)
 - **A call that does not supply `authority`, `context_fit` and `evidence_quality` (or `pressure`, `velocity`, `capacity`) is now refused with `HARD_VETO`**, and the operation reaches `FAILED`. On 5.7.0 the same call was admitted on the `1.0` / `0.5` defaults. The scoring rationale names each missing axis (`"authority missing: cannot adjudicate without authority assessment"`, ...), and `declared_unmeasured` lists them.
 - `docs/agentic-governance-guide.md` and `demo.py` now pass these axes explicitly. The guide shows a call without them (`HARD_VETO`, with its reason) and states the observed decision: `FLAG`, not `PASS` (§2, §4, §9, §10). Its "PASS" was already wrong on 5.7.0, which returned `FLAG` because four axes are never measured.
+
+#### Changed
+- `DualKernelCompositionClient.adjudicate`: `authority`, `context_fit` and `evidence_quality` default to `None` (were `1.0`). An axis that is not supplied now reaches the scoring adapter as missing, which is a hard gate there: the request is not admitted. Callers that relied on the `1.0` defaults must now pass measured values.
+- `Agent.authority_score` defaults to `None` (was `1.0`). No kernel reads it.
+- Same rule applied to S: `pressure`, `velocity` and `capacity` of `DualKernelGovernor.adjudicate`, `resolve_hold` and `DualKernelCompositionClient.adjudicate` default to `None` (were `0.5`, `0.5`, `1.0`, which give S ≈ 4, far above τ). A missing one is a hard gate and is listed in `declared_unmeasured`.
+- `Relationship.trust_score` defaults to `None` (was `1.0`). No kernel reads it.
+
+#### Added
+- Scoring and composed results carry `declared_unmeasured`: the axes the score did not measure (`option_space` when absent, the four axes with no measurement input, and any missing mandatory axis). Their neutral placeholders keep the geometry complete; they are declared, not measured.
+- `CompositionPolicy.flag_conditions` (tuple of non-empty strings, default empty): the conditions under which a FLAG authorizes (RFC-0 §4), declared by the deployment. Every FLAG result carries them in `flag_conditions`, and the composed ledger rationale names them. With the default policy a FLAG states no condition, as in 5.7.0; the runtime invents none and does not enforce them.
+
+#### Not changed
+- `confidence = 1.0` in the post-execution value assessment (`assessment/evp.py`, `assessor.py`, `assess_post_execution`) is unchanged: it weighs the expected value of an operation already terminal, not its admission.
 
 ### A non-finite measure is insufficient evidence and masks no veto (decision 5)
 
@@ -53,23 +75,9 @@ Three guide examples and one demo step already failed on 5.7.0. Each is rewritte
 - `demo.py`: an approved authorized exit returns the operation to `HOLD` (fresh re-adjudication required), as `authorize_exit` documents; the demo expected `RESERVED` or `FAILED`.
 - `tests/test_guide_examples.py` runs every Python block of the guide in order.
 
-#### Changed
-- `DualKernelCompositionClient.adjudicate`: `authority`, `context_fit` and `evidence_quality` default to `None` (were `1.0`). An axis that is not supplied now reaches the scoring adapter as missing, which is a hard gate there: the request is not admitted. Callers that relied on the `1.0` defaults must now pass measured values.
-- `Agent.authority_score` defaults to `None` (was `1.0`). No kernel reads it.
-
-#### Added
-- Scoring and composed results carry `declared_unmeasured`: the axes the score did not measure (`option_space` when absent, the four axes with no measurement input, and any missing mandatory axis). Their neutral placeholders keep the geometry complete; they are declared, not measured.
-- `CompositionPolicy.flag_conditions` (tuple of non-empty strings, default empty): the conditions under which a FLAG authorizes (RFC-0 §4), declared by the deployment. Every FLAG result carries them in `flag_conditions`, and the composed ledger rationale names them. With the default policy a FLAG states no condition, as in 5.7.0; the runtime invents none and does not enforce them.
-
-- Same rule applied to S: `pressure`, `velocity` and `capacity` of `DualKernelGovernor.adjudicate`, `resolve_hold` and `DualKernelCompositionClient.adjudicate` default to `None` (were `0.5`, `0.5`, `1.0`, which give S ≈ 4, far above τ). A missing one is a hard gate and is listed in `declared_unmeasured`.
-- `Relationship.trust_score` defaults to `None` (was `1.0`). No kernel reads it.
-
-#### Not changed
-- `confidence = 1.0` in the post-execution value assessment (`assessment/evp.py`, `assessor.py`, `assess_post_execution`) is unchanged: it weighs the expected value of an operation already terminal, not its admission.
-
 ### τ_K as a policy-declared fail-safe bound on HOLD (fixes #140)
 
-Behaviour changes only for a deployment whose policy declares a τ_K; with the default policy, behaviour is the one of 5.7.0.
+The τ_K checks below (Added, Fixed) act only when the deployment's policy declares a τ_K; with the default policy no HOLD carries a bound and they do nothing. The escalation changes under "Changed" apply to every deployment.
 
 #### Added
 - `CompositionPolicy.hold_tau_k_seconds` (default `None`) and `CompositionPolicy.hold_tau_k_source`. When the policy declares a τ_K, every HOLD created by `DualKernelGovernor.adjudicate` carries it, with its source. A τ_K without a source is rejected at policy validation. The governor still invents no τ_K when the policy declares none.
@@ -94,12 +102,12 @@ Behaviour changes only for a deployment whose policy declares a τ_K; with the d
 - `test_hold_manager_expire_escalated`, which expired an escalation without waiting, is rewritten.
 
 #### Not changed
-- `expire_hold` is unchanged. `expire_escalated` still yields `UNKNOWN` per v7.1 §19, but see "Changed" below.
+- `expire_hold` keeps its transition (HOLD → `FAILED`, `exit_reason="expired"`); only its record is completed (see "Changed" above). `expire_escalated` still yields `UNKNOWN` per v7.1 §19 (see "Changed" above).
 - A late denial (`authorize_exit(approve=False)`) still denies.
 - No τ_K default anywhere; a HOLD created without a declared bound carries `tau_k_seconds = 0.0` as before.
 
 #### Verification scope
-- 28 new tests in `tests/test_hold_tau_k_fail_safe.py`; the enforcement ones fail when the advance-point check is disabled. Time is moved through the governor's clock, not by editing a HOLD record.
+- 29 tests in `tests/test_hold_tau_k_fail_safe.py` (28 at the τ_K fix, one added with the `expire_hold` record); the enforcement ones fail when the advance-point check is disabled. Time is moved through the governor's clock, not by editing a HOLD record.
 - Single process, in-memory and JSON-file registries. Not exercised: the SQLite WAL backend under concurrent processes, and clock skew between processes.
 
 ---
