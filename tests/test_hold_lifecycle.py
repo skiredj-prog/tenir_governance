@@ -32,6 +32,14 @@ from tenir_governance.composition.decisions import Decision
 from tenir_governance.membrane import TransitionMembrane, MembraneState
 from tenir_governance.objects import Agent, Passage, Resource
 from tenir_kernel.kernel import TenirKernel
+from tenir_governance.composition.policy import CompositionPolicy
+
+# 5.7.6 (RFC-0 §4): a FLAG admits only under conditions the policy declares, and
+# their acknowledgement is required at dispatch. The test deployment declares one.
+TEST_FLAG_CONDITIONS = ("test supervision",)
+TEST_FLAG_ACK = {"test supervision": "acknowledged by the test"}
+TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS)
+
 
 
 def _setup_governor(budget_capacity=100.0, policy=None, registry=None):
@@ -44,7 +52,7 @@ def _setup_governor(budget_capacity=100.0, policy=None, registry=None):
     tenir_kernel = TenirKernel()
     scoring = ScoringKernelAdapter(tenir_kernel)
     membrane = TransitionMembrane(state)
-    return DualKernelGovernor(scoring, membrane, policy=policy, registry=registry), state
+    return DualKernelGovernor(scoring, membrane, policy=policy or CompositionPolicy(**TEST_POLICY_KW), registry=registry), state
 
 
 def _identity_hold_fixture(payload=None):
@@ -78,7 +86,7 @@ def _identity_hold_fixture(payload=None):
 def _resolve_identity_hold(gov, key, passage, **kwargs):
     return gov.resolve_hold(
         key, passage=passage,
-        authority=0.9, context_fit=0.9, evidence_quality=0.9,
+        authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
         **kwargs,
     )
 
@@ -750,7 +758,7 @@ class TestGovernorHoldLifecycle:
             "op-hold-test-1",
             passage=p3,
             pressure=0.1, velocity=0.1, capacity=0.9,
-            authority=0.9, context_fit=1.0, evidence_quality=1.0,
+            authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
             resource_id="budget", amount=10.0,
         )
         assert r2["hold_resolved"] is True
@@ -776,7 +784,7 @@ class TestGovernorHoldLifecycle:
         result = gov.resolve_hold(
             key, passage=passage,
             pressure=0.2, velocity=0.2, capacity=0.9,
-            authority=0.0, context_fit=0.9, evidence_quality=0.9,
+            authority=0.0, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
             resource_id="budget", amount=10.0,
         )
         assert result["composed_decision"] == Decision.HARD_VETO.value

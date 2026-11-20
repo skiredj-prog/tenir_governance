@@ -15,13 +15,13 @@ It does not replace an LLM, an identity system, an observability stack, a policy
 [![Governance CI](https://github.com/skiredj-prog/tenir_governance/actions/workflows/tenir-ci.yml/badge.svg)](https://github.com/skiredj-prog/tenir_governance/actions/workflows/tenir-ci.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21264802.svg)](https://doi.org/10.5281/zenodo.21264802)
 
-> **v5.7.5 deployment boundary:** 5.7.5 is the single-host pilot line. It hardens 5.7.0 (GitHub release `v5.7.0`, `47ef67e3efc5f3008896a7d88bebf929fa0a98f0`, on PyPI since 2026-10-24) and changes documented behaviour: read "Upgrading from 5.7.0" and "Scope, known limits and trust boundaries" in the [changelog](CHANGELOG.md). Deployment is bounded to a single host and requires a verified production manifest and durable registry configuration. Production multi-host Raft is blocked while FM-20 remains open; no C3 cross-host fault tolerance or exactly-once external provider effect is claimed. Publication, CI success, and deployment qualification are distinct. The Zenodo series DOI is not a version-specific archive. See [threat model](docs/threat-model-v1.md).
+> **v5.7.6 deployment boundary:** 5.7.6 is the single-host pilot line. It hardens 5.7.0 (GitHub release `v5.7.0`, `47ef67e3efc5f3008896a7d88bebf929fa0a98f0`, on PyPI since 2026-10-24; the 5.7.5 candidate was merged but not published) and changes documented behaviour: read "Upgrading from 5.7.5" and "Upgrading from 5.7.0", then "Scope, known limits and trust boundaries", in the [changelog](CHANGELOG.md). Deployment is bounded to a single host and requires a verified production manifest and durable registry configuration. Production multi-host Raft is blocked while FM-20 remains open; no C3 cross-host fault tolerance or exactly-once external provider effect is claimed. Publication, CI success, and deployment qualification are distinct. The Zenodo series DOI is not a version-specific archive. See [threat model](docs/threat-model-v1.md).
 
 ---
 
 ## Start developing
 
-The [developer quickstart](docs/GETTING_STARTED.md) runs a synthetic lost-response scenario against TENIR-Gov. It ships with 5.7.5 (`tenir_governance/quickstart.py`); the 5.7.0 wheel predates it.
+The [developer quickstart](docs/GETTING_STARTED.md) runs a synthetic lost-response scenario against TENIR-Gov. It ships with 5.7.6 (`tenir_governance/quickstart.py`, present since the unpublished 5.7.5 candidate); the 5.7.0 wheel predates it.
 
 TENIR-Gov is the maintained product. The HOLD prototype owns its historical hackathon results. REG defines the specification and qualification framework. See the [product and claims policy](docs/PRODUCT_IDENTITY.md) and [migration inventory](docs/HOLD_MIGRATION.md).
 
@@ -29,7 +29,7 @@ TENIR-Gov is the maintained product. The HOLD prototype owns its historical hack
 
 1. **Problem:** Models reason and agents propose actions — but a consequential action needs a runtime decision about whether it is admissible before execution.
 2. **Solution:** TENIR-Gov provides a deterministic execution-control layer at the decision → action boundary, with explicit policy thresholds and fail-closed defaults.
-3. **Evidence and limits:** The 5.7.5 source line includes a two-kernel composition, operation suspension and provider reconciliation, payload binding, and single-host SQLite WAL budget accounting. The CI checks tests and Python distributions; those checks do not constitute independent certification, prove external provider effects, or establish multi-host fault tolerance (C3).
+3. **Evidence and limits:** The 5.7.6 source line includes a two-kernel composition, operation suspension and provider reconciliation, payload binding, and single-host SQLite WAL budget accounting. The CI checks tests and Python distributions; those checks do not constitute independent certification, prove external provider effects, or establish multi-host fault tolerance (C3).
 
 ---
 

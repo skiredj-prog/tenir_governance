@@ -20,9 +20,9 @@ from typing import Any
 import tenir_governance
 import tenir_kernel
 from tenir_governance import (
-    Agent, DualKernelGovernor, DurableOperationRegistry, HashChainedLedger,
-    LedgerEntry, MembraneState, Passage, Resource, ScoringKernelAdapter,
-    TransitionMembrane,
+    Agent, CompositionPolicy, DualKernelGovernor, DurableOperationRegistry,
+    HashChainedLedger, LedgerEntry, MembraneState, Passage, Resource,
+    ScoringKernelAdapter, TransitionMembrane,
 )
 from tenir_governance.operations.provider import (
     DispatchResult, ProviderOutcome, ReconciliationResult,
@@ -35,6 +35,12 @@ OPERATION_ID = "synthetic-booking-001"
 AMOUNT = 20.0
 CAPACITY = 100.0
 PAYLOAD = {"hotel": "synthetic-hotel", "nights": 1, "unit": "demo-unit"}
+# RFC-0 §4 (5.7.6): the scoring kernel never measures four axes, so the admission
+# is a FLAG. A FLAG admits only under conditions the deployment declares, and
+# their acknowledgement is required at dispatch. This walkthrough declares one
+# synthetic condition and acknowledges it explicitly; neither is an assessment.
+FLAG_CONDITIONS = ("synthetic walkthrough: an operator reviews the booking before it is sent",)
+FLAG_CONDITIONS_MET = {FLAG_CONDITIONS[0]: "synthetic acknowledgement recorded by the walkthrough itself"}
 FILES = ("evidence.json", "registry.json")
 
 
@@ -122,6 +128,7 @@ def run_demo(output: Path, *, receipt_available: bool = True) -> dict[str, Any]:
     governor = DualKernelGovernor(
         ScoringKernelAdapter(TenirKernel()), TransitionMembrane(state),
         registry=registry, provider=provider,
+        policy=CompositionPolicy(flag_conditions=FLAG_CONDITIONS),
     )
     passage = Passage(
         passage_id="synthetic-passage-001", idempotency_key=OPERATION_ID,
@@ -141,19 +148,22 @@ def run_demo(output: Path, *, receipt_available: bool = True) -> dict[str, Any]:
     # Explicit scenario fixtures, not real assessments of an agent or provider.
     admission = governor.adjudicate(
         passage, pressure=0.2, velocity=0.2, capacity=0.9,
-        authority=0.9, context_fit=1.0, evidence_quality=1.0,
+        authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         resource_id="demo-budget", amount=AMOUNT, payload=PAYLOAD,
     )
     record("admission", admission)
     if admission.get("operation_state") != "reserved":
         raise RuntimeError(f"Scenario was not admitted: {admission}")
-    record("lost_response", governor.dispatch_and_execute(OPERATION_ID, metadata=PAYLOAD))
-    record("retry", governor.dispatch_and_execute(OPERATION_ID, metadata=PAYLOAD))
+    record("lost_response", governor.dispatch_and_execute(
+        OPERATION_ID, metadata=PAYLOAD, flag_conditions_met=FLAG_CONDITIONS_MET))
+    record("retry", governor.dispatch_and_execute(
+        OPERATION_ID, metadata=PAYLOAD, flag_conditions_met=FLAG_CONDITIONS_MET))
     record("reconciliation", governor.reconcile_unknown(OPERATION_ID))
     result = {
         "schema": SCHEMA, "provenance": _provenance(),
         "operation_id": OPERATION_ID, "payload": PAYLOAD,
         "payload_hash": canonical_payload_hash(PAYLOAD),
+        "flag_conditions": list(FLAG_CONDITIONS), "flag_conditions_met": FLAG_CONDITIONS_MET,
         "receipt_available": receipt_available,
         "steps": steps,
         "provider": {"synthetic": True, "dispatches": provider.calls,
@@ -211,6 +221,11 @@ def verify_demo(output: Path, *, expected_manifest_sha256: str | None = None) ->
     admission, lost, retry, reconciled = [step["response"] for step in steps]
     require(admission["operation_state"] == "reserved" and admission["composed_decision"] in ("PASS", "FLAG"),
             "No admissible reservation")
+    require(evidence["flag_conditions"] == list(FLAG_CONDITIONS)
+            and evidence["flag_conditions_met"] == FLAG_CONDITIONS_MET
+            and (admission["composed_decision"] != "FLAG"
+                 or admission["flag_conditions"] == list(FLAG_CONDITIONS)),
+            "FLAG conditions differ from the declared walkthrough conditions")
     require(lost["dispatched"] is True and lost["operation_state"] == "unknown", "Lost response did not remain UNKNOWN")
     require(retry["dispatched"] is False and retry["operation_state"] == "unknown", "Retry was not refused while UNKNOWN")
     require([step["provider_dispatches"] for step in steps] == [0, 1, 1, 1], "Unexpected provider dispatch count")
@@ -241,6 +256,11 @@ def verify_demo(output: Path, *, expected_manifest_sha256: str | None = None) ->
     require(operation["state"] == final_state and operation["idempotency_key"] == OPERATION_ID,
             "Final operation mismatch")
     require(operation["payload_hash"] == evidence["payload_hash"], "Registry payload mismatch")
+    require(operation["composed_decision"] in ("PASS", "FLAG")
+            and (operation["composed_decision"] != "FLAG"
+                 or (operation["flag_conditions"] == list(FLAG_CONDITIONS)
+                     and operation["flag_conditions_met"] == FLAG_CONDITIONS_MET)),
+            "Admission terms or their acknowledgement are missing from the operation record")
     registry = DurableOperationRegistry(store_path=str(output / "registry.json"))
     require(registry.get(OPERATION_ID).to_dict() == operation, "Registry and export disagree")
     ledger = HashChainedLedger()

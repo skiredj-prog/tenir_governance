@@ -24,9 +24,16 @@ from tenir_governance.objects import Agent, Passage, Resource
 from tenir_governance.operations import MockProvider, OperationState
 from tenir_kernel.kernel import TenirKernel
 
+# 5.7.6 (RFC-0 §4): a FLAG admits only under conditions the policy declares, and
+# their acknowledgement is required at dispatch. The test deployment declares one.
+TEST_FLAG_CONDITIONS = ("test supervision",)
+TEST_FLAG_ACK = {"test supervision": "acknowledged by the test"}
+TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS)
+
+
 TAU = 60.0
 GOOD = dict(pressure=0.2, velocity=0.2, capacity=0.9, authority=0.9,
-            context_fit=1.0, evidence_quality=1.0)
+            context_fit=1.0, evidence_quality=1.0, option_space=0.9)
 
 
 class _BrokenScoring:
@@ -41,12 +48,12 @@ def _governor(policy=None):
     state.register_resource(Resource(resource_id="budget", capacity=100.0))
     state.register_agent(Agent(agent_id="alice", authority_score=0.9))
     gov = DualKernelGovernor(ScoringKernelAdapter(TenirKernel()), TransitionMembrane(state),
-                             policy=policy, provider=MockProvider())
+                             policy=policy or CompositionPolicy(**TEST_POLICY_KW), provider=MockProvider())
     return gov, state.resources["budget"]
 
 
 def _policy(tau=TAU):
-    return CompositionPolicy(hold_tau_k_seconds=tau, hold_tau_k_source="test SLA")
+    return CompositionPolicy(hold_tau_k_seconds=tau, hold_tau_k_source="test SLA", **TEST_POLICY_KW)
 
 
 def _held(gov):
@@ -126,7 +133,7 @@ def test_resolution_inside_bound_dispatches_once(clock):
     assert res["hold_resolved"] is True
     clock(TAU)  # dispatch after the bound: the HOLD was resolved in time
     out = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0,
-                                   payload={"action_type": "payment"})
+                                   payload={"action_type": "payment"}, flag_conditions_met=TEST_FLAG_ACK)
     assert out["dispatched"] is True
     assert budget.consumed == 10.0
     assert len(gov.provider.calls) == 1
@@ -139,7 +146,7 @@ def test_no_declared_bound_late_resolution_unchanged(clock):
     clock(10 * TAU)
     assert _resolve(gov, p)["hold_resolved"] is True
     out = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0,
-                                   payload={"action_type": "payment"})
+                                   payload={"action_type": "payment"}, flag_conditions_met=TEST_FLAG_ACK)
     assert out["dispatched"] is True
 
 
@@ -158,7 +165,7 @@ def test_late_resolution_fails_closed_and_releases_budget(clock):
     assert res["execution_record"] == "CONFIRMED_NONEXECUTION"
     assert budget.reserved == 0.0
     out = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0,
-                                   payload={"action_type": "payment"})
+                                   payload={"action_type": "payment"}, flag_conditions_met=TEST_FLAG_ACK)
     assert out["dispatched"] is False
     assert budget.consumed == 0.0
     assert gov.provider.calls == []
@@ -199,7 +206,7 @@ def test_late_authorized_exit_fails_closed(clock):
     assert budget.reserved == 0.0
     assert _resolve(gov, p)["hold_resolved"] is False
     assert gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0,
-                                    payload={"action_type": "payment"})["dispatched"] is False
+                                    payload={"action_type": "payment"}, flag_conditions_met=TEST_FLAG_ACK)["dispatched"] is False
     assert budget.consumed == 0.0
     assert gov.provider.calls == []
 
@@ -238,7 +245,7 @@ def test_dispatch_of_unanswered_hold_past_bound_fails_closed(clock):
     p = _held(gov)
     clock(TAU + 1)
     out = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0,
-                                   payload={"action_type": "payment"})
+                                   payload={"action_type": "payment"}, flag_conditions_met=TEST_FLAG_ACK)
     assert out["dispatched"] is False
     assert out["tau_k_expired"] is True
     assert out["composed_decision"] == Decision.HARD_VETO.value
@@ -252,7 +259,7 @@ def test_dispatch_of_unanswered_hold_inside_bound_is_refused_and_stays_held(cloc
     p = _held(gov)
     clock(TAU / 2)
     out = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0,
-                                   payload={"action_type": "payment"})
+                                   payload={"action_type": "payment"}, flag_conditions_met=TEST_FLAG_ACK)
     assert out["dispatched"] is False
     assert not out.get("tau_k_expired")
     assert gov.registry.get(p.idempotency_key).state == OperationState.HOLD
@@ -269,7 +276,7 @@ def test_dispatch_refuses_reserved_operation_resolved_after_bound(clock):
     record.hold_record.resolved_at = ""
     clock(TAU + 1)
     out = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0,
-                                   payload={"action_type": "payment"})
+                                   payload={"action_type": "payment"}, flag_conditions_met=TEST_FLAG_ACK)
     assert out["dispatched"] is False
     assert out["tau_k_expired"] is True
     assert budget.reserved == 0.0 and budget.consumed == 0.0

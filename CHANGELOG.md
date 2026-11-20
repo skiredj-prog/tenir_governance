@@ -1,6 +1,100 @@
 # Changelog
 
-## [5.7.5] — 2026-11-20 — Single-host pilot line: fail-closed hardening of 5.7.0
+## [5.7.6] — 2026-11-20 — Single-host pilot line: the three 5.7.5 trust boundaries closed, #141 fixed
+
+Second release of the 5.7.5 single-host pilot line. 5.7.5 was merged on `main` (`42513bf`) and held there by its release decision: three of the limits its own "Scope, known limits and trust boundaries" states were judged blocking for a pilot (a proof of non-execution asserted by its caller, FLAG conditions declared but not enforced, no re-validation of the mandate before dispatch), and #141 held its qualification. No v5.7.5 tag and no PyPI publication were made; its entry below stays as the record of that unpublished candidate. 5.7.6 closes those four points on the same code line, with no other change of scope. FM-20 stays Open and multi-host stays disabled; remediation target 5.8.0, as announced in 5.7.0.
+
+**What this release is.** A technical release of the single-host line, with bounded guarantees, for a controlled pilot on one host. It is not a REG certification (the reg-conformance harness has not been re-run on this code; see "Scope, known limits and trust boundaries"), not a general production qualification, and not the completion of the "Auditable Evidence & Pilot Readiness" milestone.
+
+**Not a strict-semver patch.** This release adds public API on top of 5.7.5 (`tenir_governance.operations.attestation`, an `attestation_verifier` on the governor and the client, `CompositionPolicy.revalidate_mandate_at_dispatch`, a `flag_conditions_met` keyword on `dispatch` and `dispatch_and_execute`, new `OperationRecord` and `NonExecutionAttestation` fields) and changes documented behaviour; each change is listed under "Behaviour change" below. A 5.7.5 caller does not run unchanged on 5.7.6: with the default policy every FLAG is now held, a dispatch needs the acknowledgement of the declared FLAG conditions, an unsigned attestation is no longer proof, and a call without `option_space` is held. Read "Upgrading from 5.7.5".
+
+### Upgrading from 5.7.5 (and from 5.7.0)
+
+- **Declare the conditions under which a FLAG authorizes**: `CompositionPolicy(flag_conditions=("...",))`. With the default policy (no condition) a FLAG now composes to `HOLD`. Because four axes are never measured, the scoring kernel gives `FLAG` at best on the default path, so a deployment that declares no condition admits nothing: this is RFC-0 §4 applied, not a defect.
+- **Acknowledge them at dispatch**: `dispatch(key, ..., flag_conditions_met={"<condition>": "<how it was met>"})` (same keyword on `dispatch_and_execute` and on `DualKernelCompositionClient.dispatch`). The mapping must name exactly the declared conditions, each with a non-empty string; otherwise the dispatch is refused and the operation stays `RESERVED`. A `PASS` admission needs no acknowledgement. `resume_existing` returns `action = "acknowledge_flag_conditions"` for a FLAG-admitted operation not yet acknowledged.
+- **Pass `option_space`**: a call without it is now held (`HOLD`, `INSUFFICIENT_EVIDENCE`), not admitted on the neutral `0.5`.
+- **Configure a verifier and sign the attestations**: `DualKernelGovernor(..., attestation_verifier=HmacAttestationVerifier({"<key_id>": <secret>}))` (or `Ed25519AttestationVerifier`), and build the proof with `sign_non_execution_attestation(attestation, "<key_id>", <secret>)`. An attestation that does not authenticate is refused: `fail()` returns `False` and a `DISPATCHING` operation moves to `UNKNOWN`, budget kept. Without a configured verifier, no caller-supplied attestation is accepted after dispatch; the runtime's own paths (`dispatch_and_execute`, `reconcile_unknown`) are unaffected.
+- **Mandate re-validation is on by default** (`CompositionPolicy.revalidate_mandate_at_dispatch = True`). A dispatch whose mandate changed since admission is refused fail-closed (reservation released, `FAILED`). Setting it to `False` restores the 5.7.5 behaviour and is a documented weakening.
+
+### Scope, known limits and trust boundaries
+
+Read before deploying. Each limit below was observed on this code by a script or a test; none is inferred.
+
+- **Deployment scope.** Unchanged from 5.7.5: one controlled host and one governor process, with the in-memory, JSON-file or SQLite WAL registry on that host (Profile S). Raft stays restricted to development/test loopback nodes while FM-20 is Open. Not exercised: the SQLite WAL backend under concurrent processes, and clock skew between processes.
+- **The proof of non-execution is authenticated under a key the deployment declares; the runtime still does not observe the provider.** A caller attestation is proof once its signature verifies under the `key_id` it names, among the keys given to `attestation_verifier`. The trust boundary moves from "whoever can call `fail()`" to "whoever holds a declared key": the deployment declares which reconciling components may attest, and keeps their keys. A valid signature says that a key holder attested; it does not say that the key holder observed the provider.
+- **A FLAG's conditions are enforced as an acknowledgement, not verified.** The runtime refuses a dispatch until the caller acknowledges every declared condition with a non-empty statement, persists and ledgers the acknowledgement, and refuses a FLAG that states no condition. It does not check that the acknowledged condition was actually met: that remains the deployment's supervision.
+- **`option_space` missing gives `HOLD`, not `HARD_VETO`.** The HOLD is resolvable by re-adjudication with the measure (`resolve_hold`); a conclusive veto on the other inputs still governs. The REG harness vector PX-REG-STATE-010, which failed on 5.7.5 for this axis, has not been re-run on this code.
+- **The mandate re-validated before dispatch is the governor's own state.** Checked: the acting agent is still registered (when it was at admission), the delegation in scope is still trusted, the in-memory budget limit still covers the amount (only when no consensus backend is configured: with a backend the limit lives in the backend, which refuses a re-registration with another capacity and enforces I8 on every reserve), and the composition policy version is unchanged. Not checked: anything outside the governor (an external authorization system, a provider-side limit). A `RESERVED` record written before 5.7.6, or through direct registry access, carries no admission terms: it dispatches as a `PASS` admission, with no FLAG acknowledgement to check. The re-check under the dispatch gate performs no I/O and refuses without a claim; the fail-closed settlement happens on the next `dispatch()` call.
+- **A budget HOLD now resolves whatever its share of the remaining capacity (#141, fixed).** A HOLD at or above `budget_escalation_threshold` (85 % of the capacity by default) still composes to `HOLD` on re-adjudication: that is the escalation rule of the policy, not the #141 defect, and a deployment lifts it by declaring a higher threshold.
+- **REG conformance is not demonstrated.** The reg-conformance harness has not been re-run on 5.7.6. Its last result on this line is the one stated in the 5.7.5 entry (`NOT_CERTIFIABLE`, from the unmerged draft skiredj-prog/reg-conformance#81; REG v0.7.0 is the normative reference). To exercise this code, that port must declare `flag_conditions`, pass `option_space`, acknowledge the conditions at dispatch and sign its attestations.
+
+### Proof of non-execution is authenticated (first 5.7.5 boundary)
+
+#### Added
+- `tenir_governance.operations.attestation`: the `AttestationVerifier` protocol (`verify(attestation) -> str | None`, never raises), `HmacAttestationVerifier(keys)` (HMAC-SHA256 with the standard library; a verified attestation is recorded with `verification = "hmac-sha256:<key_id>"`), `Ed25519AttestationVerifier(public_keys)` (needs the optional `cryptography` package; `"ed25519:<key_id>"`), `sign_non_execution_attestation(attestation, key_id, secret)`, `sign_non_execution_attestation_ed25519` and `hmac_signature`. Keys shorter than 16 bytes are refused. Exported from `tenir_governance.operations` and `tenir_governance`.
+- `NonExecutionAttestation.key_id`, `.signature` and `.verification`; `signing_payload()` (the canonical bytes a signature covers: the four facts and `observed_effect_count`, never the signature or the runtime fields); `verified(method)` (the runtime's copy, `verified_by_runtime = True` with the method named).
+- `DualKernelGovernor(attestation_verifier=...)` and `DualKernelCompositionClient(attestation_verifier=...)`.
+
+#### Changed
+- `DurableOperationRegistry.record_non_execution_attested` persists only a verified attestation (`verified_by_runtime = True` with a named `verification`) and raises `ValueError` otherwise. The runtime's own channels record `verification = "provider-channel"` (`dispatch_and_execute`) and `"provider-reconciliation-channel"` (`reconcile_unknown`).
+- `governor.fail(..., non_execution_attested=...)` authenticates a caller attestation under `attestation_verifier` before recording it, and records the verified copy (same facts, method named), not the caller's object.
+
+#### Behaviour change (5.7.6)
+- **An attestation that does not authenticate is not proof.** Unsigned, signed under an undeclared `key_id`, with a signature that does not verify, or carrying a caller-set `verified_by_runtime` or `verification`: `fail()` returns `False`, a `DISPATCHING` operation moves to `UNKNOWN` with its budget kept, an `UNKNOWN` one is unchanged, and the ledger records a `HOLD` entry `NON_EXECUTION_ATTESTATION_REFUSED (<why>)`. With no verifier configured, every caller attestation after dispatch is refused this way. On 5.7.5 the same well-formed attestation was accepted from any caller.
+- The restart test (`tests/test_fail_after_dispatch_needs_proof.py`) now compares the persisted record with the verified copy.
+
+### A FLAG admits only under declared conditions, acknowledged at dispatch (RFC-0 §4, decision 3; second 5.7.5 boundary)
+
+#### Changed
+- Composition (`adjudicate` and `resolve_hold`): a composed `FLAG` under a policy that declares no `flag_conditions` becomes `HOLD`, with the rationale `FLAG states no condition: the policy declares no flag_conditions, so the conditional authorization cannot be stated (RFC-0 §4, decision 3); held, not admitted. Declare CompositionPolicy.flag_conditions or re-adjudicate.` With conditions declared, the FLAG stands and names them, as in 5.7.5.
+- A FLAG admission persists its terms on the operation: `OperationRecord.composed_decision` and `OperationRecord.flag_conditions` are written in the same persist as the `RESERVED` transition (`DurableOperationRegistry.transition_to(..., admission_terms=...)`; a `PASS` admission records an empty list). `OperationRecord.flag_conditions_met` holds the acknowledgement once given.
+- `dispatch(..., flag_conditions_met=None)` and `dispatch_and_execute(..., flag_conditions_met=None)` (and `DualKernelCompositionClient.dispatch`): a FLAG-admitted operation dispatches only when the mapping names exactly the declared conditions, each with a non-empty string. The acknowledgement is persisted (`DurableOperationRegistry.record_flag_conditions_met`) and ledgered once (`FLAG conditions acknowledged at dispatch: ...`); a replay with the same acknowledgement is accepted, a different one is refused. The check runs again under the dispatch gate, before any claim.
+- `resume_existing` returns `action = "acknowledge_flag_conditions"`, with the conditions, for a FLAG-admitted `RESERVED` operation without acknowledgement.
+
+#### Behaviour change (5.7.6)
+- **With the default `CompositionPolicy`, a FLAG is held, not admitted.** On 5.7.5 (and 5.7.0) it was admitted with no condition stated. Every deployment, test and example now declares its conditions: `demo.py`, `tenir_governance/quickstart.py`, the guide and the test suite (`flag_conditions=("test supervision",)`, acknowledged at dispatch).
+- **A FLAG-admitted operation is not dispatched without the acknowledgement**, whatever the caller; the refusal names the missing conditions and the operation stays `RESERVED`.
+
+### `option_space` is required for admission (decision 2 applied to the seventh axis)
+
+#### Changed
+- The scoring adapter holds a call whose `option_space` is `None` when the result would otherwise be `PASS` or `FLAG`: `HOLD`, rationale `INSUFFICIENT_EVIDENCE: option_space unmeasured; held, not admitted (re-adjudicate with the option-space measure).` A conclusive veto on the other inputs still governs, and `declared_unmeasured` still lists the axis. On 5.7.5 the neutral `0.5` let the call reach `PASS` or `FLAG` (the last favourable default of the seven axes).
+
+#### Behaviour change (5.7.6)
+- A caller that omitted `option_space` now gets `HOLD` and a `HOLD` operation (budget reserved), resolvable with `resolve_hold(..., option_space=...)`. The guide shows the held call and its resolution.
+
+### The mandate is re-validated before dispatch (third 5.7.5 boundary)
+
+#### Added
+- `CompositionPolicy.revalidate_mandate_at_dispatch` (bool, default `True`).
+- `OperationRecord.delegating_agent_id`, `.delegatee_agent_id`, `.agent_registered_at_admission` and `.policy_version`, written at admission and persisted: the mandate the dispatch re-validates against.
+- Dispatch results carry `mandate_revalidation_failed`, `mandate_changes` (one sentence per change, e.g. `acting agent 'alice' is no longer registered`, `budget limit of 'budget' no longer covers the amount (...)`, `composition policy version changed from 'composition-v1.0.0' to 'composition-v1.0.1' since admission`) and, on the fail-closed path, `execution_record = "CONFIRMED_NONEXECUTION"`.
+
+#### Changed
+- `dispatch` and `dispatch_and_execute` on a `RESERVED` operation re-check the mandate under the settlement lock, before any dispatch claim: acting agent, delegation, in-memory budget limit (when no consensus backend is configured) and policy version, as listed under "Scope". On a change the reservation is released first, the operation reaches `FAILED` with no effect, and the ledger records a `HARD_VETO` entry `MANDATE_REVALIDATION_FAILED at dispatch (<changes>)`. If the release cannot be proven, the operation is left as it is with `budget_reconciliation_required = True`.
+- Under the quarantine gate the mandate is re-checked once more without I/O; a change refuses without a claim (`MANDATE_REVALIDATION_FAILED under the dispatch gate (...)`), and the next `dispatch()` call settles fail-closed.
+
+#### Behaviour change (5.7.6)
+- **A dispatch whose mandate changed since admission is refused.** On 5.7.5 it dispatched (documented there as a limit). The guide shows a budget limit lowered under the reservation and a removed acting agent, both refused with the change named.
+
+### Fixed
+- **#141: a budget HOLD above half the remaining capacity could not be resolved.** `resolve_hold` let I8 count the operation's own reservation a second time; it now declares that reservation to the membrane (`existing_reservation_amount`), as `adjudicate` already did. With capacity 100, held amounts 50.5, 60 and 84 now resolve and dispatch (10 and 50 as before); another operation's reservation still bounds the budget. `tests/test_issue141_hold_budget_resolution.py` fails on the previous code.
+
+### Guide, demo and quickstart
+- `docs/agentic-governance-guide.md` (v5.7.6): the client of §2 declares its FLAG condition and its attestation verifier; `option_space` is passed everywhere, with a held call without it; §4 shows a dispatch refused without the acknowledgement, then accepted, and an unsigned attestation refused (`UNKNOWN`, budget kept), then a signed one accepted on the same operation; a new subsection shows the mandate re-validation; §6 shows the `acknowledge_flag_conditions` resumption; §11 lists the new keywords. `tests/test_guide_examples.py` runs every block.
+- `demo.py` and `tenir_governance/quickstart.py` declare a FLAG condition, acknowledge it at dispatch and pass `option_space`; the quickstart's evidence file records `flag_conditions` and `flag_conditions_met`, and `verify_demo` checks them.
+
+### Verification scope
+- 73 new tests in four files: `tests/test_attestation_verification.py` (32), `tests/test_flag_conditions_enforced.py` (18), `tests/test_mandate_revalidation_at_dispatch.py` (15), `tests/test_issue141_hold_budget_resolution.py` (8). Run against the 5.7.5 code (`42513bf`): the attestation file does not import (the module does not exist there) and 40 of the 41 tests of the three other files fail; the one that passes checks that an unmeasured `option_space` masks no conclusive veto, which 5.7.5 already guaranteed.
+- Full suite: 1457 passed (1384 existing tests adapted or unchanged, 73 new) on Python 3.12, single process; in-memory, JSON-file and SQLite registries; `SingleHostLockBackend` for the backend release path of the mandate re-validation. Not exercised: the SQLite WAL backend under concurrent processes, Raft, clock skew between processes.
+- The Ed25519 tests run with the `cryptography` package of the `raft` extra (the release workflow installs it) and are skipped without it.
+- The reg-conformance harness has not been re-run on this code.
+
+---
+
+## [5.7.5] — 2026-11-20 — Single-host pilot line: fail-closed hardening of 5.7.0 (merged on `main`, unpublished)
+
+**Status.** Merged on `main` on 2026-11-20 (`42513bf`, PR #142) and held there by the release decision of the same day: no v5.7.5 tag, no PyPI publication. Three of the limits listed under "Scope, known limits and trust boundaries" were judged blocking for a pilot (the caller-asserted attestation, the unenforced FLAG conditions, the missing re-validation of the mandate before dispatch) and #141 held the qualification. 5.7.6, above, closes them on the same code line; this entry is kept unchanged as the record of that candidate, except for the two wording corrections noted in place.
 
 First release of the 5.7.5 single-host pilot line (ROADMAP_90_DAYS, "5.7.5 — Auditable Evidence & Pilot Readiness"). It hardens 5.7.0: no favorable default for an unmeasured axis, no conclusive veto masked by an invalid measure, no `fail()` after dispatch without a persisted proof of non-execution, and a HOLD bound (τ_K) that a deployment can declare and that refuses alone. FM-20 stays Open and multi-host stays disabled; remediation target 5.8.0, as announced in 5.7.0.
 
@@ -17,7 +111,7 @@ First release of the 5.7.5 single-host pilot line (ROADMAP_90_DAYS, "5.7.5 — A
 
 ### Scope, known limits and trust boundaries
 
-Read before deploying. Each limit below was observed on this code, by a script driving the public API; none is inferred.
+Read before deploying. Each limit below was observed on this code by a script; the lowered budget limit and the removed acting agent were set through internal access, because no API allows them. (Wording corrected in 5.7.6: the entry first said "by a script driving the public API".)
 
 - **Deployment scope.** One controlled host and one governor process, with the in-memory, JSON-file or SQLite WAL registry on that host (Profile S). Raft stays restricted to development/test loopback nodes while FM-20 is Open. Not exercised: the SQLite WAL backend under concurrent processes, and clock skew between processes.
 - **The proof of non-execution is asserted by its caller; the runtime does not authenticate it.** `NonExecutionAttestation` is checked for form (the four fields, an ISO 8601 time, `observed_effect_count = 0`) and for the attempt it names; `verified_by_runtime` is always `False`. Any caller that can call `fail()` releases the budget of a dispatched operation with a well-formed attestation, whatever its `source` says: the runtime does not check that the source observed the provider. The trust boundary is the deployment's: restrict `fail(..., non_execution_attested=...)` to the component that reconciles against the provider, and prefer the runtime's own paths (`dispatch_and_execute` and `reconcile_unknown` record their attestation from the provider's answer). Against 5.7.0, which released the budget after dispatch with no proof at all, this is a stronger gate, not an end-to-end guarantee.
@@ -25,7 +119,7 @@ Read before deploying. Each limit below was observed on this code, by a script d
 - **`option_space` is not a hard gate.** When absent it is replaced by a neutral `0.5`, listed in `declared_unmeasured` with a soft gate reason, and the call can still reach `PASS` or `FLAG`; the six axes under "Upgrading from 5.7.0" are hard gates. The REG harness vector PX-REG-STATE-010 fails for this reason (on 5.7.0 it failed for four axes).
 - **No re-validation of the mandate between admission and dispatch on the default path.** `dispatch` and `dispatch_and_execute` re-check the payload digest, the quarantine lock and the presence of the budget reservation. They do not re-check a budget limit lowered below the amount, the removal of the acting agent, a withdrawn delegation, or a change of the governor's `CompositionPolicy` version after admission: the operation dispatches. 5.7.5 does not guarantee the dynamic revocation of a mandate up to dispatch. The experimental Profile S commit gate (`require_commit_authorization=True`, off by default) refuses on any change of the signed trust state, but not on the governor's own policy version.
 - **A budget HOLD above half the remaining capacity cannot be resolved (#141, open, unchanged from 5.7.0).** On re-adjudication, I8 counts the operation's own reservation: with capacity 100, held amounts 50.5, 60 and 90 are refused with `HARD_VETO` ("Aggregate budget violation"), the reservation is released and the operation reaches `FAILED`, whatever the new evidence; 10 and 50 resolve and dispatch. The failure is closed (no effect), and `resolve_hold` still returns `hold_resolved = True` on that path.
-- **REG conformance is not demonstrated.** The reg-conformance harness (skiredj-prog/reg-conformance#81, `7ee03ab`, level 2) gives `NOT_CERTIFIABLE` on this code. With the default port, its 61 vectors, 4 effect probes and 17 property checks give the same results as on 5.7.0 (10 PASS and 50 ADAPTER_REQUIRED among the vectors; one FAIL among the property checks, PX-REG-STATE-010, above). With the τ_K port (τ_K = 1 s), CT-R4-004b passes with the reserve that its FLAG states no condition, and CT-R4-005 is INCONCLUSIVE: a refusal under quarantine lock states neither a terminal disposition nor a resumption condition, and the adapter contract has no field for one.
+- **REG conformance is not demonstrated.** The reg-conformance harness, run from skiredj-prog/reg-conformance#81 (`7ee03ab`, level 2; an unmerged draft extension of the harness, not the released REG v0.7.0, which is the normative reference), gives `NOT_CERTIFIABLE` on this code. (Wording corrected in 5.7.6: the entry first cited #81 as if it were the released harness.) With the default port, its 61 vectors, 4 effect probes and 17 property checks give the same results as on 5.7.0 (10 PASS and 50 ADAPTER_REQUIRED among the vectors; one FAIL among the property checks, PX-REG-STATE-010, above). With the τ_K port (τ_K = 1 s), CT-R4-004b passes with the reserve that its FLAG states no condition, and CT-R4-005 is INCONCLUSIVE: a refusal under quarantine lock states neither a terminal disposition nor a resumption condition, and the adapter contract has no field for one.
 
 ### No favorable default for an unmeasured axis; a FLAG states its declared conditions (decisions 2 and 3, 19 Nov)
 

@@ -21,6 +21,13 @@ from tenir_governance.membrane import TransitionMembrane, MembraneState
 from tenir_governance.operations.registry import DurableOperationRegistry, OperationRecord, OperationState
 from tenir_governance.operations.budget import InProcessBudgetCoordinator
 
+# 5.7.6 (RFC-0 §4): a FLAG admits only under conditions the policy declares, and
+# their acknowledgement is required at dispatch. The test deployment declares one.
+TEST_FLAG_CONDITIONS = ("test supervision",)
+TEST_FLAG_ACK = {"test supervision": "acknowledged by the test"}
+TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS)
+
+
 
 # ── P1-1: SDK default registry persistence ──────────────────────
 
@@ -30,21 +37,21 @@ class TestSDKPersistenceDefault:
     def test_sdk_without_store_path_uses_in_memory(self):
         """SDK without store_path works but is in-memory only (for testing)."""
         from tenir_governance.sdk import DualKernelCompositionClient
-        client = DualKernelCompositionClient()
+        client = DualKernelCompositionClient(policy=CompositionPolicy(**TEST_POLICY_KW))
         assert client.governor.registry._store_path is None
 
     def test_sdk_require_persistence_without_path_raises(self):
         """require_persistence=True without store_path must raise ValueError."""
         from tenir_governance.sdk import DualKernelCompositionClient
         with pytest.raises(ValueError, match="require_persistence"):
-            DualKernelCompositionClient(require_persistence=True)
+            DualKernelCompositionClient(require_persistence=True, policy=CompositionPolicy(**TEST_POLICY_KW))
 
     def test_sdk_with_store_path_uses_persistent_registry(self):
         """SDK with store_path creates a persistent registry."""
         from tenir_governance.sdk import DualKernelCompositionClient
         with tempfile.TemporaryDirectory() as tmpdir:
             store = os.path.join(tmpdir, "registry.json")
-            client = DualKernelCompositionClient(store_path=store)
+            client = DualKernelCompositionClient(store_path=store, policy=CompositionPolicy(**TEST_POLICY_KW))
             assert client.governor.registry._store_path == store
 
     def test_sdk_restart_after_claim_key_stays_blocked(self):
@@ -55,7 +62,7 @@ class TestSDKPersistenceDefault:
             store = os.path.join(tmpdir, "registry.json")
 
             # First session: register an agent and adjudicate
-            client1 = DualKernelCompositionClient(store_path=store)
+            client1 = DualKernelCompositionClient(store_path=store, policy=CompositionPolicy(**TEST_POLICY_KW))
             client1.register_agent(Agent(agent_id="alice", authority_score=0.9))
             client1.register_resource(Resource(resource_id="budget", capacity=100.0))
 
@@ -63,11 +70,11 @@ class TestSDKPersistenceDefault:
                         idempotency_key="op-restart-test")
             result1 = client1.adjudicate(p, pressure=0.2, velocity=0.3, capacity=1.0,
                                         resource_id="budget", amount=10.0,
-                                        authority=0.9, context_fit=0.9, evidence_quality=0.9)
+                                        authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
             assert result1["composed_decision"] in ("PASS", "FLAG")
 
             # Second session: restart with same store_path
-            client2 = DualKernelCompositionClient(store_path=store)
+            client2 = DualKernelCompositionClient(store_path=store, policy=CompositionPolicy(**TEST_POLICY_KW))
             client2.register_agent(Agent(agent_id="alice", authority_score=0.9))
             client2.register_resource(Resource(resource_id="budget", capacity=100.0))
 
@@ -76,7 +83,7 @@ class TestSDKPersistenceDefault:
                          idempotency_key="op-restart-test")
             result2 = client2.adjudicate(p2, pressure=0.2, velocity=0.3, capacity=1.0,
                                         resource_id="budget", amount=10.0,
-                                        authority=0.9, context_fit=0.9, evidence_quality=0.9)
+                                        authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
             assert result2["composed_decision"] == "HARD_VETO"
             assert "already claimed" in result2["composed_rationale"]
 
@@ -321,6 +328,7 @@ class TestScoringCoordinatesNoFavorableDefaults:
             pressure=0.2, velocity=0.3, capacity=1.0,
             authority=0.9, context_fit=0.9,
             evidence_quality=0.0,  # missing
+            option_space=0.9,
         )
         assert result["decision"] != "PASS"
 
@@ -330,7 +338,7 @@ class TestScoringCoordinatesNoFavorableDefaults:
         result = adapter.adjudicate(
             pressure=0.2, velocity=0.3, capacity=1.0,
             authority=0.9, context_fit=0.0,  # missing
-            evidence_quality=0.9,
+            evidence_quality=0.9, option_space=0.9,
         )
         assert result["decision"] != "PASS"
 
@@ -348,10 +356,10 @@ class TestReservedTransitionChecked:
         membrane = TransitionMembrane(membrane_state)
         membrane_state.register_agent(Agent(agent_id="alice", authority_score=0.9))
         membrane_state.register_resource(Resource(resource_id="budget", capacity=100.0))
-        policy = CompositionPolicy()
+        policy = CompositionPolicy(**TEST_POLICY_KW)
         gov = DualKernelGovernor(
             scoring, membrane,
-            policy=policy,
+            policy=policy or CompositionPolicy(**TEST_POLICY_KW),
             registry=registry or DurableOperationRegistry(),
         )
         return gov
@@ -363,7 +371,7 @@ class TestReservedTransitionChecked:
                      idempotency_key="op-normal")
         result = gov.adjudicate(p, pressure=0.2, velocity=0.3, capacity=1.0,
                                resource_id="budget", amount=10.0,
-                               authority=0.9, context_fit=0.9, evidence_quality=0.9)
+                               authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
         assert result["composed_decision"] in ("PASS", "FLAG")
         assert result["operation_state"] == "reserved"
 
@@ -391,7 +399,7 @@ class TestReservedTransitionChecked:
                     idempotency_key="op-conflict")
         result = gov.adjudicate(p, pressure=0.2, velocity=0.3, capacity=1.0,
                                resource_id="budget", amount=10.0,
-                               authority=0.9, context_fit=0.9, evidence_quality=0.9)
+                               authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
         # Should be HARD_VETO because the key is already claimed
         assert result["composed_decision"] == "HARD_VETO"
 
@@ -402,6 +410,6 @@ class TestReservedTransitionChecked:
                     idempotency_key="op-success")
         result = gov.adjudicate(p, pressure=0.1, velocity=0.2, capacity=1.0,
                                resource_id="budget", amount=5.0,
-                               authority=0.9, context_fit=0.9, evidence_quality=0.9)
+                               authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
         assert result["composed_decision"] in ("PASS", "FLAG")
         assert result["operation_state"] == "reserved"

@@ -85,6 +85,13 @@ info("Importing TENIR-Gov modules...")
 from tenir_governance.sdk import DualKernelCompositionClient
 from tenir_governance.objects import Agent, Passage, Resource
 from tenir_governance.operations.provider import MockProvider, ProviderOutcome
+from tenir_governance.composition import CompositionPolicy
+
+# 5.7.6 (RFC-0 §4): a FLAG admits only under conditions the deployment declares,
+# acknowledged at dispatch. The demo declares one condition and acknowledges it.
+DEMO_FLAG_CONDITIONS = ("human supervision of the demo run",)
+DEMO_FLAG_ACK = {"human supervision of the demo run": "operator watching the console"}
+DEMO_POLICY = CompositionPolicy(flag_conditions=DEMO_FLAG_CONDITIONS)
 
 ok("Imports successful")
 
@@ -96,7 +103,7 @@ print("  An AI agent proposes a $10 payment. Both kernels evaluate it,")
 print("  budget is reserved atomically, and the provider confirms execution.\n")
 
 provider = MockProvider(behavior="confirmed")
-client = DualKernelCompositionClient(store_path=tempfile.mktemp(suffix=".json"))
+client = DualKernelCompositionClient(store_path=tempfile.mktemp(suffix=".json"), policy=DEMO_POLICY)
 client.governor.provider = provider
 client.register_agent(Agent(agent_id="alice", authority_score=0.9, trusted_delegates=frozenset()))
 client.register_resource(Resource(resource_id="budget", capacity=100.0))
@@ -106,7 +113,7 @@ p = Passage(agent_id="alice", action_type="payment", amount=10.0)
 
 result = client.adjudicate(
     p, pressure=0.2, velocity=0.2, capacity=0.9,
-    authority=0.9, context_fit=0.9, evidence_quality=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     resource_id="budget", amount=10.0,
 )
 
@@ -123,7 +130,7 @@ else:
 
 step("Dispatching to provider with idempotency key...")
 dispatch_result = client.governor.dispatch_and_execute(
-    p.idempotency_key, resource_id="budget", amount=10.0,
+    p.idempotency_key, resource_id="budget", amount=10.0, flag_conditions_met=DEMO_FLAG_ACK,
 )
 
 detail(f"Operation state:     {dispatch_result['operation_state']}")
@@ -153,7 +160,7 @@ print("  the idempotency key was already claimed at CREATED.\n")
 step("Re-submitting the same passage (same idempotency key)...")
 result2 = client.adjudicate(
     p, pressure=0.2, velocity=0.2, capacity=0.9,
-    authority=0.9, context_fit=0.9, evidence_quality=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     resource_id="budget", amount=10.0,
 )
 
@@ -292,14 +299,14 @@ print("  claims are lost on restart. With a persistent store_path, they survive.
 step("Creating in-memory client (no store_path)...")
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    client_mem = DualKernelCompositionClient()
+    client_mem = DualKernelCompositionClient(policy=DEMO_POLICY)
 client_mem.register_agent(Agent(agent_id="bob", authority_score=0.9, trusted_delegates=frozenset()))
 client_mem.register_resource(Resource(resource_id="budget_mem", capacity=100.0))
 
 p_mem = Passage(agent_id="bob", action_type="payment", amount=15.0)
 client_mem.adjudicate(
     p_mem, pressure=0.2, velocity=0.2, capacity=0.9,
-    authority=0.9, context_fit=0.9, evidence_quality=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     resource_id="budget_mem", amount=15.0,
 )
 detail(f"Adjudicated: state={client_mem.governor.registry.get(p_mem.idempotency_key).state}")
@@ -307,12 +314,12 @@ detail(f"Adjudicated: state={client_mem.governor.registry.get(p_mem.idempotency_
 step("Simulating restart — new in-memory client, same operation...")
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    client_mem2 = DualKernelCompositionClient()
+    client_mem2 = DualKernelCompositionClient(policy=DEMO_POLICY)
 client_mem2.register_agent(Agent(agent_id="bob", authority_score=0.9, trusted_delegates=frozenset()))
 client_mem2.register_resource(Resource(resource_id="budget_mem", capacity=100.0))
 result_mem2 = client_mem2.adjudicate(
     p_mem, pressure=0.2, velocity=0.2, capacity=0.9,
-    authority=0.9, context_fit=0.9, evidence_quality=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     resource_id="budget_mem", amount=15.0,
 )
 detail(f"Re-adjudication:     {result_mem2['composed_decision']}")
@@ -331,26 +338,26 @@ info("The new process has no record of the previous adjudication.\n")
 # Persistent
 store = tempfile.mktemp(suffix=".json")
 step(f"Creating persistent client (store_path={os.path.basename(store)})...")
-client_p1 = DualKernelCompositionClient(store_path=store)
+client_p1 = DualKernelCompositionClient(store_path=store, policy=DEMO_POLICY)
 client_p1.register_agent(Agent(agent_id="carol", authority_score=0.9, trusted_delegates=frozenset()))
 client_p1.register_resource(Resource(resource_id="budget_p", capacity=100.0))
 
 p_p = Passage(agent_id="carol", action_type="payment", amount=25.0)
 client_p1.adjudicate(
     p_p, pressure=0.2, velocity=0.2, capacity=0.9,
-    authority=0.9, context_fit=0.9, evidence_quality=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     resource_id="budget_p", amount=25.0,
 )
 detail(f"Adjudicated: state={client_p1.governor.registry.get(p_p.idempotency_key).state}")
 detail(f"Store file exists:   {os.path.exists(store)}")
 
 step("Simulating restart — new persistent client, same store_path...")
-client_p2 = DualKernelCompositionClient(store_path=store)
+client_p2 = DualKernelCompositionClient(store_path=store, policy=DEMO_POLICY)
 client_p2.register_agent(Agent(agent_id="carol", authority_score=0.9, trusted_delegates=frozenset()))
 client_p2.register_resource(Resource(resource_id="budget_p", capacity=100.0))
 result_p2 = client_p2.adjudicate(
     p_p, pressure=0.2, velocity=0.2, capacity=0.9,
-    authority=0.9, context_fit=0.9, evidence_quality=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     resource_id="budget_p", amount=25.0,
 )
 detail(f"Re-adjudication:     {result_p2['composed_decision']}")
@@ -365,7 +372,7 @@ else:
 print()
 step("Testing require_persistence=True guard...")
 try:
-    DualKernelCompositionClient(require_persistence=True)
+    DualKernelCompositionClient(require_persistence=True, policy=DEMO_POLICY)
     fail("require_persistence=True without store_path should have raised")
 except ValueError as e:
     detail(f"ValueError: {str(e)[:80]}...")
@@ -382,7 +389,7 @@ print("  When the provider times out, TENIR doesn't assume the payment failed.")
 print("  It marks the operation UNKNOWN and triggers reconciliation.\n")
 
 provider_timeout = MockProvider(behavior="timeout", reconcile_outcome=ProviderOutcome.CONFIRMED)
-client_t = DualKernelCompositionClient(store_path=tempfile.mktemp(suffix=".json"))
+client_t = DualKernelCompositionClient(store_path=tempfile.mktemp(suffix=".json"), policy=DEMO_POLICY)
 client_t.governor.provider = provider_timeout
 client_t.register_agent(Agent(agent_id="dave", authority_score=0.9, trusted_delegates=frozenset()))
 client_t.register_resource(Resource(resource_id="budget_t", capacity=100.0))
@@ -390,13 +397,13 @@ client_t.register_resource(Resource(resource_id="budget_t", capacity=100.0))
 p5 = Passage(agent_id="dave", action_type="payment", amount=30.0)
 client_t.adjudicate(
     p5, pressure=0.2, velocity=0.2, capacity=0.9,
-    authority=0.9, context_fit=0.9, evidence_quality=0.9,
+    authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     resource_id="budget_t", amount=30.0,
 )
 
 step("Dispatching to provider (simulated timeout)...")
 dispatch_t = client_t.governor.dispatch_and_execute(
-    p5.idempotency_key, resource_id="budget_t", amount=30.0,
+    p5.idempotency_key, resource_id="budget_t", amount=30.0, flag_conditions_met=DEMO_FLAG_ACK,
 )
 detail(f"Operation state:     {dispatch_t['operation_state']}")
 detail(f"Executed:            {dispatch_t.get('executed')}")

@@ -10,10 +10,12 @@ abstract: >
   deterministic admissibility computation (S = K / (P × V + ε)), and
   cryptographically verifiable Merkle-based audit logging to provide
   model-independent governance for AI-enabled operational systems.
-  The 5.7.5 release builds on the published 5.7.0 release, adding
-  fail-closed hardening for the single-host pilot line. Raft remains
-  restricted to development/test loopback nodes while FM-20 is open.
-version: "5.7.5"
+  The 5.7.6 release builds on the published 5.7.0 release (the 5.7.5
+  candidate was merged but not published), adding fail-closed hardening
+  for the single-host pilot line: authenticated non-execution attestations,
+  enforced FLAG conditions and mandate re-validation at dispatch. Raft
+  remains restricted to development/test loopback nodes while FM-20 is open.
+version: "5.7.6"
 license: Apache-2.0
 repository-code: "https://github.com/skiredj-prog/tenir_governance"
 doi: 10.5281/zenodo.21264802

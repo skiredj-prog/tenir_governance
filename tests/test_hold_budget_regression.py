@@ -34,6 +34,15 @@ from tenir_governance.operations import (
     OperationRecord, OperationState, ProviderOutcome,
 )
 from tenir_kernel.kernel import TenirKernel
+from tenir_governance.composition.policy import CompositionPolicy
+from tenir_governance.operations.attestation import HmacAttestationVerifier, sign_non_execution_attestation
+
+# 5.7.6 (RFC-0 §4): a FLAG admits only under conditions the policy declares, and
+# their acknowledgement is required at dispatch. The test deployment declares one.
+TEST_FLAG_CONDITIONS = ("test supervision",)
+TEST_FLAG_ACK = {"test supervision": "acknowledged by the test"}
+TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS)
+
 
 
 def _setup_governor(budget_capacity=100.0, provider=None, policy=None):
@@ -43,15 +52,22 @@ def _setup_governor(budget_capacity=100.0, provider=None, policy=None):
                                trusted_delegates=frozenset({"bob"})))
     scoring = ScoringKernelAdapter(TenirKernel())
     membrane = TransitionMembrane(state)
-    gov = DualKernelGovernor(scoring, membrane, provider=provider, policy=policy)
+    gov = DualKernelGovernor(scoring, membrane, provider=provider,
+                             policy=policy or CompositionPolicy(**TEST_POLICY_KW),
+                             attestation_verifier=HmacAttestationVerifier(TEST_ATTESTATION_KEYS))
     return gov, state
+
+
+# 5.7.6: a caller's attestation is proof once it authenticates under a declared key.
+TEST_ATTESTATION_KEYS = {"reconciliation": b"test-reconciliation-key-0123456789"}
 
 
 def _attested(key):
     from tenir_governance.operations.registry import NonExecutionAttestation
-    return NonExecutionAttestation(idempotency_key=key, source="provider-reconciliation",
-                                   attestation="test: no effect observed for this attempt",
-                                   attested_at="2026-11-19T06:40:00+00:00")
+    att = NonExecutionAttestation(idempotency_key=key, source="provider-reconciliation",
+                                  attestation="test: no effect observed for this attempt",
+                                  attested_at="2026-11-19T06:40:00+00:00")
+    return sign_non_execution_attestation(att, "reconciliation", TEST_ATTESTATION_KEYS["reconciliation"])
 
 
 class _BrokenScoring:
@@ -84,7 +100,7 @@ def test_hold_resolve_then_dispatch_does_not_double_reserve():
     res = gov.resolve_hold(
         p.idempotency_key, passage=p,
         pressure=0.2, velocity=0.2, capacity=0.9,
-        authority=0.9, context_fit=1.0, evidence_quality=1.0,
+        authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         resource_id="budget", amount=10.0,
     )
 
@@ -95,7 +111,7 @@ def test_hold_resolve_then_dispatch_does_not_double_reserve():
     )
 
     # Dispatch + confirm.
-    gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+    gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert gov.confirm(p.idempotency_key) is True
 
     assert gov.registry.get(p.idempotency_key).state == OperationState.CONFIRMED
@@ -114,7 +130,7 @@ def test_reconcile_from_escalated_unknown_releases_reservation(monkeypatch):
     # expire_escalated is time-driven: it needs a declared τ_K, exhausted.
     gov, state = _setup_governor(
         provider=provider, budget_capacity=100.0,
-        policy=CompositionPolicy(hold_tau_k_seconds=300, hold_tau_k_source="test"),
+        policy=CompositionPolicy(hold_tau_k_seconds=300, hold_tau_k_source="test", **TEST_POLICY_KW),
     )
     budget = state.resources["budget"]
 
@@ -155,12 +171,12 @@ def test_reconciliation_flag_write_failure_leaves_budget_untouched(monkeypatch):
     passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
     result = gov.adjudicate(
         passage, pressure=0.2, velocity=0.2, capacity=0.9,
-        authority=0.9, context_fit=1.0, evidence_quality=1.0,
+        authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         resource_id="budget", amount=10.0,
     )
     assert result["operation_state"] == OperationState.RESERVED.value
 
-    executed = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    executed = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert executed["operation_state"] == OperationState.UNKNOWN.value
     assert budget.reserved == 0.0
     assert budget.consumed == 10.0
@@ -194,7 +210,7 @@ def test_concurrent_adjudication_reserves_budget_once():
         p = Passage(agent_id="alice", action_type="payment", amount=amount)
         r = gov.adjudicate(
             p, pressure=0.2, velocity=0.2, capacity=0.9,
-            authority=0.9, context_fit=1.0, evidence_quality=1.0,
+            authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
             resource_id="budget", amount=amount,
         )
         decisions.append(r["composed_decision"])
@@ -299,7 +315,7 @@ def test_authorize_exit_approve_returns_to_hold_until_fresh_readjudication():
     resolved = gov.resolve_hold(
         p.idempotency_key, passage=p,
         pressure=0.2, velocity=0.2, capacity=0.9,
-        authority=0.9, context_fit=1.0, evidence_quality=1.0,
+        authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         resource_id="budget", amount=10.0,
     )
     assert resolved["hold_resolved"] is True
@@ -307,7 +323,7 @@ def test_authorize_exit_approve_returns_to_hold_until_fresh_readjudication():
     assert budget.reserved == 10.0
 
     # Clean up: dispatch and confirm to release the reservation.
-    gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0)
+    gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     gov.confirm(p.idempotency_key)
     assert budget.reserved == 0.0
     assert budget.consumed == 10.0
@@ -336,7 +352,7 @@ def test_concurrent_adjudication_fails_without_lock():
         p = Passage(agent_id="alice", action_type="payment", amount=amount)
         r = gov.adjudicate(
             p, pressure=0.2, velocity=0.2, capacity=0.9,
-            authority=0.9, context_fit=1.0, evidence_quality=1.0,
+            authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
             resource_id="budget", amount=amount,
         )
         decisions.append(r["composed_decision"])
@@ -470,7 +486,7 @@ def test_governor_dispatch_commits_backend_reservation_once(tmp_path):
     gov, _state, backend = _setup_durable_backend_governor(tmp_path)
     passage, _result = _adjudicate_durable_budget(gov)
 
-    dispatched = gov.dispatch(passage.idempotency_key, "budget", 10.0)
+    dispatched = gov.dispatch(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert dispatched["dispatched"] is True
     record = gov.registry.get(passage.idempotency_key)
     state = backend.get_state("budget")
@@ -481,7 +497,7 @@ def test_governor_dispatch_commits_backend_reservation_once(tmp_path):
 
     # Duplicate dispatch is rejected by the operation state machine and must
     # not commit the same backend reservation a second time.
-    replay = gov.dispatch(passage.idempotency_key, "budget", 10.0)
+    replay = gov.dispatch(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert replay["dispatched"] is False
     assert backend.get_state("budget").committed == Decimal("10.0")
 
@@ -507,7 +523,7 @@ def test_reconcile_failed_provider_refunds_durable_commit(tmp_path):
     gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
     passage, _result = _adjudicate_durable_budget(gov)
 
-    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert result["operation_state"] in (
         OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
     )
@@ -581,7 +597,7 @@ def test_crash_after_backend_commit_reconciles_using_backend_state(tmp_path, mon
 
     monkeypatch.setattr(gov.registry, "set_budget_flags", crash_after_commit_before_registry_flags)
     with pytest.raises(_SimulatedProcessCrash):
-        gov.dispatch_and_execute(key, "budget", 10.0)
+        gov.dispatch_and_execute(key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
 
     # A process crash drops process-local dispatch markers. The same governor
     # object is reused here; clear that marker so reconcile sees a restarted process.
@@ -615,7 +631,7 @@ def test_reconcile_confirmed_keeps_durable_budget_committed(tmp_path):
     gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
     passage, _result = _adjudicate_durable_budget(gov)
 
-    dispatched = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    dispatched = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert dispatched["operation_state"] in (
         OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
     )
@@ -645,7 +661,7 @@ def test_crash_after_durable_refund_replays_reconciliation_idempotently(tmp_path
     passage, _result = _adjudicate_durable_budget(gov)
     key = passage.idempotency_key
 
-    first = gov.dispatch_and_execute(key, "budget", 10.0)
+    first = gov.dispatch_and_execute(key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert first["operation_state"] in (
         OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
     )
@@ -751,7 +767,7 @@ def test_direct_provider_failure_refunds_durable_commit(tmp_path):
     gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
     passage, _result = _adjudicate_durable_budget(gov)
 
-    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     record = gov.registry.get(passage.idempotency_key)
     state = backend.get_state("budget")
 
@@ -766,7 +782,7 @@ def test_direct_provider_failure_refunds_durable_commit(tmp_path):
 def test_manual_fail_cannot_refund_committed_durable_budget_without_proof(tmp_path):
     gov, _state, backend = _setup_durable_backend_governor(tmp_path)
     passage, _result = _adjudicate_durable_budget(gov)
-    dispatched = gov.dispatch(passage.idempotency_key, "budget", 10.0)
+    dispatched = gov.dispatch(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert dispatched["dispatched"] is True
 
     before = backend.get_state("budget")
@@ -788,7 +804,7 @@ def test_direct_provider_confirmation_uses_durable_confirm_path(tmp_path):
     gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
     passage, _result = _adjudicate_durable_budget(gov)
 
-    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     record = gov.registry.get(passage.idempotency_key)
     state = backend.get_state("budget")
 
@@ -850,7 +866,7 @@ def test_durable_commit_error_does_not_terminalize_uncompensated_operation(tmp_p
         lambda reservation_id: SimpleNamespace(status="ERROR"),
     )
 
-    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0)
+    result = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     record = gov.registry.get(passage.idempotency_key)
     state = backend.get_state("budget")
 
@@ -998,7 +1014,7 @@ def test_concurrent_confirm_and_proven_fail_settle_budget_consistently(tmp_path,
 
     gov, _state, backend = _setup_durable_backend_governor(tmp_path)
     passage, _result = _adjudicate_durable_budget(gov)
-    dispatched = gov.dispatch(passage.idempotency_key, "budget", 10.0)
+    dispatched = gov.dispatch(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert dispatched["dispatched"] is True
     key = passage.idempotency_key
 
@@ -1063,7 +1079,7 @@ def test_cross_instance_confirm_and_proven_fail_cannot_diverge_durable_budget(tm
     gov2.consensus_backend = SingleHostLockBackend(str(tmp_path))
 
     passage, _result = _adjudicate_durable_budget(gov1)
-    assert gov1.dispatch(passage.idempotency_key, "budget", 10.0)["dispatched"] is True
+    assert gov1.dispatch(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)["dispatched"] is True
     key = passage.idempotency_key
 
     # Force both instances to contend at the settlement boundary. The durable
@@ -1147,7 +1163,7 @@ def test_subprocess_confirm_and_proven_fail_serialize_durable_budget(tmp_path):
     gov.hold_manager.registry = gov.registry
     passage, _result = _adjudicate_durable_budget(gov)
     key = passage.idempotency_key
-    assert gov.dispatch(key, "budget", 10.0)["dispatched"] is True
+    assert gov.dispatch(key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)["dispatched"] is True
 
     start = ctx.Barrier(3)
     results = ctx.Queue()
@@ -1214,7 +1230,7 @@ def test_recovery_fails_closed_when_backend_reservation_amount_is_ambiguous(tmp_
     gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
     passage, _result = _adjudicate_durable_budget(gov)
     key = passage.idempotency_key
-    assert gov.dispatch_and_execute(key, "budget", 10.0)["operation_state"] in (
+    assert gov.dispatch_and_execute(key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)["operation_state"] in (
         OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
     )
     ownership_before_reconcile = gov.registry.get(key).budget_committed
@@ -1257,7 +1273,7 @@ def test_recovery_replays_after_refund_and_ownership_flags_before_terminal_trans
     passage, _result = _adjudicate_durable_budget(gov)
     key = passage.idempotency_key
 
-    dispatched = gov.dispatch_and_execute(key, "budget", 10.0)
+    dispatched = gov.dispatch_and_execute(key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert dispatched["operation_state"] in (
         OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
     )
@@ -1308,7 +1324,7 @@ def test_recovery_refuses_ambiguous_unknown_backend_reservation_state(tmp_path, 
     gov, _state, backend = _setup_durable_backend_governor(tmp_path, provider=provider)
     passage, _result = _adjudicate_durable_budget(gov)
     key = passage.idempotency_key
-    dispatched = gov.dispatch_and_execute(key, "budget", 10.0)
+    dispatched = gov.dispatch_and_execute(key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert dispatched["operation_state"] in (
         OperationState.UNKNOWN.value, OperationState.DISPATCHING.value,
     )
@@ -1428,7 +1444,7 @@ def test_volatile_registry_blocks_durable_reserve_dispatch_and_reconcile():
         amount=10.0, resource_id="budget", state=OperationState.RESERVED,
     )
     assert gov.registry.register(dispatch_record)
-    dispatched = gov.dispatch_and_execute("volatile-dispatch", "budget", 10.0)
+    dispatched = gov.dispatch_and_execute("volatile-dispatch", "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
     assert dispatched["dispatched"] is False
     assert provider.execute_calls == 0
     assert gov.registry.get("volatile-dispatch").state == OperationState.RESERVED

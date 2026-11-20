@@ -10,6 +10,10 @@ from .registry import (
     HoldRecord, ExitReceipt, NonExecutionAttestation,
 )
 from .hold import HoldManager
+from .attestation import (
+    AttestationVerifier, HmacAttestationVerifier, Ed25519AttestationVerifier,
+    sign_non_execution_attestation, sign_non_execution_attestation_ed25519,
+)
 from .provider import (
     DispatchProvider, DispatchResult, ProviderOutcome,
     ReconciliationResult, MockProvider, StripeProvider,
@@ -21,6 +25,8 @@ __all__ = [
     "BudgetCoordinator", "InProcessBudgetCoordinator", "DISCLOSURE",
     "DurableOperationRegistry", "OperationRecord", "OperationState",
     "HoldRecord", "ExitReceipt", "NonExecutionAttestation", "HoldManager",
+    "AttestationVerifier", "HmacAttestationVerifier", "Ed25519AttestationVerifier",
+    "sign_non_execution_attestation", "sign_non_execution_attestation_ed25519",
     "DispatchProvider", "DispatchResult", "ProviderOutcome",
     "ReconciliationResult", "MockProvider", "StripeProvider",
     "SQLiteConsensusBackend",

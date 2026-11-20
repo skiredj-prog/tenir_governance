@@ -45,7 +45,7 @@ import json
 import math
 import re
 import threading
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from uuid import uuid4
 
 from .decisions import Decision, ExecutionStatus, CheckType
@@ -320,7 +320,6 @@ class ScoringKernelAdapter:
             hard_reasons.append("context_fit missing: cannot adjudicate without context assessment")
         if evidence_quality is None:
             hard_reasons.append("evidence_quality missing: cannot adjudicate without evidence")
-
         # Delegate core scoring to TenirKernel
         tk_result = self._kernel.adjudicate(
             pressure=pressure,
@@ -352,6 +351,15 @@ class ScoringKernelAdapter:
             decision = Decision.HOLD.value
             rationale = (f"INSUFFICIENT_EVIDENCE: invalid measure(s) (non-finite or outside [0, 1]) {', '.join(non_finite)}; "
                          "held, not scored as admissible. " + rationale).strip()
+        if option_space is None and decision in (Decision.PASS.value, Decision.FLAG.value):
+            # Decision 2 applied in full (5.7.6): an unmeasured option space is
+            # insufficient evidence, not a neutral admission. The placeholder
+            # keeps the geometry complete and the axis stays declared
+            # unmeasured; every conclusive veto above has already governed.
+            # HOLD, not a veto: the operation waits for the measure.
+            decision = Decision.HOLD.value
+            rationale = ("INSUFFICIENT_EVIDENCE: option_space unmeasured; held, not admitted "
+                         "(re-adjudicate with the option-space measure). " + rationale).strip()
 
         return {
             "kernel": "scoring",
@@ -454,6 +462,7 @@ class DualKernelGovernor:
         consensus_backend: Any = None,
         commit_authority: Any = None,
         require_commit_authorization: bool = False,
+        attestation_verifier: Any = None,
     ):
         # scoring_kernel is a ScoringKernelAdapter wrapping TenirKernel,
         # or any object with a compatible adjudicate() interface.
@@ -462,6 +471,13 @@ class DualKernelGovernor:
         self.ledger = ledger or HashChainedLedger()
         self.policy = policy or CompositionPolicy()
         self.policy.validate()
+        # Verifies caller-supplied proofs of non-execution against the keys the
+        # deployment declares (operations.attestation). None (default): no
+        # external attestation is accepted; after dispatch only the runtime's
+        # own provider channel can establish non-execution (fail-closed).
+        if attestation_verifier is not None and not callable(getattr(attestation_verifier, "verify", None)):
+            raise ValueError("attestation_verifier must provide verify(attestation) -> str | None")
+        self.attestation_verifier = attestation_verifier
         self.registry = registry or DurableOperationRegistry()
         self.membrane.state.bind_quarantine_registry(self.registry)
         self.budget_coordinator = budget_coordinator
@@ -640,6 +656,11 @@ class DualKernelGovernor:
             resource_id=resource_id or "",
             payload_hash=authorized_payload_hash,
             commit_gate_required=self.require_commit_authorization,
+            # The mandate as admitted, re-validated before dispatch (5.7.6).
+            delegating_agent_id=getattr(delegation, "delegating_agent_id", "") or "" if delegation is not None else "",
+            delegatee_agent_id=getattr(delegation, "delegatee_agent_id", "") or "" if delegation is not None else "",
+            agent_registered_at_admission=passage.agent_id in self.membrane.state.agents,
+            policy_version=str(self.policy.version),
         )
         if not self.registry.register(record):
             existing = self.registry.get(idem_key)
@@ -708,7 +729,9 @@ class DualKernelGovernor:
             budget_in_scope=budget_in_scope,
             policy=self.policy,
         )
-        composed_rationale = self._with_flag_conditions(composed_decision, composed_rationale)
+        composed_decision, composed_rationale = self._apply_flag_condition_rule(
+            composed_decision, composed_rationale,
+        )
 
         # 5. Ledger
         self.ledger.append(
@@ -841,7 +864,10 @@ class DualKernelGovernor:
 
                 # 6. State machine transitions
                 if composed_decision == Decision.PASS.value or composed_decision == Decision.FLAG.value:
-                    success, _prev = self.registry.transition_to(idem_key, OperationState.RESERVED)
+                    success, _prev = self.registry.transition_to(
+                        idem_key, OperationState.RESERVED,
+                        admission_terms=self._admission_terms(composed_decision),
+                    )
                     if not success:
                         # A failed RESERVED claim must not leak a backend
                         # reservation acquired before taking the quarantine gate.
@@ -934,10 +960,238 @@ class DualKernelGovernor:
             "declared_unmeasured": list((scoring_result or {}).get("declared_unmeasured", [])),
         }
 
+    def _admission_terms(self, composed_decision: str) -> dict[str, Any]:
+        """The terms persisted with a RESERVED transition (5.7.6): the admitting
+        decision and, for a FLAG, the conditions the policy declares. They are
+        what dispatch later enforces."""
+        is_flag = composed_decision == Decision.FLAG.value
+        return {
+            "composed_decision": composed_decision,
+            "flag_conditions": list(self.policy.flag_conditions) if is_flag else [],
+        }
+
     def _with_flag_conditions(self, composed_decision: str, rationale: str) -> str:
         if composed_decision == Decision.FLAG.value and self.policy.flag_conditions:
             return rationale + " Conditions: " + "; ".join(self.policy.flag_conditions) + "."
         return rationale
+
+    FLAG_WITHOUT_CONDITION_RATIONALE = (
+        "FLAG states no condition: the policy declares no flag_conditions, so the "
+        "conditional authorization cannot be stated (RFC-0 §4, decision 3); held, "
+        "not admitted. Declare CompositionPolicy.flag_conditions or re-adjudicate."
+    )
+
+    def _apply_flag_condition_rule(self, composed_decision: str, rationale: str) -> tuple[str, str]:
+        """RFC-0 §4 (5.7.6): a FLAG admits only under declared conditions.
+
+        With conditions declared, the FLAG stands and names them. Without,
+        the result is HOLD: the runtime invents no condition and admits
+        nothing it cannot condition.
+        """
+        if composed_decision != Decision.FLAG.value:
+            return composed_decision, rationale
+        if self.policy.flag_conditions:
+            return composed_decision, self._with_flag_conditions(composed_decision, rationale)
+        return Decision.HOLD.value, (rationale + " " + self.FLAG_WITHOUT_CONDITION_RATIONALE).strip()
+
+    def _verify_attestation(self, attestation: NonExecutionAttestation) -> str | None:
+        """Method string when the deployment's verifier authenticates it, else None."""
+        if self.attestation_verifier is None:
+            return None
+        try:
+            method = self.attestation_verifier.verify(attestation)
+        except Exception:
+            return None
+        if not isinstance(method, str) or not method.strip():
+            return None
+        return method
+
+    def _revalidate_mandate_at_dispatch(self, record: OperationRecord, amount: float) -> list[str]:
+        """Re-check, against the current state, the mandate that admitted the
+        operation (5.7.6). Returns the list of changes; empty means intact.
+
+        Checked: the acting agent (when it was registered at admission), the
+        delegation in scope, the in-memory budget (the resource still exists
+        and its limit still covers consumed + reserved, so a limit lowered
+        under this reservation refuses), and the composition policy version.
+        With a durable budget backend the limit lives in the backend, which
+        refuses a re-registration with another capacity and enforces I8 on
+        every reserve; no backend I/O runs here, so the check is the same
+        before and under the quarantine gate.
+        """
+        changes: list[str] = []
+        state = self.membrane.state
+        if record.agent_registered_at_admission and record.agent_id not in state.agents:
+            changes.append(f"acting agent '{record.agent_id}' is no longer registered")
+        if record.delegating_agent_id:
+            delegator = state.agents.get(record.delegating_agent_id)
+            if delegator is None:
+                changes.append(f"delegating agent '{record.delegating_agent_id}' is no longer registered")
+            elif not delegator.can_delegate_to(record.delegatee_agent_id or record.agent_id):
+                changes.append(
+                    f"delegation from '{record.delegating_agent_id}' to "
+                    f"'{record.delegatee_agent_id or record.agent_id}' is withdrawn"
+                )
+        if record.resource_id and amount > 0 and self.consensus_backend is None:
+            resource = state.resources.get(record.resource_id)
+            if resource is None:
+                changes.append(f"resource '{record.resource_id}' is no longer registered")
+            else:
+                try:
+                    headroom = float(resource.capacity) - float(resource.consumed) - float(resource.reserved)
+                except (TypeError, ValueError):
+                    headroom = float("nan")
+                own = float(amount) if record.budget_reserved else 0.0
+                if not math.isfinite(headroom) or headroom + own < float(amount):
+                    changes.append(
+                        f"budget limit of '{record.resource_id}' no longer covers the amount "
+                        f"(capacity {resource.capacity}, consumed {resource.consumed}, "
+                        f"reserved {resource.reserved}, amount {amount})"
+                    )
+        if record.policy_version and record.policy_version != str(self.policy.version):
+            changes.append(
+                f"composition policy version changed from '{record.policy_version}' "
+                f"to '{self.policy.version}' since admission"
+            )
+        return changes
+
+    def _revalidate_mandate_locked(self, idempotency_key: str) -> dict[str, Any] | None:
+        """Before the dispatch gate: take the settlement lock, re-read, and
+        fail closed when the admitting mandate changed (5.7.6).
+
+        Returns None when the mandate is intact or the operation is no longer
+        RESERVED (the caller proceeds on the current record).
+        """
+        if self.consensus_backend is not None and not self.registry.is_persistent:
+            # Configuration refusal first: the dispatch path refuses a durable
+            # backend without a persistent registry, with no state change.
+            return None
+        try:
+            with self._settlement_lock:
+                with self.registry.settlement_lock(
+                    idempotency_key,
+                    require_persistent=self.consensus_backend is not None,
+                ):
+                    current = self.registry.get(idempotency_key)
+                    if current is None or current.state != OperationState.RESERVED:
+                        return None
+                    changes = self._revalidate_mandate_at_dispatch(current, float(current.amount))
+                    if not changes:
+                        return None
+                    return self._fail_closed_on_mandate_change(idempotency_key, current, changes)
+        except Exception:
+            current = self.registry.get(idempotency_key)
+            return {
+                "dispatched": False,
+                "mandate_revalidation_failed": True,
+                "operation_state": current.state.value if current else None,
+                "budget_reconciliation_required": True,
+                "reason": "Mandate re-validation could not acquire the durable settlement lock; no dispatch.",
+            }
+
+    @staticmethod
+    def _flag_conditions_acknowledged(record: OperationRecord) -> bool:
+        """True when every condition recorded at admission has a persisted,
+        non-empty acknowledgement."""
+        declared = list(record.flag_conditions)
+        met = record.flag_conditions_met or {}
+        return bool(declared) and set(declared) == set(met) and all(
+            isinstance(v, str) and v.strip() for v in met.values()
+        )
+
+    def _acknowledge_flag_conditions(
+        self, idempotency_key: str, record: OperationRecord,
+        met: Mapping[str, str] | None,
+    ) -> dict[str, Any] | None:
+        """Before the dispatch gate (5.7.6, RFC-0 §4): a FLAG-admitted
+        operation dispatches only once every condition recorded at admission
+        is acknowledged. The acknowledgement is persisted on the record and
+        ledgered; a refusal is returned as the dispatch result.
+
+        A PASS admission has no condition and ``met`` is ignored. Returns None
+        when dispatch may proceed.
+        """
+        if record.composed_decision != Decision.FLAG.value and not record.flag_conditions:
+            return None
+        declared = list(record.flag_conditions)
+        base = {"dispatched": False, "operation_state": record.state.value,
+                "flag_conditions": declared, "flag_conditions_met": record.flag_conditions_met}
+        if not declared:
+            return {**base, "reason": (
+                "FLAG admission records no condition; dispatch refused (RFC-0 §4). "
+                "Re-adjudicate under a policy that declares flag_conditions.")}
+        if met is None:
+            if self._flag_conditions_acknowledged(record):
+                return None
+            return {**base, "reason": (
+                "FLAG conditions not acknowledged: the dispatch of a FLAG-admitted operation "
+                "requires flag_conditions_met covering: " + "; ".join(declared) + ".")}
+        try:
+            canonical = json.loads(json.dumps(dict(met), sort_keys=True))
+        except (TypeError, ValueError) as exc:
+            return {**base, "reason": f"FLAG condition acknowledgement is invalid: {exc}."}
+        already = record.flag_conditions_met == canonical
+        try:
+            recorded = self.registry.record_flag_conditions_met(idempotency_key, met)
+        except (ValueError, RuntimeError) as exc:
+            return {**base, "reason": f"FLAG condition acknowledgement is invalid: {exc}."}
+        if not recorded:
+            current = self.registry.get(idempotency_key) or record
+            return {**base, "operation_state": current.state.value,
+                    "flag_conditions_met": current.flag_conditions_met,
+                    "reason": (
+                        "FLAG condition acknowledgement refused: it must cover exactly the "
+                        "declared conditions (" + "; ".join(declared) + ") on a RESERVED "
+                        f"operation (state {current.state.value}), and an acknowledgement "
+                        "already recorded is never replaced.")}
+        if not already:
+            self.ledger.append(
+                kernel="composed", decision=Decision.FLAG.value,
+                rationale="FLAG conditions acknowledged at dispatch: " + "; ".join(
+                    f"{c}: {canonical[c]}" for c in declared),
+                passage_id=record.passage_id, idempotency_key=idempotency_key,
+                composed_decision=Decision.FLAG.value,
+            )
+        return None
+
+    def _fail_closed_on_mandate_change(
+        self, idempotency_key: str, record: OperationRecord, changes: list[str],
+    ) -> dict[str, Any]:
+        """Refuse the dispatch of an operation whose mandate changed (5.7.6).
+
+        The reservation is released first; the attempt is terminal (FAILED,
+        CONFIRMED_NONEXECUTION: the check runs before any DISPATCHING claim).
+        If the release cannot be proven, the operation stays open for
+        reconciliation and the refusal is ledgered.
+        """
+        detail = "; ".join(changes)
+        base = {"dispatched": False, "mandate_revalidation_failed": True, "mandate_changes": list(changes)}
+        release_error = self._release_hold_budget_before_terminal_transition(idempotency_key, record)
+        if release_error:
+            reason = (f"MANDATE_REVALIDATION_FAILED at dispatch ({detail}): no effect; attempt not "
+                      f"closed, budget reconciliation required; {release_error}")
+            self.ledger.append(
+                kernel="composed", decision=Decision.HARD_VETO.value, rationale=reason,
+                passage_id=record.passage_id, idempotency_key=idempotency_key,
+                composed_decision=Decision.HARD_VETO.value,
+            )
+            return {**base, "operation_state": record.state.value,
+                    "budget_reconciliation_required": True, "reason": reason}
+        success, _prev = self.registry.transition_to(idempotency_key, OperationState.FAILED)
+        current = self.registry.get(idempotency_key)
+        reason = (
+            f"MANDATE_REVALIDATION_FAILED at dispatch ({detail}): FAIL-CLOSED, terminal for this "
+            "attempt identity, never dispatched (CONFIRMED_NONEXECUTION), reservation released."
+            if success else f"MANDATE_REVALIDATION_FAILED at dispatch ({detail}); transition to FAILED failed."
+        )
+        self.ledger.append(
+            kernel="composed", decision=Decision.HARD_VETO.value, rationale=reason,
+            passage_id=record.passage_id, idempotency_key=idempotency_key,
+            composed_decision=Decision.HARD_VETO.value,
+        )
+        return {**base, "operation_state": current.state.value if current else None,
+                "composed_decision": Decision.HARD_VETO.value,
+                "execution_record": "CONFIRMED_NONEXECUTION" if success else None, "reason": reason}
 
     def _prospective_utilization(self, idempotency_key: str, resource, amount: float) -> float:
         """Budget utilization as it will be once this operation holds its budget.
@@ -1606,6 +1860,21 @@ class DualKernelGovernor:
                         "authorization_decision": body.get("decision", "INVALID"),
                         "passage_id": record.passage_id,
                     }
+            if ((record.composed_decision == Decision.FLAG.value or record.flag_conditions)
+                    and not self._flag_conditions_acknowledged(record)):
+                return {
+                    "idempotency_key": idempotency_key,
+                    "action": "acknowledge_flag_conditions",
+                    "reason": (
+                        "Operation is RESERVED under a FLAG; dispatch requires flag_conditions_met "
+                        "covering every declared condition (RFC-0 §4)."
+                    ),
+                    "operation_state": state.value,
+                    "passage_id": record.passage_id,
+                    "resource_id": record.resource_id,
+                    "amount": record.amount,
+                    "flag_conditions": list(record.flag_conditions),
+                }
             return {
                 "idempotency_key": idempotency_key,
                 "action": "dispatch",
@@ -1706,8 +1975,21 @@ class DualKernelGovernor:
         metadata: dict[str, Any] | None = None,
         *,
         payload: dict[str, Any] | None = None,
+        flag_conditions_met: Mapping[str, str] | None = None,
         _active_provider_call: bool = False,
     ) -> dict[str, Any]:
+        """Claim the dispatch slot (RESERVED → DISPATCHING) for one operation.
+
+        Since 5.7.6 two checks run before the claim, on the default policy:
+
+        - a FLAG-admitted operation dispatches only once every condition the
+          admission recorded is acknowledged (``flag_conditions_met``, a
+          mapping condition → how it was met, persisted and ledgered);
+        - the mandate that admitted the operation is re-validated (agent,
+          delegation, budget limit, policy version); a change refuses fail-
+          closed: the reservation is released and the attempt ends FAILED
+          with ``execution_record`` CONFIRMED_NONEXECUTION.
+        """
         # Never hold the quarantine lock across SQLite or another external
         # authority call.  A quick first check avoids consuming an
         # authorization while an already-active quarantine blocks dispatch.
@@ -1717,6 +1999,20 @@ class DualKernelGovernor:
             tau_k_refusal = self._fail_closed_on_tau_k_locked(idempotency_key, "dispatch")
             if tau_k_refusal is not None:
                 return tau_k_refusal
+            record = self.registry.get(idempotency_key)
+        if record is not None and record.state == OperationState.RESERVED:
+            # 5.7.6 (RFC-0 §4): acknowledge the FLAG conditions, persisted
+            # before any claim; a PASS admission has none.
+            refusal = self._acknowledge_flag_conditions(idempotency_key, record, flag_conditions_met)
+            if refusal is not None:
+                return refusal
+            # 5.7.6: the mandate that admitted the operation must still hold.
+            # Checked here, before any authority call or claim; re-checked
+            # without I/O under the gate.
+            if self.policy.revalidate_mandate_at_dispatch:
+                refusal = self._revalidate_mandate_locked(idempotency_key)
+                if refusal is not None:
+                    return refusal
             record = self.registry.get(idempotency_key)
         if record is not None and record.commit_gate_required and record.state == OperationState.RESERVED:
             from ..experimental.ep02_commit_authorization import canonical_payload_bytes
@@ -1901,6 +2197,33 @@ class DualKernelGovernor:
                 "recommendation": "configure_persistent_registry",
             }
 
+        # 5.7.6: what dispatch() settled before taking the gate is re-read
+        # here from the current record, without I/O, so that no claim passes
+        # on terms that changed in between.
+        if record.state == OperationState.RESERVED:
+            if ((record.composed_decision == Decision.FLAG.value or record.flag_conditions)
+                    and not self._flag_conditions_acknowledged(record)):
+                return {
+                    "dispatched": False,
+                    "reason": "FLAG conditions not acknowledged; dispatch refused (RFC-0 §4).",
+                    "operation_state": record.state.value,
+                    "flag_conditions": list(record.flag_conditions),
+                }
+            if self.policy.revalidate_mandate_at_dispatch:
+                changes = self._revalidate_mandate_at_dispatch(record, amount)
+                if changes:
+                    return {
+                        "dispatched": False,
+                        "mandate_revalidation_failed": True,
+                        "mandate_changes": changes,
+                        "reason": (
+                            "MANDATE_REVALIDATION_FAILED under the dispatch gate ("
+                            + "; ".join(changes)
+                            + "); no claim made. Call dispatch() again to settle fail-closed."
+                        ),
+                        "operation_state": record.state.value,
+                    }
+
         # QUARANTINE_LOCK blocks dispatch, including operations reserved before
         # the lock was activated. Check before the durable dispatch transition.
         if self._quarantine_blocks():
@@ -2079,6 +2402,7 @@ class DualKernelGovernor:
         metadata: dict[str, Any] | None = None,
         *,
         payload: dict[str, Any] | None = None,
+        flag_conditions_met: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         # dispatch() linearizes the claim against QUARANTINE_LOCK. Do not hold
         # the global quarantine lock while performing external I/O: a hung
@@ -2087,6 +2411,7 @@ class DualKernelGovernor:
         # quarantine activates before provider.execute(). New claims are blocked.
         return self._dispatch_and_execute_under_quarantine_lock(
             idempotency_key, resource_id, amount, metadata, payload=payload,
+            flag_conditions_met=flag_conditions_met,
         )
 
     def _dispatch_and_execute_under_quarantine_lock(
@@ -2097,6 +2422,7 @@ class DualKernelGovernor:
         metadata: dict[str, Any] | None = None,
         *,
         payload: dict[str, Any] | None = None,
+        flag_conditions_met: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Atomically claim dispatch, then call the external provider.
 
@@ -2135,6 +2461,7 @@ class DualKernelGovernor:
         dispatch_result = self.dispatch(
             idempotency_key, resource_id, amount,
             payload=provider_metadata,
+            flag_conditions_met=flag_conditions_met,
             _active_provider_call=self.provider is not None,
         )
         if not dispatch_result.get("dispatched"):
@@ -2245,7 +2572,9 @@ class DualKernelGovernor:
                     "reason": rationale,
                 }
             try:
-                failed = self.fail(
+                # The runtime observed the provider's answer itself: this is
+                # the runtime channel, recorded as such (5.7.6).
+                failed = self._fail_with_locks(
                     idempotency_key, resource_id, amount,
                     non_execution_attested=NonExecutionAttestation(
                         idempotency_key=idempotency_key,
@@ -2254,7 +2583,8 @@ class DualKernelGovernor:
                                      f"{prov_result.provider_reference or '-'}; "
                                      f"error={prov_result.error or '-'}"),
                         attested_at=_utc_now_iso(),
-                    ),
+                    ).verified("provider-channel"),
+                    runtime_channel=True,
                 )
             finally:
                 with self._active_dispatches_lock:
@@ -2513,7 +2843,7 @@ class DualKernelGovernor:
                                 attestation=(f"reconciliation outcome FAILED; reference="
                                              f"{recon.provider_reference or '-'}"),
                                 attested_at=_utc_now_iso(),
-                            ),
+                            ).verified("provider-reconciliation-channel"),
                         )
                     except (ValueError, RuntimeError):
                         attested = False
@@ -2843,6 +3173,16 @@ class DualKernelGovernor:
         it, DISPATCHING moves to UNKNOWN, the budget is kept, and False is
         returned. ``authoritative_non_execution`` (a bare boolean) is no longer
         accepted as proof and is kept only so that older callers do not break.
+
+        Since 5.7.6 a caller's attestation is proof only once the governor's
+        ``attestation_verifier`` authenticates its signature under a declared
+        key. The attestation is then recorded with ``verified_by_runtime=True``
+        and the verification method. Without a verifier, or when the signature
+        does not verify, or when the caller asserts ``verified_by_runtime``
+        itself, the attestation is refused: a DISPATCHING operation moves to
+        UNKNOWN with its budget kept, the refusal is ledgered, and False is
+        returned. Only the runtime's own observation of the provider
+        (``dispatch_and_execute``, ``reconcile_unknown``) bypasses the verifier.
         """
         if authoritative_non_execution and non_execution_attested is None:
             import warnings
@@ -2851,6 +3191,14 @@ class DualKernelGovernor:
                 "pass non_execution_attested=NonExecutionAttestation(...)",
                 DeprecationWarning, stacklevel=2,
             )
+        return self._fail_with_locks(
+            idempotency_key, resource_id, amount,
+            non_execution_attested=non_execution_attested, runtime_channel=False,
+        )
+
+    def _fail_with_locks(self, idempotency_key: str, resource_id: str | None, amount: float, *,
+                         non_execution_attested, runtime_channel: bool) -> bool:
+        """Lock wrapper shared by ``fail()`` and the runtime's provider channel."""
         with self._settlement_lock:
             try:
                 with self.registry.settlement_lock(
@@ -2860,17 +3208,37 @@ class DualKernelGovernor:
                     return self._fail_under_settlement_lock(
                         idempotency_key, resource_id, amount,
                         non_execution_attested=non_execution_attested,
+                        runtime_channel=runtime_channel,
                     )
             except Exception:
                 # Do not mutate budget if cross-process coordination is uncertain.
                 return False
 
-    def _fail_under_settlement_lock(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, non_execution_attested=None) -> bool:
+    def _refuse_attestation_after_dispatch(
+        self, idempotency_key: str, record: OperationRecord, why: str,
+    ) -> bool:
+        """An attestation that does not authenticate is no proof (5.7.6): the
+        attempt is left open, UNKNOWN if it was DISPATCHING, budget kept."""
+        moved = ""
+        if record.state == OperationState.DISPATCHING:
+            success, _prev = self.registry.transition_to(idempotency_key, OperationState.UNKNOWN)
+            moved = "; DISPATCHING → UNKNOWN pending reconciliation" if success else ""
+        self.ledger.append(
+            kernel="composed", decision=Decision.HOLD.value,
+            rationale=(f"NON_EXECUTION_ATTESTATION_REFUSED ({why}): not proof of non-execution; "
+                       f"budget kept{moved}."),
+            passage_id=record.passage_id, idempotency_key=idempotency_key,
+        )
+        return False
+
+    def _fail_under_settlement_lock(self, idempotency_key: str, resource_id: str | None = None, amount: float = 0.0, *, non_execution_attested=None, runtime_channel: bool = False) -> bool:
         """Transition to FAILED and mutate only this operation's budget.
 
         After dispatch, non_execution_attested is required: the provider or
         reconciliation protocol confirms that no external effect occurred, and
         the attestation is persisted on the operation before any budget change.
+        Unless ``runtime_channel`` (the governor's own provider observation),
+        the attestation must authenticate under ``attestation_verifier``.
         """
         record = self.registry.get(idempotency_key)
         if record is None:
@@ -2879,11 +3247,36 @@ class DualKernelGovernor:
         if non_execution_attested is not None:
             att = non_execution_attested
             if isinstance(att, dict):
-                att = NonExecutionAttestation.from_dict(att)
+                try:
+                    att = NonExecutionAttestation.from_dict(att)
+                except (TypeError, ValueError):
+                    return False
             if not isinstance(att, NonExecutionAttestation):
                 return False
             if record.state not in (OperationState.DISPATCHING, OperationState.UNKNOWN):
                 return False  # an attestation is for a dispatched attempt only
+            if att.idempotency_key != idempotency_key:
+                return False
+            try:
+                att.validate()
+            except ValueError:
+                return False
+            if runtime_channel:
+                if not att.verified_by_runtime:
+                    return False
+            else:
+                if att.verified_by_runtime or att.verification:
+                    return self._refuse_attestation_after_dispatch(
+                        idempotency_key, record,
+                        "the caller asserted verified_by_runtime; only the runtime verifies",
+                    )
+                method = self._verify_attestation(att)
+                if method is None:
+                    why = ("no attestation_verifier is configured on the governor"
+                           if self.attestation_verifier is None else
+                           f"signature not verified under key_id '{att.key_id or '-'}'")
+                    return self._refuse_attestation_after_dispatch(idempotency_key, record, why)
+                att = att.verified(method)
             try:
                 authoritative_non_execution = self.registry.record_non_execution_attested(
                     idempotency_key, att,
@@ -3340,10 +3733,18 @@ class DualKernelGovernor:
         membrane_result = None
         membrane_error = ""
         try:
+            # #141 (5.7.6): the HOLD already holds the reservation this
+            # re-adjudication would take. Declare it to I8 so the budget check
+            # does not count the same amount twice (adjudicate() already does).
+            held_record = self.registry.get(idem_key)
+            already_reserved_amount = (
+                amount if held_record is not None and held_record.budget_reserved else 0.0
+            )
             membrane_result = self.membrane.adjudicate(
                 passage=passage, delegation=delegation,
                 resource_id=resource_id, amount=amount,
                 trajectory_id=trajectory_id,
+                existing_reservation_amount=already_reserved_amount,
             )
         except Exception as e:
             membrane_result = None
@@ -3367,7 +3768,9 @@ class DualKernelGovernor:
             budget_in_scope=budget_in_scope,
             policy=self.policy,
         )
-        composed_rationale = self._with_flag_conditions(composed_decision, composed_rationale)
+        composed_decision, composed_rationale = self._apply_flag_condition_rule(
+            composed_decision, composed_rationale,
+        )
 
         # 5. Ledger
         self.ledger.append(
@@ -3440,6 +3843,7 @@ class DualKernelGovernor:
                                 "exit_reason": "resolved",
                                 "resolved_at": _utc_now_iso(),
                             },
+                            admission_terms=self._admission_terms(composed_decision),
                         )
                         if success:
                             hold_resolved = True

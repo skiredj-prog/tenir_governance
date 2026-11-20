@@ -216,6 +216,7 @@ class TestDualKernelGovernor:
         kwargs.setdefault("authority", 0.9)
         kwargs.setdefault("context_fit", 1.0)
         kwargs.setdefault("evidence_quality", 1.0)
+        kwargs.setdefault("option_space", 0.9)
         return gov.adjudicate(passage, **kwargs)
 
     def _setup(self, budget_capacity=100.0, policy=None):
@@ -229,7 +230,7 @@ class TestDualKernelGovernor:
         tenir_kernel = TenirKernel()
         scoring = ScoringKernelAdapter(tenir_kernel)
         membrane = TransitionMembrane(state)
-        governor = DualKernelGovernor(scoring, membrane, policy=policy)
+        governor = DualKernelGovernor(scoring, membrane, policy=policy or CompositionPolicy(**TEST_POLICY_KW))
         return governor, state
 
     def test_registry_budget_flags_roll_back_when_persistence_fails(self, tmp_path, monkeypatch):
@@ -410,7 +411,7 @@ class TestDualKernelGovernor:
 
         worker = threading.Thread(
             target=lambda: gov.dispatch_and_execute(
-                "active-provider-race", "budget", 10.0,
+                "active-provider-race", "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK,
             ),
             daemon=True,
         )
@@ -460,7 +461,7 @@ class TestDualKernelGovernor:
 
         gov.provider = FailIfExecutedProvider()
         dispatched = gov.dispatch_and_execute(
-            "dispatch-flag-write-failure", "budget", 10.0,
+            "dispatch-flag-write-failure", "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK,
         )
         assert dispatched["dispatched"] is False
         assert "provider execution blocked" in dispatched["reason"]
@@ -705,7 +706,7 @@ class TestDualKernelGovernor:
 
     def test_custom_policy_threshold(self):
         """Custom policy threshold affects escalation."""
-        gov, state = self._setup(budget_capacity=100.0, policy=CompositionPolicy(budget_escalation_threshold=0.50))
+        gov, state = self._setup(budget_capacity=100.0, policy=CompositionPolicy(budget_escalation_threshold=0.50, **TEST_POLICY_KW))
         p1 = Passage(agent_id="alice", action_type="payment", amount=45.0)
         r1 = self._adjudicate(gov,
             p1, pressure=0.2, velocity=0.3, capacity=1.0,
@@ -735,7 +736,7 @@ class TestDualKernelGovernor:
         assert r1["operation_state"] == OperationState.RESERVED.value
 
         # Dispatch
-        r2 = gov.dispatch(p.idempotency_key, resource_id="budget", amount=10.0)
+        r2 = gov.dispatch(p.idempotency_key, resource_id="budget", amount=10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert r2["dispatched"] is True
         assert r2["operation_state"] == OperationState.DISPATCHING.value
 
@@ -765,14 +766,21 @@ class TestDualKernelGovernor:
         assert result["action"] == "not_found"
 
     def test_resume_existing_reserved(self):
-        """resume_existing returns dispatch for RESERVED operations."""
+        """resume_existing returns dispatch for RESERVED operations; a FLAG
+        admission first asks for its conditions to be acknowledged (5.7.6)."""
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        self._adjudicate(gov,
+        adj = self._adjudicate(gov,
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         result = gov.resume_existing(p.idempotency_key)
+        assert result["operation_state"] == OperationState.RESERVED.value
+        if adj["composed_decision"] == "FLAG":
+            assert result["action"] == "acknowledge_flag_conditions"
+            assert result["flag_conditions"] == list(TEST_FLAG_CONDITIONS)
+            assert gov.registry.record_flag_conditions_met(p.idempotency_key, TEST_FLAG_ACK)
+            result = gov.resume_existing(p.idempotency_key)
         assert result["action"] == "dispatch"
         assert result["operation_state"] == OperationState.RESERVED.value
 
@@ -784,7 +792,7 @@ class TestDualKernelGovernor:
             p, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
-        gov.dispatch(p.idempotency_key, resource_id="budget", amount=10.0)
+        gov.dispatch(p.idempotency_key, resource_id="budget", amount=10.0, flag_conditions_met=TEST_FLAG_ACK)
 
         recovery = gov.recover()
         assert recovery["unresolved_count"] == 1
@@ -828,7 +836,7 @@ class TestDualKernelGovernor:
             resource_id="budget", amount=10.0,
         )
         assert result["operation_state"] == OperationState.RESERVED.value
-        dispatched = gov.dispatch(p.idempotency_key, resource_id="budget", amount=5.0)
+        dispatched = gov.dispatch(p.idempotency_key, resource_id="budget", amount=5.0, flag_conditions_met=TEST_FLAG_ACK)
         assert dispatched["dispatched"] is False
         assert "does not match" in dispatched["reason"]
         assert gov.registry.get(p.idempotency_key).state == OperationState.RESERVED
@@ -847,7 +855,7 @@ class TestDualKernelGovernor:
 
         dispatched = gov.dispatch(
             p.idempotency_key, resource_id="budget", amount=10.0,
-            payload={"recipient": "attacker", "currency": "USD"},
+            payload={"recipient": "attacker", "currency": "USD"}, flag_conditions_met=TEST_FLAG_ACK,
         )
 
         assert dispatched["dispatched"] is False
@@ -868,7 +876,7 @@ class TestDualKernelGovernor:
 
         dispatched = gov.dispatch(
             p.idempotency_key, resource_id="budget", amount=10.0,
-            payload={"recipient": "merchant-1", "currency": "USD"},
+            payload={"recipient": "merchant-1", "currency": "USD"}, flag_conditions_met=TEST_FLAG_ACK,
         )
 
         assert dispatched["dispatched"] is True
@@ -900,7 +908,7 @@ class TestDualKernelGovernor:
         )
         assert result["operation_state"] == OperationState.RESERVED.value
         state.lock_quarantine("test")
-        dispatched = gov.dispatch(p.idempotency_key, resource_id="budget", amount=10.0)
+        dispatched = gov.dispatch(p.idempotency_key, resource_id="budget", amount=10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert dispatched["dispatched"] is False
         assert "QUARANTINE_LOCK" in dispatched["reason"]
         assert gov.registry.get(p.idempotency_key).state == OperationState.RESERVED
@@ -919,7 +927,7 @@ class TestScoringKernelAdapter:
         adapter = self._setup()
         result = adapter.adjudicate(
             pressure=0.2, velocity=0.3, capacity=1.0,
-            authority=1.0, context_fit=1.0, evidence_quality=1.0,
+            authority=1.0, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         )
         assert result["decision"] in (Decision.PASS.value, Decision.FLAG.value)
         assert result["s_score"] is not None
@@ -941,7 +949,7 @@ class TestScoringKernelAdapter:
         adapter = self._setup()
         result = adapter.adjudicate(
             pressure=0.9, velocity=0.9, capacity=0.7,
-            authority=1.0, context_fit=1.0, evidence_quality=1.0,
+            authority=1.0, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         )
         assert result["decision"] == Decision.FLAG.value
 
@@ -949,7 +957,7 @@ class TestScoringKernelAdapter:
         adapter = self._setup()
         result = adapter.adjudicate(
             pressure=0.2, velocity=0.3, capacity=1.0,
-            authority=1.0, context_fit=1.0, evidence_quality=0.3
+            authority=1.0, context_fit=1.0, evidence_quality=0.3, option_space=0.9
         )
         assert result["decision"] == Decision.FLAG.value
 
@@ -958,7 +966,7 @@ class TestScoringKernelAdapter:
         result = adapter.adjudicate(
             pressure=0.2, velocity=0.3, capacity=1.0,
             irreversibility_materiality=0.8, authority=0.5,
-            context_fit=1.0, evidence_quality=1.0
+            context_fit=1.0, evidence_quality=1.0, option_space=0.9
         )
         assert result["decision"] == Decision.HARD_VETO.value
 
@@ -966,7 +974,7 @@ class TestScoringKernelAdapter:
         adapter = self._setup()
         result = adapter.adjudicate(
             pressure=0.2, velocity=0.3, capacity=1.0,
-            authority=1.0, context_fit=1.0, evidence_quality=1.0,
+            authority=1.0, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         )
         assert "constraint_geometry" in result
         assert result["constraint_geometry"] is not None
@@ -976,7 +984,7 @@ class TestScoringKernelAdapter:
         adapter = self._setup()
         result = adapter.adjudicate(
             pressure=0.2, velocity=0.3, capacity=1.0,
-            authority=1.0, context_fit=1.0, evidence_quality=1.0,
+            authority=1.0, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         )
         assert result["kernel"] == "scoring"
 
@@ -1290,3 +1298,10 @@ class TestSchemaAdapter:
 
 # Import OperationState for the dispatch tests
 from tenir_governance.operations.registry import OperationState
+
+# 5.7.6 (RFC-0 §4): a FLAG admits only under conditions the policy declares, and
+# their acknowledgement is required at dispatch. The test deployment declares one.
+TEST_FLAG_CONDITIONS = ("test supervision",)
+TEST_FLAG_ACK = {"test supervision": "acknowledged by the test"}
+TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS)
+

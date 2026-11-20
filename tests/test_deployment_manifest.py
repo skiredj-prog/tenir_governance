@@ -22,7 +22,7 @@ def _write_valid_manifest(directory):
     manifest = {
         "manifest_version": "1",
         "deployment_id": "test-deployment",
-        "release": {"package": "tenir-governance", "version": "5.7.5"},
+        "release": {"package": "tenir-governance", "version": "5.7.6"},
         "runtime_contract": {"engine_spec_version": "TENIR-2.0", "schema_version": "1.2"},
         "deployment": {"environment": "test", "host_scope": "single-host"},
         "mode": "ENFORCE",
@@ -50,7 +50,7 @@ def test_verifier_accepts_manifest_and_checks_artifact_digest(tmp_path):
     result = verify_deployment_manifest(path)
 
     assert result["valid"] is True
-    assert result["release_version"] == "5.7.5"
+    assert result["release_version"] == "5.7.6"
     assert result["artifact_count"] == 1
 
 
@@ -112,14 +112,14 @@ def test_verifier_keeps_fm20_open_for_v57_production_raft(tmp_path):
 
 def test_host_scope_guard_is_explicit_and_version_bounded():
     with pytest.raises(RuntimeError, match="Multi-host is disabled in v5.7.x"):
-        enforce_host_scope({"HOST_SCOPE": "multi-host"}, release_version="5.7.5")
+        enforce_host_scope({"HOST_SCOPE": "multi-host"}, release_version="5.7.6")
 
     assert enforce_host_scope({"HOST_SCOPE": "multi-host"}, release_version="5.8.0") == "multi-host"
 
 
 def test_v57_rejects_multi_host_scope_alias():
     with pytest.raises(RuntimeError, match="Multi-host is disabled in v5.7.x"):
-        enforce_host_scope({"TENIR_HOST_SCOPE": "multi-host"}, release_version="5.7.5")
+        enforce_host_scope({"TENIR_HOST_SCOPE": "multi-host"}, release_version="5.7.6")
 
 
 def test_conflicting_host_scope_aliases_fail_closed():
@@ -127,7 +127,7 @@ def test_conflicting_host_scope_aliases_fail_closed():
         enforce_host_scope({
             "HOST_SCOPE": "single-host",
             "TENIR_HOST_SCOPE": "multi-host",
-        }, release_version="5.7.5")
+        }, release_version="5.7.6")
 
 
 def test_conflicting_environment_aliases_fail_closed():
@@ -138,7 +138,7 @@ def test_conflicting_environment_aliases_fail_closed():
 
 
 def test_kernel_and_governance_release_versions_match():
-    assert tenir_kernel.__version__ == tenir_governance.__version__ == "5.7.5"
+    assert tenir_kernel.__version__ == tenir_governance.__version__ == "5.7.6"
 
 
 def test_api_startup_refuses_multi_host_scope(monkeypatch):
