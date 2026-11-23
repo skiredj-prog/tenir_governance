@@ -10,7 +10,7 @@ from tenir_governance.objects import Agent, Passage, Resource
 from tenir_governance.sdk import DualKernelCompositionClient
 from tenir_kernel.kernel import TenirKernel
 
-FULL = dict(pressure=0.2, velocity=0.3, capacity=1.0, authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
+FULL = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0, authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
 ALWAYS_UNMEASURED = {"cooperative_control_score", "trajectory_risk_score",
                      "manipulation_risk", "drift"}
 
@@ -27,13 +27,13 @@ def test_sdk_adjudicate_has_no_favorable_defaults():
     import inspect
     params = inspect.signature(DualKernelCompositionClient.adjudicate).parameters
     for name in ("authority", "context_fit", "evidence_quality", "option_space",
-                 "pressure", "velocity", "capacity"):
+                 "pressure", "velocity", "capacity", "irreversibility_materiality"):
         assert params[name].default is None, name
 
 
 def test_missing_mandatory_measure_is_not_admitted():
     r = _gov().adjudicate(Passage(agent_id="alice", action_type="read"),
-                          pressure=0.2, velocity=0.3, capacity=1.0,
+                          irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                           option_space=0.9, context_fit=0.9, evidence_quality=0.9)
     assert r["composed_decision"] not in (Decision.PASS.value, Decision.FLAG.value)
     assert "authority" in r["declared_unmeasured"]
@@ -80,7 +80,7 @@ def test_flag_carries_the_policy_declared_conditions_and_ledgers_them():
 def test_non_flag_result_carries_no_conditions():
     gov = _gov(CompositionPolicy(flag_conditions=("review",)))
     r = gov.adjudicate(Passage(agent_id="alice", action_type="read"),
-                       pressure=0.2, velocity=0.3, capacity=1.0,
+                       irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                        context_fit=0.9, evidence_quality=0.9, option_space=0.9)
     assert r["composed_decision"] != Decision.FLAG.value
     assert r["flag_conditions"] == []

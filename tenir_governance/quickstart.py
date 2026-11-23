@@ -147,7 +147,7 @@ def run_demo(output: Path, *, receipt_available: bool = True) -> dict[str, Any]:
 
     # Explicit scenario fixtures, not real assessments of an agent or provider.
     admission = governor.adjudicate(
-        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        passage, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         resource_id="demo-budget", amount=AMOUNT, payload=PAYLOAD,
     )

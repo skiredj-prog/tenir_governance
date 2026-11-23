@@ -32,7 +32,7 @@ from tenir_kernel.geometry import Facet, GeometryPolicy, REFERENCE_GEOMETRY
 from tenir_kernel.kernel import KernelPolicy, TenirKernel
 
 CONDITIONS = ("ops supervision",)
-M = dict(pressure=0.2, velocity=0.2, capacity=0.9, option_space=0.9,
+M = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9, option_space=0.9,
          authority=0.9, context_fit=0.9, evidence_quality=0.9)
 NEVER_MEASURED = {"cooperative_control_score", "trajectory_risk_score",
                   "manipulation_risk", "drift"}
@@ -204,7 +204,7 @@ def test_a_governance_veto_is_still_a_decision_not_an_error():
     gov, budget = _governor()
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
     r = gov.adjudicate(p, payload={"action_type": "payment"},
-                       **{**M, "pressure": 1.0, "velocity": 1.0, "capacity": 0.1},  # TAU breach
+                       **{**M, "irreversibility_materiality": 0.0, "pressure": 1.0, "velocity": 1.0, "capacity": 0.1},  # TAU breach
                        resource_id="budget", amount=10.0)
     assert r["composed_decision"] == Decision.HARD_VETO.value
     assert r["operation_state"] == OperationState.FAILED.value

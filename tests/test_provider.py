@@ -65,7 +65,7 @@ def test_reconcile_can_recover_interrupted_dispatching_operation():
     gov, state = _setup_governor(provider=MockProvider(behavior="timeout"))
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
     result = _adjudicate(gov, 
-        p, pressure=0.2, velocity=0.2, capacity=0.9,
+        p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
     assert result["operation_state"] == OperationState.RESERVED.value
@@ -94,7 +94,7 @@ def test_concurrent_failed_reconciliation_refunds_only_once():
     gov, state = _setup_governor(provider=initial_provider)
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
     _adjudicate(gov, 
-        p, pressure=0.2, velocity=0.2, capacity=0.9,
+        p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
     dispatched = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
@@ -181,7 +181,7 @@ def test_i5_provider_failure_with_hypothesis_violation_returns_hold_without_refu
     gov, state = _setup_governor(provider=ContradictoryProvider())
     passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
     authorization = _adjudicate(
-        gov, passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        gov, passage, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
     assert authorization["operation_state"] == OperationState.RESERVED.value
@@ -200,7 +200,7 @@ def test_i5_contradictory_reconciliation_does_not_refund_or_fail():
     gov, state = _setup_governor(provider=MockProvider(behavior="timeout"))
     passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
     _adjudicate(
-        gov, passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        gov, passage, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
     first = gov.dispatch_and_execute(passage.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
@@ -322,7 +322,7 @@ class TestDispatchAndExecute:
         provider = MockProvider(behavior="confirmed")
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["dispatched"] is True
@@ -335,7 +335,7 @@ class TestDispatchAndExecute:
         provider = MockProvider(behavior="failed")
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["dispatched"] is True
@@ -348,7 +348,7 @@ class TestDispatchAndExecute:
         provider = MockProvider(behavior="timeout")
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["dispatched"] is True
@@ -361,7 +361,7 @@ class TestDispatchAndExecute:
         provider = MockProvider(behavior="pending")
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["dispatched"] is True
@@ -372,7 +372,7 @@ class TestDispatchAndExecute:
         """Without a provider, dispatch_and_execute falls back to dispatch()."""
         gov, state = _setup_governor(provider=None)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["dispatched"] is True
@@ -386,7 +386,7 @@ class TestDispatchAndExecute:
         )
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["dispatched"] is True
@@ -398,7 +398,7 @@ class TestDispatchAndExecute:
         provider = MockProvider(behavior="confirmed")
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert len(provider.calls) == 1
@@ -409,7 +409,7 @@ class TestDispatchAndExecute:
         provider = MockProvider(behavior="confirmed")
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0,
                        payload={"order_id": "ORD-123"})
         gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0,
@@ -427,7 +427,7 @@ class TestReconciliation:
         provider = MockProvider(behavior="timeout", reconcile_outcome=ProviderOutcome.CONFIRMED)
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         # Dispatch → UNKNOWN
         gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
@@ -443,7 +443,7 @@ class TestReconciliation:
         provider = MockProvider(behavior="timeout", reconcile_outcome=ProviderOutcome.FAILED)
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         result = gov.reconcile_unknown(p.idempotency_key)
@@ -456,7 +456,7 @@ class TestReconciliation:
         provider.reconcile_outcome = ProviderOutcome.UNKNOWN
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         result = gov.reconcile_unknown(p.idempotency_key)
@@ -468,7 +468,7 @@ class TestReconciliation:
         """Without a provider, reconciliation recommends human review."""
         gov, state = _setup_governor(provider=None)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         # Manually transition to UNKNOWN
         gov.registry.transition_to(p.idempotency_key, OperationState.DISPATCHING)
@@ -482,7 +482,7 @@ class TestReconciliation:
         provider = MockProvider(behavior="confirmed")
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         # Operation is in RESERVED, not UNKNOWN
         result = gov.reconcile_unknown(p.idempotency_key)
@@ -508,7 +508,7 @@ class TestFullLifecycle:
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         # Adjudicate
-        adj = _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        adj = _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                              resource_id="budget", amount=10.0)
         assert adj["composed_decision"] in ("PASS", "FLAG")
         assert adj["operation_state"] == OperationState.RESERVED.value
@@ -525,7 +525,7 @@ class TestFullLifecycle:
         provider = MockProvider(behavior="failed")
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         assert result["operation_state"] == OperationState.FAILED.value
@@ -538,7 +538,7 @@ class TestFullLifecycle:
         provider = MockProvider(behavior="timeout", reconcile_outcome=ProviderOutcome.CONFIRMED)
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         # Dispatch → UNKNOWN
         dispatch_result = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
@@ -555,7 +555,7 @@ class TestFullLifecycle:
         provider = MockProvider(behavior="confirmed")
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         resource = state.resources["budget"]
@@ -567,7 +567,7 @@ class TestFullLifecycle:
         provider = MockProvider(behavior="failed")
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         resource = state.resources["budget"]
@@ -608,7 +608,7 @@ class TestRecoveryWithProvider:
         provider = MockProvider(behavior="timeout")
         gov, state = _setup_governor(provider=provider)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.2, capacity=0.9,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                        resource_id="budget", amount=10.0)
         gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, flag_conditions_met=TEST_FLAG_ACK)
         recovery = gov.recover()

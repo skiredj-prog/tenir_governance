@@ -68,7 +68,7 @@ class TestSDKPersistenceDefault:
 
             p = Passage(agent_id="alice", action_type="payment", amount=10.0,
                         idempotency_key="op-restart-test")
-            result1 = client1.adjudicate(p, pressure=0.2, velocity=0.3, capacity=1.0,
+            result1 = client1.adjudicate(p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                                         resource_id="budget", amount=10.0,
                                         authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
             assert result1["composed_decision"] in ("PASS", "FLAG")
@@ -81,7 +81,7 @@ class TestSDKPersistenceDefault:
             # Same idempotency key must be blocked
             p2 = Passage(agent_id="alice", action_type="payment", amount=10.0,
                          idempotency_key="op-restart-test")
-            result2 = client2.adjudicate(p2, pressure=0.2, velocity=0.3, capacity=1.0,
+            result2 = client2.adjudicate(p2, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                                         resource_id="budget", amount=10.0,
                                         authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
             assert result2["composed_decision"] == "HARD_VETO"
@@ -314,7 +314,7 @@ class TestScoringCoordinatesNoFavorableDefaults:
         """authority ≤ 0.0 must produce a hard gate reason."""
         adapter = self._make_adapter()
         result = adapter.adjudicate(
-            pressure=0.2, velocity=0.3, capacity=1.0,
+            irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             authority=0.0,  # missing
             context_fit=0.9, evidence_quality=0.9,
         )
@@ -325,7 +325,7 @@ class TestScoringCoordinatesNoFavorableDefaults:
         """evidence_quality ≤ 0.0 must produce a hard gate reason."""
         adapter = self._make_adapter()
         result = adapter.adjudicate(
-            pressure=0.2, velocity=0.3, capacity=1.0,
+            irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             authority=0.9, context_fit=0.9,
             evidence_quality=0.0,  # missing
             option_space=0.9,
@@ -336,7 +336,7 @@ class TestScoringCoordinatesNoFavorableDefaults:
         """context_fit ≤ 0.0 must produce a hard gate reason."""
         adapter = self._make_adapter()
         result = adapter.adjudicate(
-            pressure=0.2, velocity=0.3, capacity=1.0,
+            irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             authority=0.9, context_fit=0.0,  # missing
             evidence_quality=0.9, option_space=0.9,
         )
@@ -369,7 +369,7 @@ class TestReservedTransitionChecked:
         gov = self._make_governor()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0,
                      idempotency_key="op-normal")
-        result = gov.adjudicate(p, pressure=0.2, velocity=0.3, capacity=1.0,
+        result = gov.adjudicate(p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                                resource_id="budget", amount=10.0,
                                authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
         assert result["composed_decision"] in ("PASS", "FLAG")
@@ -397,7 +397,7 @@ class TestReservedTransitionChecked:
         # Now adjudicate with the same key — register returns False (duplicate)
         p = Passage(agent_id="alice", action_type="payment", amount=10.0,
                     idempotency_key="op-conflict")
-        result = gov.adjudicate(p, pressure=0.2, velocity=0.3, capacity=1.0,
+        result = gov.adjudicate(p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                                resource_id="budget", amount=10.0,
                                authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
         # Should be HARD_VETO because the key is already claimed
@@ -408,7 +408,7 @@ class TestReservedTransitionChecked:
         gov = self._make_governor()
         p = Passage(agent_id="alice", action_type="payment", amount=5.0,
                     idempotency_key="op-success")
-        result = gov.adjudicate(p, pressure=0.1, velocity=0.2, capacity=1.0,
+        result = gov.adjudicate(p, irreversibility_materiality=0.0, pressure=0.1, velocity=0.2, capacity=1.0,
                                resource_id="budget", amount=5.0,
                                authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
         assert result["composed_decision"] in ("PASS", "FLAG")

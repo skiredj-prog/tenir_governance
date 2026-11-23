@@ -260,7 +260,7 @@ client = TENIRGovernanceClient()
 
 result = client.adjudicate(
     GovernanceEvent(
-        pressure=0.7,
+        irreversibility_materiality=0.0, pressure=0.7,
         velocity=0.5,
         capacity=1.2
     )

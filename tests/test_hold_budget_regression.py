@@ -86,7 +86,7 @@ def test_hold_resolve_then_dispatch_does_not_double_reserve():
     gov.scoring = _BrokenScoring()
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
     adj = gov.adjudicate(
-        p, pressure=0.2, velocity=0.2, capacity=0.9,
+        p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
 
@@ -99,7 +99,7 @@ def test_hold_resolve_then_dispatch_does_not_double_reserve():
     gov.scoring = ScoringKernelAdapter(TenirKernel())
     res = gov.resolve_hold(
         p.idempotency_key, passage=p,
-        pressure=0.2, velocity=0.2, capacity=0.9,
+        irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         resource_id="budget", amount=10.0,
     )
@@ -137,7 +137,7 @@ def test_reconcile_from_escalated_unknown_releases_reservation(monkeypatch):
     gov.scoring = _BrokenScoring()
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
     gov.adjudicate(
-        p, pressure=0.2, velocity=0.2, capacity=0.9,
+        p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
     assert gov.registry.get(p.idempotency_key).state == OperationState.HOLD
@@ -170,7 +170,7 @@ def test_reconciliation_flag_write_failure_leaves_budget_untouched(monkeypatch):
     budget = state.resources["budget"]
     passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
     result = gov.adjudicate(
-        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        passage, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         resource_id="budget", amount=10.0,
     )
@@ -209,7 +209,7 @@ def test_concurrent_adjudication_reserves_budget_once():
         barrier.wait()
         p = Passage(agent_id="alice", action_type="payment", amount=amount)
         r = gov.adjudicate(
-            p, pressure=0.2, velocity=0.2, capacity=0.9,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
             authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
             resource_id="budget", amount=amount,
         )
@@ -240,7 +240,7 @@ def test_authorize_exit_deny_releases_reservation():
     gov.scoring = _BrokenScoring()
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
     gov.adjudicate(
-        p, pressure=0.2, velocity=0.2, capacity=0.9,
+        p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
     assert budget.reserved == 10.0
@@ -281,7 +281,7 @@ def test_authorize_exit_approve_returns_to_hold_until_fresh_readjudication():
     gov.scoring = _BrokenScoring()
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
     gov.adjudicate(
-        p, pressure=0.2, velocity=0.2, capacity=0.9,
+        p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         resource_id="budget", amount=10.0,
     )
     assert budget.reserved == 10.0
@@ -314,7 +314,7 @@ def test_authorize_exit_approve_returns_to_hold_until_fresh_readjudication():
     gov.scoring = ScoringKernelAdapter(TenirKernel())
     resolved = gov.resolve_hold(
         p.idempotency_key, passage=p,
-        pressure=0.2, velocity=0.2, capacity=0.9,
+        irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         resource_id="budget", amount=10.0,
     )
@@ -351,7 +351,7 @@ def test_concurrent_adjudication_fails_without_lock():
         barrier.wait()
         p = Passage(agent_id="alice", action_type="payment", amount=amount)
         r = gov.adjudicate(
-            p, pressure=0.2, velocity=0.2, capacity=0.9,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
             authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
             resource_id="budget", amount=amount,
         )
@@ -461,7 +461,7 @@ def _setup_durable_backend_governor(tmp_path, provider=None, budget_capacity=100
 def _adjudicate_durable_budget(gov):
     passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
     result = gov.adjudicate(
-        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        passage, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         authority=0.9, context_fit=0.9, evidence_quality=0.9,
         option_space=0.9, resource_id="budget", amount=10.0,
     )
@@ -1613,7 +1613,7 @@ def test_cancel_escalation_releases_reservation_and_is_terminal():
     budget = state.resources["budget"]
     gov.scoring = _BrokenScoring()
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-    gov.adjudicate(p, pressure=0.2, velocity=0.2, capacity=0.9,
+    gov.adjudicate(p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                    resource_id="budget", amount=10.0)
     assert gov.escalate_hold(p.idempotency_key, escalated_by="risk-officer")["escalated"]
     assert budget.reserved == 10.0
@@ -1632,7 +1632,7 @@ def test_denied_exit_records_confirmed_nonexecution():
     gov, state = _setup_governor(budget_capacity=100.0)
     gov.scoring = _BrokenScoring()
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-    gov.adjudicate(p, pressure=0.2, velocity=0.2, capacity=0.9,
+    gov.adjudicate(p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                    resource_id="budget", amount=10.0)
     assert gov.escalate_hold(p.idempotency_key, escalated_by="risk-officer")["escalated"]
     result = gov.authorize_exit(p.idempotency_key, "risk-officer", "payment",

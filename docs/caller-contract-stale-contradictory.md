@@ -12,8 +12,10 @@ published (`1881c90`) and on this candidate; none is inferred.
 `DualKernelGovernor.adjudicate`, `DualKernelGovernor.resolve_hold` and
 `DualKernelCompositionClient.adjudicate` take one value per measurement:
 `pressure`, `velocity`, `capacity`, `option_space`, `authority`, `context_fit`,
-`evidence_quality`, and `irreversibility_materiality` (which defaults to 0.0
-when omitted). There is no observation time, no source and no second reading.
+`evidence_quality`, and `irreversibility_materiality` (omitted, it is an
+unknown measure since the decision of 23 November 2026: HOLD unless a
+conclusive veto governs). There is no observation time, no source and no
+second reading.
 The runtime therefore cannot tell a STALE or a CONTRADICTORY measurement
 (RFC-2 v0.1 §2.5) from a current one. What it handles is UNKNOWN: a value that
 is not a finite number in [0, 1] (invalid), or `None` (absent).

@@ -38,7 +38,7 @@ from tenir_kernel.kernel import TenirKernel
 
 CONDITIONS = ("ops supervision",)
 ACK = {"ops supervision": "acknowledged by the test"}
-M = dict(pressure=0.2, velocity=0.2, capacity=0.9, option_space=0.9,
+M = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9, option_space=0.9,
          authority=0.9, context_fit=0.9, evidence_quality=0.9)
 MANDATORY = ("pressure", "velocity", "capacity", "authority", "context_fit",
              "evidence_quality", "irreversibility_materiality")

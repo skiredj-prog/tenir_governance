@@ -52,7 +52,7 @@ p = Passage(agent_id="alice", action_type="payment", amount=10.0)
 # 4. Adjudiquer
 result = client.adjudicate(
     p,
-    pressure=0.2, velocity=0.3, capacity=1.0,
+    irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
     authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     resource_id="budget", amount=10.0,
 )
@@ -69,7 +69,7 @@ Depuis 5.7.5, aucun axe non mesuré ne reçoit de valeur favorable. Un appel san
 
 ```python
 p_missing = Passage(agent_id="alice", action_type="payment", amount=10.0)
-r = client.adjudicate(p_missing, pressure=0.2, velocity=0.3, capacity=1.0,
+r = client.adjudicate(p_missing, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                       option_space=0.9, resource_id="budget", amount=10.0)
 assert r["composed_decision"] == "HOLD"
 assert "absent measure(s) authority" in r["scoring_rationale"]
@@ -80,7 +80,7 @@ Depuis 5.7.6, `option_space` compte aussi : sans lui, la preuve est insuffisante
 
 ```python
 p_no_os = Passage(agent_id="alice", action_type="payment", amount=10.0)
-r = client.adjudicate(p_no_os, pressure=0.2, velocity=0.3, capacity=1.0,
+r = client.adjudicate(p_no_os, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                       authority=0.9, context_fit=0.9, evidence_quality=0.9,
                       resource_id="budget", amount=10.0)
 assert r["composed_decision"] == "HOLD" and r["operation_state"] == "hold"
@@ -97,7 +97,7 @@ client_default = _Client()  # politique par défaut : flag_conditions=()
 client_default.register_agent(Agent(agent_id="alice", authority_score=0.9))
 client_default.register_resource(Resource(resource_id="budget", capacity=100.0))
 r = client_default.adjudicate(Passage(agent_id="alice", action_type="payment", amount=10.0),
-                              pressure=0.2, velocity=0.3, capacity=1.0,
+                              irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                               authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
                               resource_id="budget", amount=10.0)
 assert r["scoring_decision"] == "FLAG" and r["composed_decision"] == "HOLD"
@@ -132,7 +132,7 @@ CREATED → RESERVED → DISPATCHING → CONFIRMED
 ```python
 from tenir_governance.objects import Passage
 
-M = dict(pressure=0.2, velocity=0.3, capacity=1.0,
+M = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
          authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
 # L'acquittement des conditions du FLAG : qui ou quoi a établi chaque condition déclarée.
 ACK = {"revue humaine de l'effet sous 24 h": "ticket OPS-12, revue par dana"}
@@ -326,7 +326,7 @@ client_50 = DualKernelCompositionClient(
 )
 client_50.register_agent(Agent(agent_id="alice", authority_score=0.9))
 client_50.register_resource(Resource(resource_id="budget", capacity=100.0))
-M = dict(pressure=0.2, velocity=0.3, capacity=1.0,
+M = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
          authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
 
 # Premier paiement : 40 € sur 100 € → 40 % < 50 %, FLAG admis
@@ -394,7 +394,7 @@ canonical_context = {
 
 p = Passage(agent_id="alice", action_type="payment", amount=10.0)
 schema_result = client.adjudicate_schema(
-    p, pressure=0.2, velocity=0.3, capacity=1.0,
+    p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
     authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     resource_id="budget", amount=10.0,
     canonical_context=canonical_context,
@@ -437,7 +437,7 @@ delegation = Delegation(
 )
 
 result = client.adjudicate(
-    p, pressure=0.2, velocity=0.3, capacity=1.0,
+    p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
     authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     delegation=delegation,
 )
@@ -460,7 +460,7 @@ p = Passage(agent_id="alice", action_type="payment", amount=10.0,
             idempotency_key="op-unique-123")
 
 # Premier appel : admis (FLAG, quatre axes jamais mesurés)
-r1 = client.adjudicate(p, pressure=0.2, velocity=0.3, capacity=1.0,
+r1 = client.adjudicate(p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                        authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
                        resource_id="budget", amount=10.0)
 assert r1["composed_decision"] == "FLAG"
@@ -468,7 +468,7 @@ assert r1["composed_decision"] == "FLAG"
 # Second appel avec la même clé : HARD_VETO (duplicate)
 p2 = Passage(agent_id="alice", action_type="payment", amount=10.0,
              idempotency_key="op-unique-123")
-r2 = client.adjudicate(p2, pressure=0.2, velocity=0.3, capacity=1.0,
+r2 = client.adjudicate(p2, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                        authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
                        resource_id="budget", amount=10.0)
 assert r2["composed_decision"] == "HARD_VETO"

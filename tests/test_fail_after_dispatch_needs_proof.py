@@ -24,7 +24,7 @@ TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS)
 # 5.7.6: the key the reconciling component signs its attestations with.
 KEY_ID, SECRET = "reconciliation", b"test-reconciliation-key-0123456789"
 
-M = dict(pressure=0.2, velocity=0.3, capacity=1.0,
+M = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
          authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
 
 

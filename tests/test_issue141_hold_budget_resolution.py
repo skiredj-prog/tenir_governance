@@ -27,7 +27,7 @@ from tenir_kernel.kernel import TenirKernel
 
 CONDITIONS = ("ops supervision",)
 ACK = {"ops supervision": "ops rota 2026-11-20"}
-BEST = dict(pressure=0.2, velocity=0.2, capacity=0.9, authority=0.9, context_fit=1.0,
+BEST = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9, authority=0.9, context_fit=1.0,
             evidence_quality=1.0, option_space=0.9)
 HELD = {**BEST, "evidence_quality": float("nan")}  # insufficient evidence: HOLD, nothing reserved (rule A)
 

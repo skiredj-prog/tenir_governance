@@ -30,7 +30,7 @@ from tenir_governance.objects import Passage, Resource
 from tenir_governance.sdk import DualKernelCompositionClient
 from tenir_kernel.kernel import TenirKernel
 
-BEST = dict(pressure=0.2, velocity=0.2, capacity=0.9, authority=0.9,
+BEST = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9, authority=0.9,
             context_fit=1.0, evidence_quality=1.0, option_space=0.9)
 PVC = ("pressure", "velocity", "capacity")
 CONDITIONS = ("review",)
@@ -68,7 +68,7 @@ def test_an_absent_capacity_is_never_read_as_zero():
 
 
 def test_absent_and_invalid_are_both_named():
-    r = _adapter().adjudicate(**{**BEST, "pressure": float("nan"), "capacity": None})
+    r = _adapter().adjudicate(**{**BEST, "irreversibility_materiality": 0.0, "pressure": float("nan"), "capacity": None})
     assert r["decision"] == Decision.HOLD.value
     assert ("INSUFFICIENT_EVIDENCE: invalid measure(s) (non-finite or outside [0, 1]) pressure; "
             "absent measure(s) capacity; S not computed.") in r["rationale"]

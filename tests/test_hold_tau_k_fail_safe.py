@@ -32,7 +32,7 @@ TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS)
 
 
 TAU = 60.0
-GOOD = dict(pressure=0.2, velocity=0.2, capacity=0.9, authority=0.9,
+GOOD = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9, authority=0.9,
             context_fit=1.0, evidence_quality=1.0, option_space=0.9)
 
 
@@ -61,7 +61,7 @@ def _held(gov):
     gov.scoring = _BrokenScoring()
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
     adj = gov.adjudicate(p, payload={"action_type": "payment"},
-                         pressure=0.2, velocity=0.2, capacity=0.9,
+                         irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
                          resource_id="budget", amount=10.0)
     assert adj["composed_decision"] == Decision.HOLD.value
     gov.scoring = ScoringKernelAdapter(TenirKernel())

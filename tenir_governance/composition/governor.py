@@ -230,7 +230,7 @@ class ScoringKernelAdapter:
         authority: float | None = None,
         context_fit: float | None = None,
         evidence_quality: float | None = None,
-        irreversibility_materiality: float = 0.0,
+        irreversibility_materiality: float | None = None,
     ) -> dict[str, Any]:
         """Delegate to TenirKernel with injected gate reasons.
 
@@ -574,7 +574,7 @@ class DualKernelGovernor:
         authority: float | None = None,
         context_fit: float | None = None,
         evidence_quality: float | None = None,
-        irreversibility_materiality: float = 0.0,
+        irreversibility_materiality: float | None = None,
         delegation=None,
         resource_id: str | None = None,
         amount: float = 0.0,
@@ -3575,7 +3575,7 @@ class DualKernelGovernor:
         authority: float | None = None,
         context_fit: float | None = None,
         evidence_quality: float | None = None,
-        irreversibility_materiality: float = 0.0,
+        irreversibility_materiality: float | None = None,
         delegation=None,
         resource_id: str | None = None,
         amount: float = 0.0,
@@ -3765,7 +3765,7 @@ class DualKernelGovernor:
         passage,
         pressure: float, velocity: float, capacity: float,
         option_space: float | None, authority: float | None, context_fit: float | None,
-        evidence_quality: float | None, irreversibility_materiality: float,
+        evidence_quality: float | None, irreversibility_materiality: float | None,
         delegation, resource_id: str | None, amount: float,
         trajectory_id: str | None,
     ) -> dict[str, Any]:

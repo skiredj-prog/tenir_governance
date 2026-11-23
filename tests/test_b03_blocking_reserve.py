@@ -59,7 +59,7 @@ def _child_adjudicate_while_reserve_waits(
                 agent_id="alice", action_type="payment", amount=10.0,
                 idempotency_key="b03-emergency-reserve",
             ),
-            pressure=0.2, velocity=0.3, capacity=1.0,
+            irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             authority=0.9, context_fit=1.0, evidence_quality=1.0,
             # Complete evidence: the operation is retained with a reservation.
             # (5.7.7 candidate, rule A: a HOLD on insufficient evidence, such
@@ -199,7 +199,7 @@ def _veto_during_reserve(governor, backend, key):
 def _adjudicate_budget(governor, key):
     return governor.adjudicate(
         Passage(agent_id="alice", action_type="payment", amount=10.0, idempotency_key=key),
-        pressure=0.2, velocity=0.3, capacity=1.0,
+        irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
         authority=0.9, context_fit=1.0, evidence_quality=1.0,
         option_space=0.9,  # complete evidence: retained with a reservation (rule A, see above)
         resource_id="budget", amount=10.0,

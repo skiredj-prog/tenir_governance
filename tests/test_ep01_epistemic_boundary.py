@@ -24,7 +24,7 @@ EPISTEMIC = ("authority", "context_fit", "evidence_quality")
 
 
 def score(kernel=None, **overrides):
-    values = dict(pressure=0.2, velocity=0.2, capacity=0.9, option_space=0.9,
+    values = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9, option_space=0.9,
                   authority=0.9, context_fit=0.9, evidence_quality=0.9)
     values.update(overrides)
     return ScoringKernelAdapter(kernel or TenirKernel()).adjudicate(**values)
@@ -54,8 +54,8 @@ def test_ep01_missing_and_invalid_epistemic_input_hold_alike(missing):
 
 @pytest.mark.parametrize("missing", EPISTEMIC)
 @pytest.mark.parametrize("veto, reason", [
-    (dict(pressure=0.95, velocity=0.9, capacity=0.1), "TAU BREACH: S="),
-    (dict(pressure=0.9, velocity=0.9, capacity=0.5), "is at or below hard-veto floor 0.75"),
+    (dict(irreversibility_materiality=0.0, pressure=0.95, velocity=0.9, capacity=0.1), "TAU BREACH: S="),
+    (dict(irreversibility_materiality=0.0, pressure=0.9, velocity=0.9, capacity=0.5), "is at or below hard-veto floor 0.75"),
     (dict(capacity=0.0), "TAU BREACH: S="),
     (dict(option_space=0.1), "option_space=0.100 ≤ block floor"),
 ])
@@ -159,3 +159,79 @@ def test_ep01_temporal_precedence_not_a_scoring_input():
     assert "effective_at" not in params
     assert "supersedes" not in params
     assert "issuer_scope" not in params
+
+
+# --- Decision of 23 November 2026, 04:54 UTC: an omitted irreversibility is unknown ---
+
+def _without(**overrides):
+    """Adjudicate with every measure but irreversibility_materiality, which is
+    omitted, not passed: the caller never measured it."""
+    values = dict(pressure=0.2, velocity=0.2, capacity=0.9, option_space=0.9,
+                  authority=0.9, context_fit=0.9, evidence_quality=0.9)
+    values.update(overrides)
+    return ScoringKernelAdapter(TenirKernel()).adjudicate(**values)
+
+
+def test_omitted_irreversibility_is_unknown_and_holds():
+    """5.7.6 defaulted the omitted axis to 0.0, the most favourable value, so a
+    caller that never measured it was adjudicated as if it had measured none.
+    An omission is now indistinguishable from an explicit None: HOLD."""
+    result = _without()
+    assert result["decision"] == "HOLD", result
+    assert "absent measure(s) irreversibility_materiality" in result["rationale"]
+    assert "irreversibility_materiality" in result["declared_unmeasured"]
+    assert result["constraint_geometry"] is None
+    assert result["insufficient_evidence"] is True
+
+
+def test_omitted_irreversibility_differs_from_a_measured_zero():
+    """0.0 passed explicitly is a measure and keeps the 5.7.6 result."""
+    measured = _without(irreversibility_materiality=0.0)
+    assert measured["decision"] in ("PASS", "FLAG"), measured
+    assert "irreversibility_materiality" not in measured["declared_unmeasured"]
+
+
+def test_conclusive_veto_governs_an_omitted_irreversibility():
+    vetoed = _without(capacity=0.0)
+    assert vetoed["decision"] == "HARD_VETO"
+    assert "TAU BREACH" in vetoed["rationale"]
+    floor = _without(authority=0.0)
+    assert floor["decision"] == "HARD_VETO", floor
+
+
+def test_omitted_irreversibility_never_vetoes_on_the_materiality_facet():
+    """The facet 'irreversible-pathway materiality exceeds the authority
+    margin' is evaluated on a measure or not at all: an unknown materiality
+    gives no veto on it, whatever the measured authority is."""
+    for authority in (0.5, 0.9):
+        r = _without(authority=authority)
+        assert r["decision"] == "HOLD", (authority, r)
+        assert "exceeds the authority margin" not in r["rationale"]
+    # A measured authority at the floor is a conclusive veto of its own, and
+    # it governs the unknown materiality, as rule A says.
+    assert _without(authority=0.3)["decision"] == "HARD_VETO"
+
+
+def test_governor_holds_an_omitted_irreversibility_and_reserves_nothing():
+    from tenir_governance.composition import DualKernelGovernor
+    from tenir_governance.membrane import MembraneState, TransitionMembrane
+    from tenir_governance.objects import Agent, Passage, Resource
+    state = MembraneState()
+    state.register_resource(Resource(resource_id="budget", capacity=100.0))
+    state.register_agent(Agent(agent_id="alice", authority_score=0.9))
+    gov = DualKernelGovernor(ScoringKernelAdapter(TenirKernel()), TransitionMembrane(state))
+    r = gov.adjudicate(Passage(agent_id="alice", action_type="payment", amount=10.0),
+                       pressure=0.2, velocity=0.3, capacity=1.0, option_space=0.9,
+                       authority=0.9, context_fit=0.9, evidence_quality=0.9,
+                       resource_id="budget", amount=10.0)
+    assert r["composed_decision"] == "HOLD"
+    assert "irreversibility_materiality" in r["declared_unmeasured"]
+    assert r["budget_reserved"] is False
+    assert state.resources["budget"].reserved == 0.0
+
+
+def test_sdk_adjudicate_has_no_default_for_irreversibility():
+    import inspect
+    from tenir_governance.sdk import DualKernelCompositionClient
+    params = inspect.signature(DualKernelCompositionClient.adjudicate).parameters
+    assert params["irreversibility_materiality"].default is None

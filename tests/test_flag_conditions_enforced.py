@@ -28,7 +28,7 @@ from tenir_kernel.kernel import TenirKernel
 CONDITIONS = ("human review of the effect within 24 h", "amount capped at 100")
 ACK = {"human review of the effect within 24 h": "ticket OPS-12, reviewer dana",
        "amount capped at 100": "amount 10.0 checked by the pipeline"}
-M = dict(pressure=0.2, velocity=0.3, capacity=1.0, authority=0.9, context_fit=0.9,
+M = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0, authority=0.9, context_fit=0.9,
          evidence_quality=0.9, option_space=0.9)
 
 
@@ -223,7 +223,7 @@ def test_unmeasured_option_space_is_held_not_admitted():
 
 def test_unmeasured_option_space_masks_no_conclusive_veto():
     gov, _ = _gov(CompositionPolicy(flag_conditions=CONDITIONS))
-    p, r = _admit(gov, option_space=None, pressure=1.0, velocity=1.0, capacity=0.1)  # TAU breach
+    p, r = _admit(gov, option_space=None, irreversibility_materiality=0.0, pressure=1.0, velocity=1.0, capacity=0.1)  # TAU breach
     assert r["scoring_decision"] == Decision.HARD_VETO.value
     assert r["composed_decision"] == Decision.HARD_VETO.value
 

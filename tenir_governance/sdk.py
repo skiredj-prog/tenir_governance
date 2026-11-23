@@ -535,7 +535,7 @@ class DualKernelCompositionClient:
         authority: float | None = None,
         context_fit: float | None = None,
         evidence_quality: float | None = None,
-        irreversibility_materiality: float = 0.0,
+        irreversibility_materiality: float | None = None,
         delegation=None,
         resource_id: str | None = None,
         amount: float = 0.0,

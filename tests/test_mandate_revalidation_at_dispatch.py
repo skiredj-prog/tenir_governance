@@ -24,7 +24,7 @@ from tenir_kernel.kernel import TenirKernel
 
 CONDITIONS = ("ops supervision",)
 ACK = {"ops supervision": "ops rota 2026-11-20"}
-M = dict(pressure=0.2, velocity=0.3, capacity=1.0, authority=0.9, context_fit=0.9,
+M = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0, authority=0.9, context_fit=0.9,
          evidence_quality=0.9, option_space=0.9)
 
 
