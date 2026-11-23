@@ -810,12 +810,16 @@ class TestDualKernelGovernor:
     def test_invalid_amount_fails_closed_before_reservation(self, amount):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        result = self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
-            resource_id="budget", amount=amount,
-        )
-        assert result["composed_decision"] == Decision.HARD_VETO.value
-        assert result["execution_status"] == "blocked"
+        # R8: a malformed request is refused at the API boundary, never
+        # adjudicated: INVALID_ARGUMENT, not a governance HARD_VETO.
+        from tenir_governance.composition import InvalidArgumentError
+        with pytest.raises(InvalidArgumentError) as exc_info:
+            self._adjudicate(gov,
+                p, pressure=0.2, velocity=0.3, capacity=1.0,
+                resource_id="budget", amount=amount,
+            )
+        assert exc_info.value.code == "INVALID_ARGUMENT"
+        assert exc_info.value.field == "amount"
         assert gov.registry.get(p.idempotency_key) is None
         assert state.resources["budget"].reserved == 0.0
 
@@ -893,16 +897,20 @@ class TestDualKernelGovernor:
 
     @pytest.mark.parametrize("payload", [{"amount": float("nan")}, {1: "non-string-key"}, {"value": object()}])
     def test_adjudication_rejects_payload_outside_canonical_json(self, payload):
+        """R8 (5.7.7 candidate): a malformed request is an API-level
+        INVALID_ARGUMENT, not a governance HARD_VETO. Nothing is registered."""
+        from tenir_governance.composition import InvalidArgumentError
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
 
-        result = self._adjudicate(
-            gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
-            resource_id="budget", amount=10.0, payload=payload,
-        )
+        with pytest.raises(InvalidArgumentError) as exc:
+            self._adjudicate(
+                gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
+                resource_id="budget", amount=10.0, payload=payload,
+            )
 
-        assert result["composed_decision"] == Decision.HARD_VETO.value
-        assert result["operation_state"] == "not_registered"
+        assert exc.value.code == "INVALID_ARGUMENT" and exc.value.field == "payload"
+        assert exc.value.to_dict()["operation_state"] == "not_registered"
         assert gov.registry.get(p.idempotency_key) is None
         assert state.resources["budget"].reserved == 0.0
 

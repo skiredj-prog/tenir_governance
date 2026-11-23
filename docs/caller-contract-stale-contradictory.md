@@ -56,8 +56,11 @@ for its own caller layer, and has to show that layer.
    "absent measure(s) capacity" or "invalid measure(s) capacity", never why.
 
 The HOLD that follows keeps its guarantees: nothing is dispatched while the
-measurement is unknown, the reservation is held (and released at a veto or at
-a declared `τ_K`), and the attempt resolves only by `resolve_hold` with a fresh,
+measurement is unknown, no budget is reserved while it is unknown (the
+reservation is taken at the re-adjudication that completes the evidence, under
+I8 at that moment, so a caller cannot lock a budget by passing UNKNOWN), a
+declared `τ_K` fails the attempt closed at exhaustion, and the attempt
+resolves only by `resolve_hold` with a fresh,
 consistent measurement, which re-runs both kernels. Without a policy
 `hold_tau_k_seconds`, no bound is invented: the HOLD and its reservation stay
 open until resolved, escalated or exited.

@@ -10,8 +10,10 @@ resumption, and an explicit treatment of the τ_K bound. Checked here, on the
 in-memory registry and budget of one process:
 
 - no dispatch and no provider call while the measure is missing;
-- the reservation is taken once, kept while held, released on a veto or at
-  τ_K, consumed only by the single dispatch after resolution;
+- nothing is reserved while the measure is missing (the caller who withholds
+  a measure cannot lock a shared budget); the reservation is taken once, at
+  the re-adjudication that completes the evidence, under I8 at that moment,
+  and consumed only by the single dispatch after resolution;
 - a re-adjudication with the measure still missing keeps the HOLD;
 - a duplicate idempotency key neither reserves twice nor admits;
 - an authorized exit from ESCALATED returns to HOLD, never to admission;
@@ -23,7 +25,7 @@ import json
 
 import pytest
 
-from tenir_governance.composition import DualKernelGovernor, ScoringKernelAdapter
+from tenir_governance.composition import DualKernelGovernor, InvalidArgumentError, ScoringKernelAdapter
 from tenir_governance.composition import governor as governor_mod
 from tenir_governance.composition.decisions import Decision
 from tenir_governance.composition.policy import CompositionPolicy
@@ -56,13 +58,14 @@ def _governor(policy=None):
     return gov, state, state.resources["budget"]
 
 
-def _held(gov, missing="authority", **kw):
-    p = kw.pop("passage", None) or Passage(agent_id="alice", action_type="payment", amount=10.0)
+def _held(gov, missing="authority", amount=10.0, **kw):
+    p = kw.pop("passage", None) or Passage(agent_id="alice", action_type="payment", amount=amount)
     r = gov.adjudicate(p, payload=PAYLOAD, **{**M, missing: None},
-                       resource_id="budget", amount=10.0, **kw)
+                       resource_id="budget", amount=amount, **kw)
     assert r["scoring_decision"] == Decision.HOLD.value, r
     assert r["composed_decision"] == Decision.HOLD.value, r
     assert r["operation_state"] == OperationState.HOLD.value
+    assert r["budget_reserved"] is False  # rule A: an evidence HOLD reserves nothing
     return p
 
 
@@ -96,15 +99,16 @@ def clock(monkeypatch):
 
 
 @pytest.mark.parametrize("missing", MANDATORY)
-def test_absent_measure_holds_reserves_once_and_never_dispatches(missing):
+def test_absent_measure_holds_reserves_nothing_and_never_dispatches(missing):
     gov, _state, budget = _governor()
     p = _held(gov, missing)
-    assert budget.reserved == 10.0 and budget.consumed == 0.0
+    assert budget.reserved == 0.0 and budget.consumed == 0.0
+    assert gov.registry.get(p.idempotency_key).budget_reserved is False
     out = _dispatch(gov, p)
     assert out["dispatched"] is False
     assert gov.provider.calls == []
     assert gov.registry.get(p.idempotency_key).state == OperationState.HOLD
-    assert budget.reserved == 10.0 and budget.consumed == 0.0
+    assert budget.reserved == 0.0 and budget.consumed == 0.0
 
 
 @pytest.mark.parametrize("missing", ["authority", "context_fit", "evidence_quality"])
@@ -115,7 +119,7 @@ def test_still_absent_at_re_adjudication_keeps_the_hold(missing):
     assert again["hold_resolved"] is False
     assert again["composed_decision"] == Decision.HOLD.value
     assert again["operation_state"] == OperationState.HOLD.value
-    assert budget.reserved == 10.0  # the HOLD's reservation, not a second one
+    assert again["budget_reserved"] is False and budget.reserved == 0.0  # still nothing reserved
     assert gov.provider.calls == []
 
 
@@ -126,6 +130,8 @@ def test_measure_arrives_then_one_dispatch_after_full_re_adjudication():
     assert resolved["hold_resolved"] is True
     assert resolved["composed_decision"] == Decision.FLAG.value
     assert resolved["operation_state"] == OperationState.RESERVED.value
+    # The reservation is taken once, here, when the evidence is complete.
+    assert resolved["budget_reserved"] is True and budget.reserved == 10.0
     first = _dispatch(gov, p)
     assert first["dispatched"] is True
     assert len(gov.provider.calls) == 1
@@ -154,7 +160,7 @@ def test_duplicate_key_while_held_neither_reserves_twice_nor_admits():
     assert "Duplicate operation blocked" in dup["composed_rationale"]
     assert dup["operation_state"] == OperationState.HOLD.value
     assert gov.registry.get(p.idempotency_key).state == OperationState.HOLD
-    assert budget.reserved == 10.0
+    assert budget.reserved == 0.0  # the duplicate reserved nothing either
     assert _dispatch(gov, p)["dispatched"] is False
     assert gov.provider.calls == []
 
@@ -176,7 +182,7 @@ def test_tau_k_exhausted_fails_closed_even_when_the_measure_arrives(clock):
     assert gov.provider.calls == []
 
 
-def test_expire_hold_at_tau_k_releases_the_reservation(clock):
+def test_expire_hold_at_tau_k_fails_closed_with_nothing_to_release(clock):
     policy = CompositionPolicy(hold_tau_k_seconds=TAU, hold_tau_k_source="test SLA",
                                flag_conditions=CONDITIONS)
     gov, _state, budget = _governor(policy)
@@ -188,17 +194,105 @@ def test_expire_hold_at_tau_k_releases_the_reservation(clock):
     assert budget.reserved == 0.0 and budget.consumed == 0.0
 
 
-def test_without_a_declared_tau_k_the_hold_and_its_reservation_stay_open(clock):
+def test_without_a_declared_tau_k_the_hold_stays_open_but_holds_no_budget(clock):
     """Declared limit, not a guarantee: the generic governor invents no bound
-    (RN-001 §2a). Without a policy τ_K, a HOLD on an absent measure and its
-    reservation stay open until resolved, escalated or exited. 5.7.6 vetoed
-    these requests at once and reserved nothing."""
+    (RN-001 §2a). Without a policy τ_K, a HOLD on an absent measure stays open
+    until resolved, escalated or exited. It holds no reservation (rule A), so
+    the open HOLD is an exposure on the registry, not on the budget. 5.7.6
+    vetoed these requests at once."""
     gov, _state, budget = _governor()
     p = _held(gov, "authority")
     clock(30 * 24 * 3600)
     assert gov.check_hold_expiry(p.idempotency_key)["expired"] is False
     assert gov.registry.get(p.idempotency_key).state == OperationState.HOLD
-    assert budget.reserved == 10.0
+    assert budget.reserved == 0.0
+
+
+def test_incomplete_requests_cannot_lock_the_budget():
+    """R1 of the review of 2026-11-23: ten requests of 10.0 without authority
+    on a budget of 100.0, no τ_K declared. On the first 5.7.7 candidate they
+    reserved the whole budget and a complete request was then vetoed by I8.
+    Now they reserve nothing and the complete request is admitted."""
+    gov, _state, budget = _governor()
+    held = [_held(gov, "authority", passage=Passage(agent_id="alice", action_type="payment",
+                                                     amount=10.0, idempotency_key=f"incomplete-{i}"))
+            for i in range(10)]
+    assert len(held) == 10 and budget.reserved == 0.0
+    complete = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    r = gov.adjudicate(complete, payload=PAYLOAD, **M, resource_id="budget", amount=10.0)
+    assert r["membrane_decision"] == Decision.PASS.value, r["membrane_rationale"]
+    assert r["composed_decision"] == Decision.FLAG.value
+    assert r["operation_state"] == OperationState.RESERVED.value
+    assert r["budget_reserved"] is True and budget.reserved == 10.0
+    for p in held:
+        assert gov.registry.get(p.idempotency_key).state == OperationState.HOLD
+
+
+def test_budget_consumed_while_held_fails_closed_at_re_adjudication():
+    """What rule A costs the held request: it has no reservation, so a later
+    complete request may take the budget. When its measure arrives, I8 bounds
+    it by what remains: HARD_VETO, FAILED, nothing dispatched."""
+    gov, _state, budget = _governor()
+    p = _held(gov, "authority", passage=Passage(agent_id="alice", action_type="payment", amount=60.0),
+              amount=60.0)
+    other = Passage(agent_id="alice", action_type="payment", amount=60.0)
+    r = gov.adjudicate(other, payload=PAYLOAD, **M, resource_id="budget", amount=60.0)
+    assert r["composed_decision"] == Decision.FLAG.value and budget.reserved == 60.0
+    late = gov.resolve_hold(p.idempotency_key, passage=p, payload=PAYLOAD,
+                            resource_id="budget", amount=60.0, **M)
+    assert late["membrane_decision"] == Decision.HARD_VETO.value
+    assert "I8" in late["membrane_rationale"] or any(
+        c.get("check_id") == "I8" for c in late["membrane_checks"])
+    assert late["composed_decision"] == Decision.HARD_VETO.value
+    assert late["hold_resolved"] is True
+    assert late["operation_state"] == OperationState.FAILED.value
+    assert budget.reserved == 60.0 and budget.consumed == 0.0  # the other's, untouched
+    assert gov.provider.calls == []
+
+
+def test_re_adjudication_to_a_policy_hold_on_complete_evidence_reserves():
+    """Once the evidence is complete, a HOLD the policy keeps (budget
+    escalation at 85 % utilization) is a HOLD on complete evidence: it takes
+    its reservation, as every such HOLD did in 5.7.6."""
+    gov, _state, budget = _governor()
+    p = _held(gov, "authority", passage=Passage(agent_id="alice", action_type="payment", amount=90.0),
+              amount=90.0)
+    assert budget.reserved == 0.0
+    res = gov.resolve_hold(p.idempotency_key, passage=p, payload=PAYLOAD,
+                           resource_id="budget", amount=90.0, **M)
+    assert res["membrane_decision"] == Decision.PASS.value
+    assert res["composed_decision"] == Decision.HOLD.value and res["hold_resolved"] is False
+    assert "escalated to HOLD" in res["composed_rationale"]
+    assert res["budget_reserved"] is True and budget.reserved == 90.0
+    assert gov.registry.get(p.idempotency_key).state == OperationState.HOLD
+
+
+def test_unmeasured_option_space_and_invalid_measure_hold_reserve_nothing():
+    """The rule covers every HOLD for insufficient evidence, not only an
+    absent mandatory measure: an unmeasured option space (5.7.6, decision 2)
+    and an invalid measure (NaN) reserve nothing either."""
+    gov, _state, budget = _governor()
+    p1 = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    r1 = gov.adjudicate(p1, payload=PAYLOAD, **{**M, "option_space": None},
+                        resource_id="budget", amount=10.0)
+    assert r1["composed_decision"] == Decision.HOLD.value and r1["budget_reserved"] is False
+    p2 = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    r2 = gov.adjudicate(p2, payload=PAYLOAD, **{**M, "evidence_quality": float("nan")},
+                        resource_id="budget", amount=10.0)
+    assert r2["composed_decision"] == Decision.HOLD.value and r2["budget_reserved"] is False
+    assert budget.reserved == 0.0
+
+
+def test_a_hold_on_complete_evidence_still_reserves():
+    """Unchanged from 5.7.6: a HOLD on complete evidence (here a FLAG under a
+    policy that declares no condition) keeps its reservation. Only the HOLD
+    that waits for the caller's own measure reserves nothing."""
+    gov, _state, budget = _governor(CompositionPolicy())
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    r = gov.adjudicate(p, payload=PAYLOAD, **M, resource_id="budget", amount=10.0)
+    assert r["scoring_decision"] == Decision.FLAG.value
+    assert r["composed_decision"] == Decision.HOLD.value
+    assert r["budget_reserved"] is True and budget.reserved == 10.0
 
 
 def test_authorized_exit_from_escalation_returns_to_hold_not_to_admission():
@@ -253,15 +347,17 @@ def test_delegation_revoked_while_held_vetoes_at_re_adjudication():
 def test_malformed_request_is_rejected_at_entry_not_held(malformed):
     """A request that is not a well-formed request of the interface is
     rejected before any claim: nothing registered, nothing reserved, no HOLD.
-    This runtime labels the refusal HARD_VETO with operation_state
-    'not_registered'; it is not confused with an unknown measure."""
+    R8 (2026-11-23): the refusal is an API-level INVALID_ARGUMENT error, not
+    a governance decision, so it cannot be confused with an unknown measure
+    (HOLD) or with a veto on the action (HARD_VETO)."""
     gov, _state, budget = _governor()
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
     kw = dict(payload=PAYLOAD, resource_id="budget", amount=10.0)
     kw.update(malformed)
-    r = gov.adjudicate(p, **{**M, "authority": None}, **kw)
-    assert r["operation_state"] == "not_registered"
-    assert r["composed_decision"] != Decision.HOLD.value
+    with pytest.raises(InvalidArgumentError) as exc:
+        gov.adjudicate(p, **{**M, "authority": None}, **kw)
+    assert exc.value.code == "INVALID_ARGUMENT"
+    assert exc.value.to_dict()["operation_state"] == "not_registered"
     assert gov.registry.get(p.idempotency_key) is None
     assert budget.reserved == 0.0
 

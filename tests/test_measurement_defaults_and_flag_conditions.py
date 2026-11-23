@@ -50,7 +50,8 @@ def test_absent_option_space_is_declared_unmeasured_and_held():
     assert ALWAYS_UNMEASURED <= set(r["declared_unmeasured"])
     assert r["scoring_decision"] == Decision.HOLD.value
     assert r["composed_decision"] == Decision.HOLD.value
-    assert "option_space unmeasured" in r["scoring_rationale"]
+    # 5.7.7 candidate (R7): the unknown option space is named as such.
+    assert "absent measure(s) option_space" in r["scoring_rationale"]
 
 
 def test_flag_without_declared_conditions_is_held_not_admitted():

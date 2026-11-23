@@ -76,7 +76,7 @@ assert "absent measure(s) authority" in r["scoring_rationale"]
 assert "authority" in r["declared_unmeasured"]
 ```
 
-Depuis 5.7.6, `option_space` compte aussi : sans lui, la preuve est insuffisante et l'opération est tenue (`HOLD`, réservation conservée), jamais admise. Elle se ré-adjudique avec la mesure (`client.governor.resolve_hold`) :
+Depuis 5.7.6, `option_space` compte aussi : sans lui, la preuve est insuffisante et l'opération est tenue (`HOLD`), jamais admise. Depuis le candidat 5.7.7, ce `HOLD` ne réserve rien : un appelant ne peut pas immobiliser un budget en omettant une mesure ; la réservation est prise à la ré-adjudication complète (`client.governor.resolve_hold`), sous I8 à ce moment :
 
 ```python
 p_no_os = Passage(agent_id="alice", action_type="payment", amount=10.0)
@@ -84,8 +84,9 @@ r = client.adjudicate(p_no_os, pressure=0.2, velocity=0.3, capacity=1.0,
                       authority=0.9, context_fit=0.9, evidence_quality=0.9,
                       resource_id="budget", amount=10.0)
 assert r["composed_decision"] == "HOLD" and r["operation_state"] == "hold"
-assert "option_space unmeasured" in r["scoring_rationale"]
-assert client.fail(p_no_os.idempotency_key, resource_id="budget", amount=10.0) is True  # libère la réservation
+assert "absent measure(s) option_space" in r["scoring_rationale"]
+assert r["budget_reserved"] is False  # rien n'est réservé tant que la mesure manque
+assert client.fail(p_no_os.idempotency_key, resource_id="budget", amount=10.0) is True  # clôt la tentative
 ```
 
 Un FLAG n'autorise que sous des conditions explicites (RFC-0 §4). Le déploiement les déclare dans `CompositionPolicy(flag_conditions=(...))` ; le runtime les recopie sur le résultat et au grand livre, et depuis 5.7.6 les fait respecter : avec la politique par défaut (aucune condition), un FLAG compose en `HOLD` ; et le dispatch d'une opération admise sous FLAG exige l'acquittement de chaque condition (`flag_conditions_met`, §4). Le runtime n'invente aucune condition.

@@ -8,6 +8,12 @@ with HARD_VETO ("Aggregate budget violation") and reached FAILED; 10 and 50
 resolved. Now every amount the budget covers resolves on the budget axis; 90
 still composes to HOLD because the policy escalates a FLAG at 85 % utilization
 (budget_escalation_threshold), which is the policy's rule, not the #141 defect.
+
+5.7.7 candidate (rule A): the HOLD these tests create is a HOLD for
+insufficient evidence (NaN evidence_quality). Such a HOLD reserves nothing;
+the reservation is taken once, at the re-adjudication that completes the
+evidence, under I8 at that moment. The #141 property still holds: that one
+reservation is never counted twice, and every amount the budget covers resolves.
 """
 import pytest
 
@@ -23,7 +29,7 @@ CONDITIONS = ("ops supervision",)
 ACK = {"ops supervision": "ops rota 2026-11-20"}
 BEST = dict(pressure=0.2, velocity=0.2, capacity=0.9, authority=0.9, context_fit=1.0,
             evidence_quality=1.0, option_space=0.9)
-HELD = {**BEST, "evidence_quality": float("nan")}  # insufficient evidence: HOLD, budget reserved
+HELD = {**BEST, "evidence_quality": float("nan")}  # insufficient evidence: HOLD, nothing reserved (rule A)
 
 
 def _gov(policy=None):
@@ -47,12 +53,12 @@ def _hold(gov, amount):
 def test_budget_hold_resolves_whatever_its_share_of_the_capacity(amount):
     gov, budget = _gov()
     p = _hold(gov, amount)
-    assert budget.reserved == amount
+    assert budget.reserved == 0.0  # rule A: an evidence HOLD reserves nothing
     res = gov.resolve_hold(p.idempotency_key, passage=p, **BEST, resource_id="budget", amount=amount)
     assert res["membrane_decision"] == Decision.PASS.value, res["membrane_rationale"]
     assert res["composed_decision"] == Decision.FLAG.value
     assert res["hold_resolved"] is True and res["operation_state"] == OperationState.RESERVED.value
-    assert budget.reserved == amount  # one reservation, not two
+    assert budget.reserved == amount  # one reservation, taken at resolution, not two
     out = gov.dispatch_and_execute(p.idempotency_key, "budget", amount, flag_conditions_met=ACK)
     assert out["dispatched"] is True and out["operation_state"] == OperationState.CONFIRMED.value
     assert budget.consumed == amount and budget.reserved == 0.0
@@ -79,20 +85,25 @@ def test_with_a_higher_threshold_90_of_100_resolves():
     assert budget.consumed == 90.0
 
 
-def test_a_second_operation_still_counts_the_first_reservation():
-    """The fix excludes only the operation's own reservation: another
-    operation's reservation still bounds the budget (I8)."""
+def test_a_second_operation_still_counts_the_other_reservations():
+    """The fix excludes only the operation's own reservation: every other
+    reservation still bounds the budget (I8). Under rule A an evidence HOLD
+    holds none, so it neither blocks later complete operations nor is it
+    protected from them: when its evidence arrives, I8 bounds it by what
+    remains."""
     gov, budget = _gov()
     first = _hold(gov, 60.0)
     second = _hold(gov, 30.0)
-    assert budget.reserved == 90.0
-    # 60 + 30 = 90 ≤ 100: both resolve on the budget axis ...
+    assert budget.reserved == 0.0  # two evidence HOLDs, nothing reserved
     res = gov.resolve_hold(second.idempotency_key, passage=second, **BEST, resource_id="budget", amount=30.0)
-    assert res["membrane_decision"] == Decision.PASS.value
-    # ... but a third 20 would exceed the capacity and I8 must say so.
+    assert res["membrane_decision"] == Decision.PASS.value and budget.reserved == 30.0
+    # A third 20 fits (30 + 20 ≤ 100): the unreserved first HOLD does not block it ...
     third = Passage(agent_id="alice", action_type="payment", amount=20.0)
     r = gov.adjudicate(third, **BEST, resource_id="budget", amount=20.0)
-    assert r["membrane_decision"] == Decision.HARD_VETO.value
-    assert r["composed_decision"] == Decision.HARD_VETO.value
-    assert gov.resolve_hold(first.idempotency_key, passage=first, **BEST, resource_id="budget",
-                            amount=60.0)["membrane_decision"] == Decision.PASS.value
+    assert r["membrane_decision"] == Decision.PASS.value and budget.reserved == 50.0
+    # ... and the first, completed now, is bounded by what remains: 60 > 50, I8 says so.
+    late = gov.resolve_hold(first.idempotency_key, passage=first, **BEST, resource_id="budget", amount=60.0)
+    assert late["membrane_decision"] == Decision.HARD_VETO.value
+    assert late["composed_decision"] == Decision.HARD_VETO.value
+    assert late["operation_state"] == OperationState.FAILED.value
+    assert budget.reserved == 50.0

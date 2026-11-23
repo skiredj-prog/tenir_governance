@@ -209,7 +209,9 @@ def test_unmeasured_option_space_is_held_not_admitted():
     gov, state = _gov(CompositionPolicy(flag_conditions=CONDITIONS))
     p, r = _admit(gov, option_space=None)
     assert r["scoring_decision"] == Decision.HOLD.value
-    assert "option_space unmeasured" in r["scoring_rationale"]
+    # 5.7.7 candidate (R7): an unknown option space takes the insufficient-
+    # evidence path, like every other unknown measure.
+    assert "absent measure(s) option_space" in r["scoring_rationale"]
     assert r["composed_decision"] == Decision.HOLD.value
     assert r["operation_state"] == OperationState.HOLD.value
     assert "option_space" in r["declared_unmeasured"]
