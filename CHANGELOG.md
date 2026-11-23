@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased] — candidate, not released
+
+Candidate prepared on 2026-11-23 for condition (b) of the HOLD on the REG qualification of 5.7.6 (the author's decision of 2026-11-22: provenance PASS, REG HOLD, on `1881c90` only). Not merged, not tagged, not published. `pyproject.toml` still says 5.7.6: a build of this branch would claim a version it is not, so a distinct version must be set before any build leaves the machine (a release decision). The rule it implements is a normative orientation pending ratification, not a ratified text, and it changes no result published for 5.7.6.
+
+### Changed
+
+- **An absent `pressure`, `velocity` or `capacity` is unknown, like an invalid one.** In 5.7.6 an invalid P, V or C (NaN, ±inf, outside [0, 1], a non-number) is insufficient evidence (`HOLD`, `INSUFFICIENT_EVIDENCE`, S not computed), but an absent one (`None`, JSON `null`) is a hard gate: `HARD_VETO`, computed with the placeholders P = V = 0.5 and C = 0.0, so that an absent capacity names a `TAU BREACH: S=0.0000` on a capacity nobody measured. An absent P, V or C now takes the same path as an invalid one: `HOLD`, rationale `INSUFFICIENT_EVIDENCE: absent measure(s) …; S not computed.`, `s_score` null, the axis listed in `declared_unmeasured`. The HOLD resolves by re-adjudication with the measure (`resolve_hold`). A conclusive veto that does not depend on the absent measure still governs: a measured capacity of 0 (S = 0 whatever P and V are), a hard geometry facet whose axes are all measured (authority or context_fit below its floor), the option-space block floor, a membrane invariant. No `TAU BREACH` is computed from a placeholder any more.
+- Unchanged: an absent `authority`, `context_fit` or `evidence_quality` is still a hard gate (EP-01), and an absent `option_space` still gives `HOLD`.
+
+### Tests
+
+- `tests/test_absent_measure_is_unknown.py`: absent P, V, K and their combinations give `HOLD` with no S and no `TAU BREACH`; a measured K = 0 with P or V absent gives `HARD_VETO` on the measured capacity; an authority, context_fit or option-space veto, and a membrane invariant, govern an absent K; the HOLD on an absent K resolves once the measure is supplied; JSON `null` on the SDK path gives `HOLD`. 14 of its 15 cases fail on 5.7.6 as published.
+
 ## [5.7.6] — 2026-11-20 — Single-host pilot line: the three 5.7.5 trust boundaries closed, #141 fixed
 
 Second release of the 5.7.5 single-host pilot line. 5.7.5 was merged on `main` (`42513bf`) and held there by its release decision: three of the limits its own "Scope, known limits and trust boundaries" states were judged blocking for a pilot (a proof of non-execution asserted by its caller, FLAG conditions declared but not enforced, no re-validation of the mandate before dispatch), and #141 held its qualification. No v5.7.5 tag and no PyPI publication were made; its entry below stays as the record of that unpublished candidate. 5.7.6 closes those four points on the same code line, with no other change of scope. FM-20 stays Open and multi-host stays disabled; remediation target 5.8.0, as announced in 5.7.0.

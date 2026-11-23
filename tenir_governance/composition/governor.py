@@ -239,12 +239,18 @@ class ScoringKernelAdapter:
             evidence_quality = 0.5
         if "irreversibility_materiality" in non_finite:
             irreversibility_materiality = 0.5
-        if pvc_non_finite:
+        # An absent P, V or C is unknown, exactly like an invalid one (candidate
+        # for the next release, normative orientation of 22 November 2026,
+        # pending ratification): no favorable default (decision 2), and no
+        # verdict drawn from a placeholder. It is insufficient evidence (HOLD)
+        # unless a conclusive veto that does not depend on it governs.
+        pvc_absent = [n for n in ("pressure", "velocity", "capacity") if named[n] is None]
+        if pvc_non_finite or pvc_absent:
             # S cannot be computed: no S-based verdict is drawn from a placeholder.
             measured = {n: v for n, v in named.items()
                         if v is not None and n not in non_finite}
             return self._insufficient_evidence_without_s(
-                non_finite, option_space=option_space,
+                non_finite, absent=pvc_absent, option_space=option_space,
                 capacity=None if "capacity" in non_finite else capacity,
                 missing=[n for n in ("authority", "context_fit", "evidence_quality")
                          if named[n] is None],
@@ -254,17 +260,8 @@ class ScoringKernelAdapter:
         # Compute the extra signals the prototype's ScoringKernel checked
         # but TenirKernel does not natively evaluate. These become gate reasons
         # injected into TenirKernel.adjudicate().
-        # No favorable default for S (decision 2): a missing P, V or C is a hard
-        # gate. The placeholders only keep the arithmetic defined; capacity 0
-        # is the conservative bound, so the S preview cannot read as safe.
-        missing_pvc = [n for n, v in (("pressure", pressure), ("velocity", velocity),
-                                      ("capacity", capacity)) if v is None]
-        for n in missing_pvc:
-            hard_reasons.append(f"{n} missing: cannot score S without it")
-        if missing_pvc:
-            pressure = 0.5 if pressure is None else pressure
-            velocity = 0.5 if velocity is None else velocity
-            capacity = 0.0 if capacity is None else capacity
+        # P, V and C are all measured here (an absent or invalid one returned
+        # above), so S is computed from measures only, never from a placeholder.
         s_preview = capacity / (pressure * velocity + 1e-6)
         if s_preview <= self._tau_floor:
             hard_reasons.append(
@@ -303,7 +300,6 @@ class ScoringKernelAdapter:
         # measurements. This prevents a favorable score from being
         # interpreted as evidence of safety on unmeasured dimensions.
         unmeasured = getattr(self, "_unmeasured_axes", [])
-        unmeasured.extend(n for n in missing_pvc if n not in unmeasured)
         for n in non_finite:
             if n in unmeasured:
                 unmeasured.remove(n)  # it has a value, but not a measure
@@ -396,13 +392,14 @@ class ScoringKernelAdapter:
         return reasons
 
     def _insufficient_evidence_without_s(self, non_finite, *, option_space, capacity, missing,
-                                         measured=None):
-        """P, V or C is invalid: S is unknown. Veto on what is still
+                                         measured=None, absent=()):
+        """P, V or C is invalid or absent: S is unknown. Veto on what is still
         conclusive without S (a missing mandatory measure, a hard geometry
         facet whose axes are all measured, such as authority or context_fit
         below its floor, option space at its block floor, a measured capacity
         of zero, which makes S = 0 whatever P and V are); otherwise HOLD for
-        insufficient evidence."""
+        insufficient evidence. An absent capacity is never read as zero: no
+        TAU BREACH is computed from a placeholder."""
         hard = [f"{n} missing: cannot adjudicate without it" for n in missing]
         hard.extend(self._conclusive_geometry_vetoes(measured or {}))
         if capacity is not None and capacity <= 0:
@@ -410,7 +407,12 @@ class ScoringKernelAdapter:
                         "whatever pressure and velocity are")
         if option_space is not None and option_space <= self._option_space_block_floor:
             hard.append(f"option_space={option_space:.3f} ≤ block floor")
-        reason = f"INSUFFICIENT_EVIDENCE: invalid measure(s) (non-finite or outside [0, 1]) {', '.join(non_finite)}; S not computed."
+        unknown = []
+        if non_finite:
+            unknown.append(f"invalid measure(s) (non-finite or outside [0, 1]) {', '.join(non_finite)}")
+        if absent:
+            unknown.append(f"absent measure(s) {', '.join(absent)}")
+        reason = f"INSUFFICIENT_EVIDENCE: {'; '.join(unknown)}; S not computed."
         decision = Decision.HARD_VETO.value if hard else Decision.HOLD.value
         return {
             "kernel": "scoring",
@@ -422,7 +424,8 @@ class ScoringKernelAdapter:
             "evidence_quality": None,
             "constraint_geometry": None,
             "operating_mode": None,
-            "declared_unmeasured": list(non_finite) + [m for m in missing if m not in non_finite],
+            "declared_unmeasured": list(non_finite) + list(absent)
+                                   + [m for m in missing if m not in non_finite],
             "unmeasured_axes": list(non_finite),
         }
 
