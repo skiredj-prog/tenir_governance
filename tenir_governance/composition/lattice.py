@@ -202,6 +202,18 @@ class HashChainedLedger:
         self._verified_count = 0
         self._verified_hash = "GENESIS"
 
+    # The lock is per instance and never copied or serialised: a deep copy or
+    # an unpickled ledger gets a fresh one (a snapshot of the ledger is an
+    # audit object; the REG harness takes one to check the manifest).
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop("_lock", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._lock = threading.RLock()
+
     @property
     def entries(self) -> list[LedgerEntry]:
         return self._entries

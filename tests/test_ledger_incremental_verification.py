@@ -349,3 +349,21 @@ def test_a_profile_s_authorization_is_not_consumed_when_the_ledger_does_not_veri
     assert d["dispatched"] is False and d["ledger_integrity_failed"] is True
     assert consumed == []                                  # nothing consumed on a refusal
     assert gov.registry.get("gated").state is OperationState.RESERVED
+
+
+def test_a_ledger_can_be_deep_copied_and_pickled_and_the_copy_has_its_own_lock():
+    """Found by the REG harness on the first locked candidate: CT-R4-008 and
+    CT-R5-004 snapshot the ledger and failed on `cannot pickle RLock`."""
+    import copy
+    import pickle
+    ledger = HashChainedLedger()
+    for i in range(3):
+        ledger.append(kernel="t", decision="PASS", rationale=f"r{i}")
+    snap = copy.deepcopy(ledger)
+    back = pickle.loads(pickle.dumps(ledger))
+    for other in (snap, back):
+        assert other.verify_chain() is True and other.entry_count == 3
+        assert other._lock is not ledger._lock
+    ledger.append(kernel="t", decision="PASS", rationale="after")
+    assert snap.entry_count == 3 and ledger.entry_count == 4          # independent copies
+    assert snap.verify_chain() is True and ledger.verify_chain() is True
