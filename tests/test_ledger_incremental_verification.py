@@ -146,3 +146,60 @@ def test_governor_reports_the_incremental_check_and_offers_the_full_one():
     r2 = gov.adjudicate(Passage(agent_id="alice", action_type="read"), **m)
     assert r2["ledger_valid"] is True   # old entry: declared limit of the per-decision check
     assert gov.verify_ledger() is False  # full verification on demand
+
+
+def _dispatching_governor(**policy_kw):
+    from tenir_governance.objects import Resource
+    from tenir_governance.operations import MockProvider
+    state = MembraneState()
+    state.register_agent(Agent(agent_id="alice", authority_score=0.9))
+    state.register_resource(Resource(resource_id="budget", capacity=100.0))
+    provider = MockProvider()
+    gov = DualKernelGovernor(ScoringKernelAdapter(TenirKernel()), TransitionMembrane(state),
+                             policy=CompositionPolicy(flag_conditions=("ops supervision",), **policy_kw),
+                             provider=provider)
+    return gov, provider
+
+
+M_OK = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
+            option_space=0.9, authority=0.9, context_fit=0.9, evidence_quality=0.9)
+ACK = {"ops supervision": "acknowledged by the test"}
+
+
+def test_full_verification_before_dispatch_closes_the_declared_limit():
+    """An old entry altered inside the verified prefix is not seen per decision;
+    it is seen at the effect boundary and the dispatch is refused, fail-closed."""
+    gov, provider = _dispatching_governor()
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    r = gov.adjudicate(p, **M_OK, payload={"action_type": "payment"}, resource_id="budget", amount=10.0)
+    assert r["composed_decision"] in ("PASS", "FLAG") and r["ledger_valid"] is True
+    gov.ledger.entries[0].rationale = "rewritten"
+    d = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, payload={"action_type": "payment"},
+                                 flag_conditions_met=ACK)
+    assert d["dispatched"] is False and d.get("ledger_integrity_failed") is True
+    assert "LEDGER_INTEGRITY_FAILED" in d["reason"]
+    assert provider.execute_calls == [] if hasattr(provider, "execute_calls") else True
+    assert gov.registry.get(p.idempotency_key).state.value == "reserved", "no claim was taken"
+    assert gov.ledger.entries[-1].kernel == "api"
+
+
+def test_an_intact_ledger_dispatches_and_the_check_can_be_left_to_the_caller():
+    gov, _ = _dispatching_governor()
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(p, **M_OK, payload={"action_type": "payment"}, resource_id="budget", amount=10.0)
+    d = gov.dispatch_and_execute(p.idempotency_key, "budget", 10.0, payload={"action_type": "payment"},
+                                 flag_conditions_met=ACK)
+    assert d["dispatched"] is True
+    gov2, _ = _dispatching_governor(ledger_full_verification_at_dispatch=False)
+    p2 = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov2.adjudicate(p2, **M_OK, payload={"action_type": "payment"}, resource_id="budget", amount=10.0)
+    gov2.ledger.entries[0].rationale = "rewritten"
+    d2 = gov2.dispatch_and_execute(p2.idempotency_key, "budget", 10.0, payload={"action_type": "payment"},
+                                   flag_conditions_met=ACK)
+    assert d2["dispatched"] is True          # the caller took the full verification on itself
+    assert gov2.verify_ledger() is False     # and it is available on demand
+
+
+def test_policy_flag_must_be_a_bool():
+    with pytest.raises(ValueError):
+        CompositionPolicy(ledger_full_verification_at_dispatch="yes").validate()

@@ -132,6 +132,25 @@ class ScoringKernelAdapter:
         ]
 
     @classmethod
+    def malformed_measures(cls, named: dict[str, Any]) -> list[str]:
+        """Names of the measures whose value is not a number at all: a
+        boolean, a string, a container. Not a measure, not an unknown either
+        (author's decision of 23 November 2026, 11:22 UTC: rejected like a
+        value outside the declared domain). ``None`` and NaN/±inf are not in
+        this list: they are unknown measures (rule A)."""
+        return [n for n, v in named.items()
+                if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)))]
+
+    @classmethod
+    def _malformed_reason(cls, named: dict[str, Any], names: list[str]) -> str:
+        values = "; ".join(f"{n}={named[n]!r} ({type(named[n]).__name__})" for n in names)
+        return (
+            f"Measure(s) that are not numbers: {values}. Request refused explicitly; not a "
+            "governance decision. A measure is a finite number in the kernel's declared "
+            "domain; an unknown measure is passed as None or NaN."
+        )
+
+    @classmethod
     def _out_of_domain_reason(cls, named: dict[str, Any], names: list[str]) -> str:
         low, high = cls.MEASURE_DOMAIN
         values = "; ".join(f"{n}={named[n]!r}" for n in names)
@@ -291,6 +310,10 @@ class ScoringKernelAdapter:
         # evaluation, as INVALID_ARGUMENT, never closed by a decision. Between
         # 19 and 23 November it was read as an unknown measure (HOLD), which
         # closed the request by a disposition instead of refusing it.
+        malformed = self.malformed_measures(named)
+        if malformed:
+            raise InvalidArgumentError(self._malformed_reason(named, malformed),
+                                       field=",".join(malformed))
         out_of_domain = self.out_of_domain(named)
         if out_of_domain:
             raise InvalidArgumentError(
@@ -298,18 +321,15 @@ class ScoringKernelAdapter:
                 field=",".join(out_of_domain),
             )
         # Decision 5: finiteness guard at the kernel's entry. A non-finite
-        # measure (NaN, ±inf, a non-number) is insufficient evidence, never
-        # PASS: it must not reach a comparison, where NaN compares false and
-        # admits. It is reported as unmeasured, and every conclusive veto the
-        # other inputs still support is evaluated and governs (RFC-0 §4).
-        # NaN is the caller's own way of saying "unknown" (an unmeasured axis
-        # has no value, in the domain or out of it); it is not a value.
+        # measure (NaN, ±inf) is insufficient evidence, never PASS: it must not
+        # reach a comparison, where NaN compares false and admits. It is
+        # reported as unmeasured, and every conclusive veto the other inputs
+        # still support is evaluated and governs (RFC-0 §4). NaN is the
+        # caller's own way of saying "unknown" (an unmeasured axis has no
+        # value, in the domain or out of it); it is not a value. Every value
+        # here is None or a number: the rest was refused above.
         def _finite(v):
-            if v is None:
-                return True  # absence is handled below as a missing measure
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                return False
-            return math.isfinite(v)
+            return v is None or math.isfinite(v)
         non_finite = [n for n, v in named.items() if not _finite(v)]
         absent = [n for n, v in named.items() if v is None]
         # Rule A (candidate 5.7.7, author's decision of 23 November 2026,
@@ -503,7 +523,7 @@ class ScoringKernelAdapter:
         named_unknown = []
         if non_finite:
             named_unknown.append(
-                f"invalid measure(s) (non-finite or not a number) {', '.join(non_finite)}")
+                f"invalid measure(s) (non-finite) {', '.join(non_finite)}")
         if absent:
             named_unknown.append(f"absent measure(s) {', '.join(absent)}")
         detail = "; ".join(named_unknown)
@@ -1058,13 +1078,19 @@ class DualKernelGovernor:
         return response
 
     def _refuse_out_of_domain(self, named: dict[str, Any], *, passage, idem_key: str) -> None:
-        """Refuse a measure outside the scoring kernel's declared domain (P8).
+        """Refuse a measure that is not a number, or outside the scoring kernel's declared domain (P8).
 
         The domain is the kernel's own declaration (``declared_domain()``);
         the governor prescribes none. A scoring adapter without a declared
         domain (no ``out_of_domain``) is not checked here: its own entry
         decides. The refusal is INVALID_ARGUMENT, never a decision.
         """
+        malformed = getattr(self.scoring, "malformed_measures", None)
+        if malformed is not None:
+            names = malformed(named)
+            if names:
+                self._refuse_malformed(self.scoring._malformed_reason(named, names),
+                                       field=",".join(names), passage=passage, idem_key=idem_key)
         probe = getattr(self.scoring, "out_of_domain", None)
         if probe is None:
             return
@@ -2587,6 +2613,25 @@ class DualKernelGovernor:
         If no provider is configured, falls back to the manual dispatch()
         method (state transition only, no external call).
         """
+        # Full verification of the ledger at the effect boundary (author's
+        # decision of 2026-11-23, 11:22 UTC): the per-decision check is
+        # incremental (verify_new_entries); before any effect, every entry and
+        # every link is re-verified from GENESIS, so an alteration inside the
+        # already verified prefix (the incremental check's declared limit) is
+        # caught before the only step that has an external effect. Fail-closed:
+        # a ledger that does not verify dispatches nothing. Linear in the size
+        # of the ledger, once per dispatch, never per HOLD (declared cost).
+        if self.policy.ledger_full_verification_at_dispatch and not self.ledger.verify_chain():
+            record = self.registry.get(idempotency_key)
+            reason = ("LEDGER_INTEGRITY_FAILED: the hash chain of the decision ledger does not "
+                      "verify; no dispatch (fail-closed). Audit the ledger (verify_ledger()) "
+                      "before any further effect.")
+            self.ledger.append(kernel="api", decision=Decision.HARD_VETO.value, rationale=reason,
+                               passage_id=record.passage_id if record else "",
+                               idempotency_key=idempotency_key)
+            return {"dispatched": False, "ledger_integrity_failed": True, "reason": reason,
+                    "operation_state": record.state.value if record else None}
+
         # Freeze the exact JSON payload before either verification or provider
         # use so another thread cannot mutate the caller's mapping between the
         # digest check and the external call.

@@ -11,8 +11,8 @@ request was closed by a HOLD, a disposition, instead of being refused.
 
 An unknown measure is still passed as None (absent) or NaN (non-finite): rule A,
 HOLD unless a conclusive veto governs. A boolean or a non-number is not a value
-of the axis either and stays an unknown measure (declared limit of this change,
-decision 5 of 19 November unchanged on that point).
+of the axis and not an unknown either: refused explicitly as well (author's
+decision of 23 November 2026, 11:22 UTC).
 """
 import math
 
@@ -65,10 +65,31 @@ def test_edges_of_the_domain_are_values():
     assert r["decision"] in {Decision.PASS.value, Decision.FLAG.value}
 
 
-@pytest.mark.parametrize("value", [None, math.nan, math.inf, -math.inf, True, "0.5"])
-def test_none_nan_and_non_numbers_are_not_out_of_domain(value):
+@pytest.mark.parametrize("value", [None, math.nan, math.inf, -math.inf])
+def test_none_nan_and_inf_are_not_out_of_domain(value):
     """They are unknown measures (rule A), not values outside the domain."""
     assert ScoringKernelAdapter.out_of_domain({**M, "authority": value}) == []
+    assert ScoringKernelAdapter.malformed_measures({**M, "authority": value}) == []
+
+
+@pytest.mark.parametrize("value", [True, False, "0.5", "nan", [0.5], {"v": 0.5}])
+def test_a_non_number_is_malformed_and_rejected_explicitly(value):
+    """Author's decision of 23 Nov 2026, 11:22 UTC: a boolean or a string is
+    not a measure and not an unknown; it is refused like an out-of-domain value."""
+    assert ScoringKernelAdapter.malformed_measures({**M, "authority": value}) == ["authority"]
+    with pytest.raises(InvalidArgumentError) as exc:
+        ScoringKernelAdapter(TenirKernel()).adjudicate(**{**M, "authority": value})
+    assert exc.value.field == "authority" and "not numbers" in exc.value.reason
+
+
+def test_governor_refuses_a_non_number_before_registration():
+    gov, budget = _governor()
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    with pytest.raises(InvalidArgumentError) as exc:
+        gov.adjudicate(p, **{**M, "pressure": "0.2"}, payload={"action_type": "payment"},
+                       resource_id="budget", amount=10.0)
+    assert exc.value.field == "pressure"
+    assert gov.registry.get(p.idempotency_key) is None and budget.reserved == 0.0
 
 
 # --- the rejection, at the kernel adapter ------------------------------------

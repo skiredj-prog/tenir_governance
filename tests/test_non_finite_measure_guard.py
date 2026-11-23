@@ -71,10 +71,14 @@ def test_non_finite_s_input_does_not_hide_a_block_floor_veto():
 
 
 @pytest.mark.parametrize("bad", ["0.9", True])
-def test_non_number_is_not_a_measure(bad):
-    r = _adapter().adjudicate(**{**BEST, "authority": bad})
-    assert r["decision"] != Decision.PASS.value and r["decision"] != Decision.FLAG.value
-    assert "authority" in r["unmeasured_axes"]
+def test_non_number_is_refused_explicitly(bad):
+    """Decision 5 read a non-number as an unknown measure. Since the author's
+    decision of 23 Nov 2026 (11:22 UTC) it is refused at entry, INVALID_ARGUMENT,
+    like a value outside the declared domain: it is not a measure of anything."""
+    from tenir_governance.composition import InvalidArgumentError
+    with pytest.raises(InvalidArgumentError) as exc:
+        _adapter().adjudicate(**{**BEST, "capacity": bad})
+    assert exc.value.field == "capacity"
 
 
 def test_zero_capacity_vetoes_even_with_unknown_pressure():

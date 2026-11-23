@@ -71,7 +71,7 @@ def test_an_absent_capacity_is_never_read_as_zero():
 def test_absent_and_invalid_are_both_named():
     r = _adapter().adjudicate(**{**BEST, "irreversibility_materiality": 0.0, "pressure": float("nan"), "capacity": None})
     assert r["decision"] == Decision.HOLD.value
-    assert ("INSUFFICIENT_EVIDENCE: invalid measure(s) (non-finite or not a number) pressure; "
+    assert ("INSUFFICIENT_EVIDENCE: invalid measure(s) (non-finite) pressure; "
             "absent measure(s) capacity; S not computed.") in r["rationale"]
     assert r["unmeasured_axes"] == ["pressure"]
 
