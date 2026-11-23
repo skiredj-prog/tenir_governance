@@ -471,8 +471,12 @@ class TestDualKernelGovernor:
         assert current.budget_reserved is True
         assert current.budget_committed is False
 
-    def test_resolve_hold_missing_fresh_epistemic_inputs_fails_closed(self):
-        """HOLD re-adjudication must not inherit favorable epistemic defaults."""
+    def test_resolve_hold_missing_fresh_epistemic_inputs_stays_held(self):
+        """HOLD re-adjudication must not inherit favorable epistemic defaults.
+
+        Rule A (candidate 5.7.7): measures still absent at re-adjudication are
+        insufficient evidence, not a veto. The HOLD is kept, never admitted;
+        5.7.6 hard-gated them and closed the attempt FAILED."""
         gov, _state = self._setup()
         key = "hold-missing-epistemic-evidence"
         record = OperationRecord(
@@ -494,15 +498,16 @@ class TestDualKernelGovernor:
 
         result = gov.resolve_hold(key, passage=passage)
 
-        assert result["scoring_decision"] == Decision.HARD_VETO.value
-        assert result["composed_decision"] == Decision.HARD_VETO.value
-        # Missing evidence must veto and terminally close the HOLD.
-        # "hold_resolved" means safely terminal, not admitted for execution.
-        assert result["hold_resolved"] is True
-        assert result["operation_state"] == OperationState.FAILED.value
-        assert "authority missing" in result["scoring_rationale"]
-        assert "context_fit missing" in result["scoring_rationale"]
-        assert "evidence_quality missing" in result["scoring_rationale"]
+        assert result["scoring_decision"] == Decision.HOLD.value
+        assert result["composed_decision"] == Decision.HOLD.value
+        # Missing evidence is neither a violation nor an admission: the HOLD
+        # stays, and nothing can be dispatched from it.
+        assert result["hold_resolved"] is False
+        assert result["operation_state"] == OperationState.HOLD.value
+        assert gov.registry.get(key).state == OperationState.HOLD
+        assert ("absent measure(s) pressure, velocity, capacity, option_space, authority, "
+                "context_fit, evidence_quality") in result["scoring_rationale"]
+        assert "missing: cannot adjudicate" not in result["scoring_rationale"]
 
     def test_resolve_hold_without_passage_does_not_re_adjudicate(self):
         """Omitting the passage must leave the operation in HOLD."""
@@ -527,16 +532,18 @@ class TestDualKernelGovernor:
         assert gov.registry.get(key).state == OperationState.HOLD
 
     def test_governor_missing_epistemic_inputs_fail_closed(self):
+        """Fail-closed means never admitted. Rule A (candidate 5.7.7): absent
+        epistemic inputs are a HOLD, not a HARD_VETO (5.7.6)."""
         gov, _state = self._setup()
         passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = gov.adjudicate(
             passage, pressure=0.2, velocity=0.3, capacity=1.0,
         )
-        assert result["scoring_decision"] == Decision.HARD_VETO.value
-        assert result["composed_decision"] == Decision.HARD_VETO.value
-        assert "authority missing" in result["scoring_rationale"]
-        assert "context_fit missing" in result["scoring_rationale"]
-        assert "evidence_quality missing" in result["scoring_rationale"]
+        assert result["scoring_decision"] == Decision.HOLD.value
+        assert result["composed_decision"] == Decision.HOLD.value
+        assert result["operation_state"] == OperationState.HOLD.value
+        assert ("absent measure(s) option_space, authority, context_fit, evidence_quality"
+                in result["scoring_rationale"])
 
     def test_safe_payment_both_pass(self):
         gov, state = self._setup()
@@ -933,12 +940,13 @@ class TestScoringKernelAdapter:
         assert result["s_score"] is not None
 
     def test_missing_mandatory_epistemic_inputs_fail_closed(self):
+        """Rule A (candidate 5.7.7): HOLD, never admitted; 5.7.6 hard-gated."""
         adapter = self._setup()
         result = adapter.adjudicate(pressure=0.2, velocity=0.3, capacity=1.0)
-        assert result["decision"] == Decision.HARD_VETO.value
-        assert "authority missing" in result["rationale"]
-        assert "context_fit missing" in result["rationale"]
-        assert "evidence_quality missing" in result["rationale"]
+        assert result["decision"] == Decision.HOLD.value
+        assert ("INSUFFICIENT_EVIDENCE: absent measure(s) option_space, authority, "
+                "context_fit, evidence_quality" in result["rationale"])
+        assert result["constraint_geometry"] is None  # never evaluated on placeholders
 
     def test_high_stress_hard_veto(self):
         adapter = self._setup()

@@ -29,7 +29,7 @@ def current_release_version() -> str:
         try:
             return version("tenir-governance")
         except PackageNotFoundError:
-            return "5.7.6"
+            return "5.7.7"
 
 
 def runtime_environment(environ: Mapping[str, str] | None = None) -> str:

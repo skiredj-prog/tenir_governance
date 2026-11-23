@@ -1,4 +1,4 @@
-"""An absent P, V or K is unknown, like an invalid one (candidate, not released).
+"""An absent P, V or K is unknown, like an invalid one (candidate 5.7.7, not released).
 
 Normative orientation of 22 November 2026, pending ratification, on the
 author's rule of 20 November 2026 (not ratified either):
@@ -13,8 +13,10 @@ capacity nobody measured. Here an absent P, V or K is insufficient evidence:
 HOLD, never PASS or FLAG, and no veto is justified by a placeholder. A
 conclusive veto that does not depend on the absent measure still governs.
 
-Unchanged and outside this candidate: an absent authority, context_fit or
-evidence_quality is still a hard gate (EP-01).
+The author extended this on 23 November 2026 (rule A, pending ratification of
+the amended RFC-2 v0.2) to every mandatory measure, authority, context_fit and
+evidence_quality included: see test_ep01_epistemic_boundary.py and
+test_absent_measure_hold_lifecycle.py.
 """
 import json
 

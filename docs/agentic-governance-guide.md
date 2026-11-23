@@ -65,14 +65,14 @@ assert result["composed_decision"] == "FLAG"
 assert result["flag_conditions"] == ["revue humaine de l'effet sous 24 h"]
 ```
 
-Depuis 5.7.5, aucun axe non mesuré ne reçoit de valeur favorable. Un appel sans `authority`, `context_fit` ou `evidence_quality` (ou sans `pressure`, `velocity`, `capacity`) n'est pas admis :
+Depuis 5.7.5, aucun axe non mesuré ne reçoit de valeur favorable. Un appel sans `authority`, `context_fit` ou `evidence_quality` (ou sans `pressure`, `velocity`, `capacity`) n'est pas admis. Depuis 5.7.7 (candidat non publié ; règle A du 23 novembre 2026, en attente de ratification), il est tenu (`HOLD`, réservation conservée), comme une mesure invalide, au lieu d'être refusé (`HARD_VETO` en 5.7.5 et 5.7.6) : l'absence d'une mesure n'est ni la preuve d'une violation ni celle d'une admissibilité. Un veto concluant que les mesures valides établissent seules garde la priorité (par exemple `authority=0.0`, qui est une mesure). Sans `τ_K` déclaré par la politique, ce HOLD et sa réservation restent ouverts jusqu'à leur résolution :
 
 ```python
 p_missing = Passage(agent_id="alice", action_type="payment", amount=10.0)
 r = client.adjudicate(p_missing, pressure=0.2, velocity=0.3, capacity=1.0,
                       option_space=0.9, resource_id="budget", amount=10.0)
-assert r["composed_decision"] == "HARD_VETO"
-assert "authority missing" in r["scoring_rationale"]
+assert r["composed_decision"] == "HOLD"
+assert "absent measure(s) authority" in r["scoring_rationale"]
 assert "authority" in r["declared_unmeasured"]
 ```
 

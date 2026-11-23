@@ -143,8 +143,9 @@ class ScoringKernelAdapter:
         self._unmeasured_axes: list[str] = []
 
         # Mandatory epistemic inputs must never acquire favorable defaults.
-        # A neutral placeholder keeps the geometry structurally complete; the
-        # missing measurement is separately converted into a hard gate below.
+        # A neutral placeholder keeps the geometry structurally complete. Since
+        # 5.7.7 (candidate) adjudicate() holds an absent mandatory input before
+        # building coordinates (rule A); the placeholder stays for direct calls.
         mandatory = {
             "authority": authority,
             "context_fit": context_fit,
@@ -228,40 +229,30 @@ class ScoringKernelAdapter:
                  "context_fit": context_fit, "evidence_quality": evidence_quality,
                  "irreversibility_materiality": irreversibility_materiality}
         non_finite = [n for n, v in named.items() if not _finite(v)]
-        pvc_non_finite = [n for n in ("pressure", "velocity", "capacity") if n in non_finite]
+        absent = [n for n, v in named.items() if v is None]
+        # Rule A (candidate 5.7.7, author's decision of 23 November 2026,
+        # pending ratification of the amended RFC-2 v0.2): a measure that S or
+        # a geometry facet reads is unknown when it is absent (None, JSON null)
+        # exactly as when it is invalid. The absence of a measure is proof
+        # neither of a violation nor of admissibility: HOLD, unless a
+        # conclusive veto governs, one the valid measures establish whatever
+        # value the unknown ones would take. No verdict, and no reason, is
+        # drawn from a placeholder (draft RFC-2 v0.2 §3). 5.7.6 hard-gated an
+        # absent authority, context_fit or evidence_quality, and vetoed on the
+        # authority placeholder (0.5) when authority was invalid.
+        unknown = set(non_finite) | set(absent)
+        if unknown & set(self._SCORED_MEASURES):
+            return self._insufficient_evidence(named, non_finite, absent)
+        # Only option_space can be unknown past this point. It feeds no facet
+        # of the reference geometry; the adapter reads it only when measured.
         if "option_space" in non_finite:
             option_space = None
-        if "authority" in non_finite:
-            authority = 0.5
-        if "context_fit" in non_finite:
-            context_fit = 0.5
-        if "evidence_quality" in non_finite:
-            evidence_quality = 0.5
-        if "irreversibility_materiality" in non_finite:
-            irreversibility_materiality = 0.5
-        # An absent P, V or C is unknown, exactly like an invalid one (candidate
-        # for the next release, normative orientation of 22 November 2026,
-        # pending ratification): no favorable default (decision 2), and no
-        # verdict drawn from a placeholder. It is insufficient evidence (HOLD)
-        # unless a conclusive veto that does not depend on it governs.
-        pvc_absent = [n for n in ("pressure", "velocity", "capacity") if named[n] is None]
-        if pvc_non_finite or pvc_absent:
-            # S cannot be computed: no S-based verdict is drawn from a placeholder.
-            measured = {n: v for n, v in named.items()
-                        if v is not None and n not in non_finite}
-            return self._insufficient_evidence_without_s(
-                non_finite, absent=pvc_absent, option_space=option_space,
-                capacity=None if "capacity" in non_finite else capacity,
-                missing=[n for n in ("authority", "context_fit", "evidence_quality")
-                         if named[n] is None],
-                measured=measured,
-            )
 
         # Compute the extra signals the prototype's ScoringKernel checked
         # but TenirKernel does not natively evaluate. These become gate reasons
         # injected into TenirKernel.adjudicate().
-        # P, V and C are all measured here (an absent or invalid one returned
-        # above), so S is computed from measures only, never from a placeholder.
+        # Every measure S and the geometry facets read is valid here (an absent
+        # or invalid one returned above): no verdict is drawn from a placeholder.
         s_preview = capacity / (pressure * velocity + 1e-6)
         if s_preview <= self._tau_floor:
             hard_reasons.append(
@@ -307,15 +298,10 @@ class ScoringKernelAdapter:
         for axis in unmeasured:
             soft_reasons.append(f"unmeasured axis: {axis} (neutral default, not favorable)")
 
-        # Missing mandatory epistemic inputs are a hard gate. A measured
-        # value of zero is not "missing": it is real evidence for the geometry
-        # to evaluate. Only None denotes absence.
-        if authority is None:
-            hard_reasons.append("authority missing: cannot adjudicate without authority assessment")
-        if context_fit is None:
-            hard_reasons.append("context_fit missing: cannot adjudicate without context assessment")
-        if evidence_quality is None:
-            hard_reasons.append("evidence_quality missing: cannot adjudicate without evidence")
+        # A measured value of zero is not "missing": it is real evidence for
+        # the geometry to evaluate (authority=0.0 meets the authority floor).
+        # An absent mandatory input no longer reaches this point (rule A).
+
         # Delegate core scoring to TenirKernel
         tk_result = self._kernel.adjudicate(
             pressure=pressure,
@@ -377,55 +363,100 @@ class ScoringKernelAdapter:
     # Adapter input name -> geometry axis name, where they differ.
     _GEOMETRY_AXIS = {"irreversibility_materiality": "irreversible_pathway_materiality"}
 
+    # The measures S = C / (P·V + ε) and the reference geometry's facets read.
+    # One of them unknown (absent or invalid) means insufficient evidence (rule A).
+    _SCORED_MEASURES = ("pressure", "velocity", "capacity", "authority", "context_fit",
+                        "evidence_quality", "irreversibility_materiality")
+
     def _conclusive_geometry_vetoes(self, measured):
-        """Hard facets of the kernel's geometry whose every axis carries a
-        valid measure. Such a facet does not depend on an unknown value, so
-        its violation is conclusive and must govern (RFC-0 §4)."""
+        """Hard facets of the kernel's geometry violated whatever value the
+        axes without a valid measure take. Coordinates are normalized to
+        [0, 1] and a facet is the half-space ``normal · point <= bound``, so
+        the most favorable value of an unknown axis contributes min(0, w).
+        A facet whose every axis is measured is the common case. Such a
+        violation does not depend on an unknown value: it is conclusive and
+        must govern (RFC-0 §4). No facet is evaluated on a placeholder."""
         point = {self._GEOMETRY_AXIS.get(n, n): float(v) for n, v in measured.items()}
         policy = getattr(getattr(self._kernel, "policy", None), "geometry", None)
         reasons = []
         for facet in getattr(policy, "facets", ()):
-            if facet.severity != "hard" or not set(facet.normal) <= set(point):
+            if facet.severity != "hard":
                 continue
-            if sum(w * point[a] for a, w in facet.normal.items()) > facet.bound:
+            least = sum(w * point[a] if a in point else min(0.0, w)
+                        for a, w in facet.normal.items())
+            if least > facet.bound:
                 reasons.append(facet.rationale)
         return reasons
 
-    def _insufficient_evidence_without_s(self, non_finite, *, option_space, capacity, missing,
-                                         measured=None, absent=()):
-        """P, V or C is invalid or absent: S is unknown. Veto on what is still
-        conclusive without S (a missing mandatory measure, a hard geometry
-        facet whose axes are all measured, such as authority or context_fit
-        below its floor, option space at its block floor, a measured capacity
-        of zero, which makes S = 0 whatever P and V are); otherwise HOLD for
-        insufficient evidence. An absent capacity is never read as zero: no
-        TAU BREACH is computed from a placeholder."""
-        hard = [f"{n} missing: cannot adjudicate without it" for n in missing]
-        hard.extend(self._conclusive_geometry_vetoes(measured or {}))
-        if capacity is not None and capacity <= 0:
-            hard.append(f"TAU BREACH: capacity={capacity} gives S=0 ≤ τ={self._tau_floor} "
+    def _insufficient_evidence(self, named, non_finite, absent):
+        """A measure S or a geometry facet reads is unknown (rule A, candidate
+        5.7.7). HOLD for insufficient evidence, unless a conclusive veto
+        governs, that is one the valid measures establish whatever value the
+        unknown ones would take (RFC-0 §4, draft RFC-2 v0.2 §2):
+
+        - P, V and C valid: S is computed from them, and a TAU BREACH or the
+          kernel's hard-veto floor on that S vetoes;
+        - P or V unknown, C measured at zero: S = 0 whatever P and V are;
+        - a hard geometry facet violated whatever its unknown axes are,
+          such as authority or context_fit measured below its floor;
+        - option space measured at its block floor.
+
+        An absent capacity is never read as zero, an absent authority never as
+        its placeholder: no veto and no reason rest on a value nobody measured
+        (draft RFC-2 v0.2 §3). Every conclusive veto of the membrane governs
+        in the composition, whatever this result is."""
+        unknown = set(non_finite) | set(absent)
+        measured = {n: v for n, v in named.items() if n not in unknown}
+        hard: list[str] = []
+        s_score = None
+        if unknown.isdisjoint(("pressure", "velocity", "capacity")):
+            p, v, c = (float(measured[n]) for n in ("pressure", "velocity", "capacity"))
+            s_preview = c / (p * v + 1e-6)
+            if s_preview <= self._tau_floor:
+                hard.append(f"TAU BREACH: S={s_preview:.4f} ≤ τ={self._tau_floor}")
+            policy = getattr(self._kernel, "policy", None)
+            epsilon = getattr(policy, "epsilon", 1e-6)
+            score = c / (p * v + epsilon)
+            s_score = round(score, 8)
+            floor = getattr(policy, "hard_veto_below", None)
+            if floor is not None and score <= floor:
+                hard.append(f"S={score:.6f} is at or below hard-veto floor {floor}")
+        elif "capacity" in measured and measured["capacity"] <= 0:
+            hard.append(f"TAU BREACH: capacity={measured['capacity']} gives S=0 ≤ τ={self._tau_floor} "
                         "whatever pressure and velocity are")
+        hard.extend(self._conclusive_geometry_vetoes(measured))
+        option_space = measured.get("option_space")
         if option_space is not None and option_space <= self._option_space_block_floor:
             hard.append(f"option_space={option_space:.3f} ≤ block floor")
-        unknown = []
+        named_unknown = []
         if non_finite:
-            unknown.append(f"invalid measure(s) (non-finite or outside [0, 1]) {', '.join(non_finite)}")
+            named_unknown.append(
+                f"invalid measure(s) (non-finite or outside [0, 1]) {', '.join(non_finite)}")
         if absent:
-            unknown.append(f"absent measure(s) {', '.join(absent)}")
-        reason = f"INSUFFICIENT_EVIDENCE: {'; '.join(unknown)}; S not computed."
+            named_unknown.append(f"absent measure(s) {', '.join(absent)}")
+        detail = "; ".join(named_unknown)
+        if hard:
+            reason = (f"Conclusive whatever the unknown measure(s) are: {detail}"
+                      + ("; S not computed." if s_score is None else "."))
+        elif s_score is None:
+            reason = f"INSUFFICIENT_EVIDENCE: {detail}; S not computed."
+        else:
+            reason = (f"INSUFFICIENT_EVIDENCE: {detail}; held, not admitted "
+                      "(re-adjudicate with the missing measure).")
         decision = Decision.HARD_VETO.value if hard else Decision.HOLD.value
         return {
             "kernel": "scoring",
-            "s_score": None,
+            "s_score": s_score,
             "decision": decision,
             "rationale": " ".join(hard + [reason]),
-            "authority": None,
-            "context_fit": None,
-            "evidence_quality": None,
+            # An unknown input is reported as null (decision 6), never as a placeholder.
+            "authority": measured.get("authority"),
+            "context_fit": measured.get("context_fit"),
+            "evidence_quality": measured.get("evidence_quality"),
+            # Not evaluated: the geometry would have read placeholders.
             "constraint_geometry": None,
             "operating_mode": None,
-            "declared_unmeasured": list(non_finite) + list(absent)
-                                   + [m for m in missing if m not in non_finite],
+            "declared_unmeasured": [n for n in named if n in unknown],
             "unmeasured_axes": list(non_finite),
         }
 
