@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -173,9 +174,27 @@ class HashChainedLedger:
     of a decision grow with the size of the ledger (measured on this
     candidate, 2026-11-23: 97 % of the time of ``adjudicate`` at 1000 held
     operations).
+
+    Concurrency (candidate 5.7.7, project owner's review of 2026-11-23, 17:37
+    UTC): ``append`` and both verifications run under one re-entrant lock.
+    Up to 5.7.6 and in the earlier states of this candidate ``append`` read
+    and wrote ``_last_hash`` without a lock, so two threads appending at once
+    could fork the chain (measured: 8 threads, 25 decisions each, the chain
+    failed to verify in 9 runs out of 12). A forked chain is not an
+    alteration, but ``verify_chain()`` cannot tell the two apart, and since
+    the candidate verifies the chain before every dispatch claim a fork would
+    have blocked every dispatch.
+
+    Declared limits (unchanged since 5.7.0): the ledger lives in memory, in
+    one process, and is not persisted with the durable operation registry;
+    the chain proves internal consistency (every entry hashes as recorded and
+    links to its predecessor), not authenticity: it is bound to no key, so an
+    entry rewritten and the chain re-hashed from it verifies. ``entries``
+    gives the live list; a caller that mutates it alters the ledger.
     """
 
     def __init__(self):
+        self._lock = threading.RLock()
         self._entries: list[LedgerEntry] = []
         self._last_hash = "GENESIS"
         # Verified prefix: number of entries verified so far, and the chain
@@ -223,21 +242,22 @@ class HashChainedLedger:
         membrane_result: dict | None = None,
         composed_decision: str = "",
     ) -> str:
-        entry = LedgerEntry(
-            previous_hash=self._last_hash,
-            kernel=kernel,
-            decision=decision,
-            rationale=rationale,
-            passage_id=passage_id,
-            idempotency_key=idempotency_key,
-            scoring_result=scoring_result or {},
-            membrane_result=membrane_result or {},
-            composed_decision=composed_decision,
-        )
-        entry.chain_hash = self._entry_hash(entry)
-        self._last_hash = entry.chain_hash
-        self._entries.append(entry)
-        return entry.chain_hash
+        with self._lock:
+            entry = LedgerEntry(
+                previous_hash=self._last_hash,
+                kernel=kernel,
+                decision=decision,
+                rationale=rationale,
+                passage_id=passage_id,
+                idempotency_key=idempotency_key,
+                scoring_result=scoring_result or {},
+                membrane_result=membrane_result or {},
+                composed_decision=composed_decision,
+            )
+            entry.chain_hash = self._entry_hash(entry)
+            self._last_hash = entry.chain_hash
+            self._entries.append(entry)
+            return entry.chain_hash
 
     def _verify_range(self, start: int, prev: str) -> bool:
         """Check links and hashes of entries[start:] against ``prev``."""
@@ -250,28 +270,32 @@ class HashChainedLedger:
         return True
 
     def verify_chain(self) -> bool:
-        """Full verification, from GENESIS: every entry, every link. O(N)."""
-        ok = self._verify_range(0, "GENESIS")
-        if ok:
-            self._verified_count = len(self._entries)
-            self._verified_hash = self._entries[-1].chain_hash if self._entries else "GENESIS"
-        return ok
+        """Full verification, from GENESIS: every entry, every link. O(N).
+        Internal consistency only (see the class docstring). Holds the ledger
+        lock for its whole duration: no append lands while it runs."""
+        with self._lock:
+            ok = self._verify_range(0, "GENESIS")
+            if ok:
+                self._verified_count = len(self._entries)
+                self._verified_hash = self._entries[-1].chain_hash if self._entries else "GENESIS"
+            return ok
 
     def verify_new_entries(self) -> bool:
         """Incremental verification of the entries appended since the last
         verification, anchored on the verified prefix. O(k)."""
-        count = self._verified_count
-        if len(self._entries) < count:
-            return False  # the verified prefix has been truncated
-        if count:
-            anchor = self._entries[count - 1]
-            if anchor.chain_hash != self._verified_hash or anchor.chain_hash != self._entry_hash(anchor):
-                return False  # the anchor was altered or replaced
-        ok = self._verify_range(count, self._verified_hash)
-        if ok:
-            self._verified_count = len(self._entries)
-            self._verified_hash = self._entries[-1].chain_hash if self._entries else "GENESIS"
-        return ok
+        with self._lock:
+            count = self._verified_count
+            if len(self._entries) < count:
+                return False  # the verified prefix has been truncated
+            if count:
+                anchor = self._entries[count - 1]
+                if anchor.chain_hash != self._verified_hash or anchor.chain_hash != self._entry_hash(anchor):
+                    return False  # the anchor was altered or replaced
+            ok = self._verify_range(count, self._verified_hash)
+            if ok:
+                self._verified_count = len(self._entries)
+                self._verified_hash = self._entries[-1].chain_hash if self._entries else "GENESIS"
+            return ok
 
     def find_by_idempotency_key(self, idempotency_key: str) -> list[LedgerEntry]:
         """Find all ledger entries for a given idempotency key."""

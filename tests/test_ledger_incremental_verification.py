@@ -14,6 +14,7 @@ Integrity properties this file proves:
   full verification (the incremental check's declared limit);
 - the cost of the incremental check does not grow with the ledger.
 """
+import threading
 import time
 
 import pytest
@@ -178,7 +179,7 @@ def test_full_verification_before_dispatch_closes_the_declared_limit():
                                  flag_conditions_met=ACK)
     assert d["dispatched"] is False and d.get("ledger_integrity_failed") is True
     assert "LEDGER_INTEGRITY_FAILED" in d["reason"]
-    assert provider.execute_calls == [] if hasattr(provider, "execute_calls") else True
+    assert provider.calls == []                      # the provider was never called
     assert gov.registry.get(p.idempotency_key).state.value == "reserved", "no claim was taken"
     assert gov.ledger.entries[-1].kernel == "api"
 
@@ -253,3 +254,98 @@ def test_an_intact_ledger_lets_a_direct_dispatch_claim():
                      flag_conditions_met=ACK)
     assert d["dispatched"] is True
     assert gov.ledger.verify_chain() is True
+
+
+# -- project owner's review of 2026-11-23, 17:37 UTC: concurrency, incident, order --
+
+def test_concurrent_appends_do_not_fork_the_chain():
+    """Eight threads adjudicating on one governor: the chain still verifies and
+    holds every entry. Before the lock the chain forked in 9 runs out of 12."""
+    state = MembraneState()
+    state.register_agent(Agent(agent_id="alice", authority_score=0.9))
+    gov = DualKernelGovernor(ScoringKernelAdapter(TenirKernel()), TransitionMembrane(state),
+                             policy=CompositionPolicy(flag_conditions=("ops supervision",)))
+    before = gov.ledger.entry_count
+    errors = []
+
+    def work(i):
+        try:
+            for k in range(25):
+                gov.adjudicate(Passage(agent_id="alice", action_type="read"), **M_OK)
+        except Exception as e:                       # pragma: no cover - reported below
+            errors.append(e)
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert gov.ledger.verify_chain() is True
+    assert gov.ledger.verify_new_entries() is True
+    per_decision = (gov.ledger.entry_count - before) // 200
+    assert per_decision >= 1 and (gov.ledger.entry_count - before) == 200 * per_decision
+
+
+def test_concurrent_raw_appends_keep_every_link():
+    ledger = HashChainedLedger()
+
+    def work(i):
+        for k in range(200):
+            ledger.append(kernel="t", decision="PASS", rationale=f"{i}-{k}")
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert ledger.entry_count == 1600 and ledger.verify_chain() is True
+
+
+def test_one_audit_entry_per_integrity_incident_and_the_incident_closes_on_a_verified_chain():
+    gov, _ = _dispatching_governor()
+    keys = []
+    for _ in range(3):
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        gov.adjudicate(p, **M_OK, payload={"action_type": "payment"}, resource_id="budget", amount=10.0)
+        keys.append(p.idempotency_key)
+    original = gov.ledger.entries[0].rationale
+    gov.ledger.entries[0].rationale = "rewritten"
+    n = gov.ledger.entry_count
+    pay = {"action_type": "payment"}
+    first = gov.dispatch(keys[0], "budget", 10.0, payload=pay, flag_conditions_met=ACK)
+    second = gov.dispatch(keys[1], "budget", 10.0, payload=pay, flag_conditions_met=ACK)
+    assert first["ledger_integrity_failed"] and second["ledger_integrity_failed"]
+    assert first["incident_recorded"] is True and second["incident_recorded"] is False
+    assert second["incident_refusals"] == 2
+    vetoes = [e for e in gov.ledger.entries[n:] if "LEDGER_INTEGRITY_FAILED" in e.rationale]
+    assert len(vetoes) == 1 and vetoes[0].kernel == "api"   # one api/HARD_VETO entry, not two
+    assert gov.ledger_integrity_incident["refusals"] == 2
+    assert all(gov.registry.get(k).state.value == "reserved" for k in keys)
+    # Repair (the test puts the entry back): verify_ledger() closes the incident
+    # and the next operation claims.
+    gov.ledger.entries[0].rationale = original
+    assert gov.verify_ledger() is True and gov.ledger_integrity_incident is None
+    assert gov.dispatch(keys[2], "budget", 10.0, payload=pay, flag_conditions_met=ACK)["dispatched"] is True
+
+
+def test_a_profile_s_authorization_is_not_consumed_when_the_ledger_does_not_verify(monkeypatch):
+    """The single-use commit authorization is consumed only after the ledger
+    verified; a refusal leaves it intact (regression of the earlier candidate
+    state, which consumed first)."""
+    from hashlib import sha256
+    from tenir_governance.experimental.ep02_commit_authorization import canonical_payload_bytes
+    from tenir_governance.operations import OperationRecord, OperationState
+    gov, _ = _dispatching_governor()
+    consumed = []
+    monkeypatch.setattr(gov, "_consume_commit_authorization",
+                        lambda key: consumed.append(key) or {"consumed": True})
+    rec = OperationRecord(idempotency_key="gated", passage_id="p", agent_id="alice",
+                          action_type="payment", commit_gate_required=True,
+                          payload_digest=sha256(canonical_payload_bytes({})).hexdigest())
+    assert gov.registry.register(rec)
+    assert gov.registry.transition_to("gated", OperationState.RESERVED)[0]
+    gov.ledger.append(kernel="t", decision="PASS", rationale="x")
+    gov.ledger.entries[-1].rationale = "rewritten"
+    d = gov.dispatch("gated", payload={})
+    assert d["dispatched"] is False and d["ledger_integrity_failed"] is True
+    assert consumed == []                                  # nothing consumed on a refusal
+    assert gov.registry.get("gated").state is OperationState.RESERVED

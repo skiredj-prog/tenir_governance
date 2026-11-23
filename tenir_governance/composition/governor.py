@@ -45,6 +45,7 @@ import json
 import math
 import re
 import threading
+import time
 from typing import Any, Mapping, Optional
 from uuid import uuid4
 
@@ -626,6 +627,13 @@ class DualKernelGovernor:
         # Durable DISPATCHING recovery remains available after process restart.
         self._active_dispatches: set[str] = set()
         self._active_dispatches_lock = threading.RLock()
+        # Ledger-integrity incident (project owner's review of 2026-11-23, 17:37
+        # UTC): the first dispatch refused on a ledger that does not verify
+        # writes one api/HARD_VETO entry and opens the incident; further
+        # refusals while it stays open write nothing more (the chain is
+        # already known not to verify, and each entry would lengthen it).
+        # verify_ledger() closes the incident when the chain verifies again.
+        self._ledger_integrity_incident: dict[str, Any] | None = None
         # Serialize terminal budget settlement paths within this governor instance.
         # The registry transition remains the durable terminal-state authority.
         self._settlement_lock = threading.RLock()
@@ -1106,7 +1114,15 @@ class DualKernelGovernor:
         re-hashed and every link checked (O(N)). ``ledger_valid`` in a decision
         result is the incremental check of the links added since the last
         verification; call this one for an audit."""
-        return self.ledger.verify_chain()
+        ok = self.ledger.verify_chain()
+        if ok and self._ledger_integrity_incident is not None:
+            self._ledger_integrity_incident = None
+        return ok
+
+    @property
+    def ledger_integrity_incident(self) -> dict[str, Any] | None:
+        """The open ledger-integrity incident (first refusal, count), or None."""
+        return dict(self._ledger_integrity_incident) if self._ledger_integrity_incident else None
 
     def _refuse_malformed(self, reason: str, *, field: str, passage, idem_key: str) -> None:
         """Refuse a structurally malformed request at the API boundary (R8).
@@ -2218,12 +2234,22 @@ class DualKernelGovernor:
             with self.membrane.state._quarantine_lock:
                 with self.registry.quarantine_guard():
                     quarantine_active = self._quarantine_blocks()
+                    # Single-use Profile S authorization: refuse on a ledger that
+                    # does not verify BEFORE consuming it, so a refusal leaves the
+                    # authorization intact (project owner's review of 2026-11-23,
+                    # 17:37 UTC; the earlier state of this candidate consumed it
+                    # first). The claim below re-verifies under the gate: on this
+                    # path the full verification runs twice (declared cost).
+                    integrity_refusal = None if quarantine_active else \
+                        self._refuse_on_ledger_integrity(idempotency_key)
                 if quarantine_active:
                     return {
                         "dispatched": False,
                         "reason": "QUARANTINE_LOCK is active; dispatch is blocked.",
                         "operation_state": record.state.value,
                     }
+                if integrity_refusal is not None:
+                    return integrity_refusal
             consumption = self._consume_commit_authorization(idempotency_key)
             if not consumption.get("consumed"):
                 return {
@@ -2243,12 +2269,23 @@ class DualKernelGovernor:
                 # the per-decision check is incremental (verify_new_entries);
                 # before the DISPATCHING claim, the last step before any
                 # effect, every entry and every link is re-verified from
-                # GENESIS, under the gate, so nothing can change the ledger
-                # between the verification and the claim. Every path to a
-                # claim passes here: dispatch_and_execute, a direct dispatch()
-                # call, the SDK client. Fail-closed: a ledger that does not
-                # verify claims nothing. Linear in the ledger, once per
-                # dispatch, never per HOLD (declared cost).
+                # GENESIS, under the gate. The verification holds the ledger
+                # lock, so no append lands while it runs; the claim follows
+                # under the same gate, so no other claim slips between them.
+                # The ledger itself can still be mutated by any code holding
+                # a reference to it (``entries`` is the live list), and the
+                # registry's ``transition_to`` is public: a caller that
+                # bypasses dispatch() bypasses this check (declared limits).
+                # Every path through dispatch() passes here:
+                # dispatch_and_execute, a direct dispatch() call, the SDK
+                # client, in this process (the ledger is in memory: another
+                # process or a restart starts from an empty ledger that
+                # verifies). Fail-closed: a ledger that does not verify
+                # claims nothing. Linear in the ledger, once per dispatch
+                # (twice on the Profile S path), never per HOLD; it runs
+                # under the quarantine gate, so a quarantine activation waits
+                # for it (declared cost: 0.54 s at 100 000 entries, measured
+                # 2026-11-23).
                 integrity_refusal = self._refuse_on_ledger_integrity(idempotency_key)
                 if integrity_refusal is not None:
                     return integrity_refusal
@@ -2317,11 +2354,20 @@ class DualKernelGovernor:
         reason = ("LEDGER_INTEGRITY_FAILED: the hash chain of the decision ledger does not "
                   "verify; no dispatch (fail-closed). Audit the ledger (verify_ledger()) "
                   "before any further effect.")
-        self.ledger.append(kernel="api", decision=Decision.HARD_VETO.value, rationale=reason,
-                           passage_id=record.passage_id if record else "",
-                           idempotency_key=idempotency_key)
+        incident = self._ledger_integrity_incident
+        if incident is None:
+            # First refusal: one api/HARD_VETO entry opens the incident.
+            self.ledger.append(kernel="api", decision=Decision.HARD_VETO.value, rationale=reason,
+                               passage_id=record.passage_id if record else "",
+                               idempotency_key=idempotency_key)
+            incident = self._ledger_integrity_incident = {
+                "opened_at": time.time(), "first_idempotency_key": idempotency_key,
+                "refusals": 0, "audit_entry_index": self.ledger.entry_count - 1}
+        incident["refusals"] += 1
         return {"dispatched": False, "ledger_integrity_failed": True, "reason": reason,
                 "audit_entry_chain_proven": False,
+                "incident_recorded": incident["refusals"] == 1,
+                "incident_refusals": incident["refusals"],
                 "operation_state": record.state.value if record else None}
 
     def _dispatch_under_quarantine_lock(
