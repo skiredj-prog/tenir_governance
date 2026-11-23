@@ -13,6 +13,19 @@ Candidate prepared on 2026-11-23 for condition (b) of the HOLD on the REG qualif
 
 - `tests/test_absent_measure_is_unknown.py`: absent P, V, K and their combinations give `HOLD` with no S and no `TAU BREACH`; a measured K = 0 with P or V absent gives `HARD_VETO` on the measured capacity; an authority, context_fit or option-space veto, and a membrane invariant, govern an absent K; the HOLD on an absent K resolves once the measure is supplied; JSON `null` on the SDK path gives `HOLD`. 14 of its 15 cases fail on 5.7.6 as published.
 
+### About 5.7.6, recorded after its release (candidate text)
+
+The 5.7.6 entry below says that the reg-conformance harness had not been re-run on that code. It was run on the distribution on 2026-11-22, and the release controller decided, on `1881c90` only:
+
+- **Provenance: PASS.** The PyPI wheel and sdist are the 5.7.6 of `1881c90`: PEP 740 attestations verified offline (online Sigstore verification is a stated reserve), the 69 files of the wheel identical to the commit.
+- **REG qualification: HOLD.** With the released REG v0.7.0 harness and its TENIR-Gov port, exit code 1: CT-R4-001 and CT-R4-002 find no admission, because 5.7.6 holds every FLAG when no condition is declared. With a port that declares a FLAG condition and acknowledges it at dispatch, which is part of no REG revision, exit code 2 (INCOMPLETE). That is not a PASS.
+- **Priority of HARD_VETO: PASS on the cases examined.** No veto was masked as a HOLD.
+- **Rule of 20 November on K: open deviation.** 5 of the 49 cases judged give HARD_VETO for an absent P, V or K where the rule gives HOLD. This is what the change above addresses.
+- **General production: HOLD, maintained.**
+- **Tests on the distribution: 1456 of 1457.** The 1457 tests of the release workflow ran on the tagged checkout. From the sdist, `tests/test_guide_examples.py` fails because the sdist does not ship `docs/agentic-governance-guide.md`.
+
+5.7.6 stays what its entry says: a technical single-host release with bounded guarantees, not REG-certified. The PyPI and GitHub releases stay published; no withdrawal and no emergency fix follow from these results.
+
 ## [5.7.6] — 2026-11-20 — Single-host pilot line: the three 5.7.5 trust boundaries closed, #141 fixed
 
 Second release of the 5.7.5 single-host pilot line. 5.7.5 was merged on `main` (`42513bf`) and held there by its release decision: three of the limits its own "Scope, known limits and trust boundaries" states were judged blocking for a pilot (a proof of non-execution asserted by its caller, FLAG conditions declared but not enforced, no re-validation of the mandate before dispatch), and #141 held its qualification. No v5.7.5 tag and no PyPI publication were made; its entry below stays as the record of that unpublished candidate. 5.7.6 closes those four points on the same code line, with no other change of scope. FM-20 stays Open and multi-host stays disabled; remediation target 5.8.0, as announced in 5.7.0.
