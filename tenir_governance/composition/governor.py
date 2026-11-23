@@ -2156,6 +2156,12 @@ class DualKernelGovernor:
     ) -> dict[str, Any]:
         """Claim the dispatch slot (RESERVED → DISPATCHING) for one operation.
 
+        Since the 5.7.7 candidate the full verification of the decision ledger
+        runs here, under the quarantine gate, immediately before the claim
+        (``CompositionPolicy.ledger_full_verification_at_dispatch``): a ledger
+        that does not verify claims nothing, whatever the caller
+        (``dispatch_and_execute``, a direct call, the SDK client).
+
         Since 5.7.6 two checks run before the claim, on the default policy:
 
         - a FLAG-admitted operation dispatches only once every condition the
@@ -2232,6 +2238,20 @@ class DualKernelGovernor:
         # slow network I/O must not prevent emergency quarantine activation.
         with self.membrane.state._quarantine_lock:
             with self.registry.quarantine_guard():
+                # Full verification of the ledger at the effect boundary
+                # (author's decisions of 2026-11-23, 11:22 and 14:54 UTC):
+                # the per-decision check is incremental (verify_new_entries);
+                # before the DISPATCHING claim, the last step before any
+                # effect, every entry and every link is re-verified from
+                # GENESIS, under the gate, so nothing can change the ledger
+                # between the verification and the claim. Every path to a
+                # claim passes here: dispatch_and_execute, a direct dispatch()
+                # call, the SDK client. Fail-closed: a ledger that does not
+                # verify claims nothing. Linear in the ledger, once per
+                # dispatch, never per HOLD (declared cost).
+                integrity_refusal = self._refuse_on_ledger_integrity(idempotency_key)
+                if integrity_refusal is not None:
+                    return integrity_refusal
                 result = self._dispatch_under_quarantine_lock(
                     idempotency_key, resource_id, amount, payload=actual_payload,
                 )
@@ -2280,6 +2300,29 @@ class DualKernelGovernor:
             with self._active_dispatches_lock:
                 self._active_dispatches.discard(idempotency_key)
         return result
+
+    def _refuse_on_ledger_integrity(self, idempotency_key: str) -> dict[str, Any] | None:
+        """Refusal dict when the policy asks for a full ledger verification before
+        a claim and the ledger does not verify; None otherwise.
+
+        The refusal is written to the ledger (kernel ``api``, HARD_VETO) so the
+        audit trail says why nothing was claimed. Declared limit: that entry is
+        appended to a chain already known not to verify, so the chain itself
+        cannot prove it; it is readable and timestamped, not chain-proven. The
+        operation stays in its state (RESERVED): no claim, no effect.
+        """
+        if not self.policy.ledger_full_verification_at_dispatch or self.ledger.verify_chain():
+            return None
+        record = self.registry.get(idempotency_key)
+        reason = ("LEDGER_INTEGRITY_FAILED: the hash chain of the decision ledger does not "
+                  "verify; no dispatch (fail-closed). Audit the ledger (verify_ledger()) "
+                  "before any further effect.")
+        self.ledger.append(kernel="api", decision=Decision.HARD_VETO.value, rationale=reason,
+                           passage_id=record.passage_id if record else "",
+                           idempotency_key=idempotency_key)
+        return {"dispatched": False, "ledger_integrity_failed": True, "reason": reason,
+                "audit_entry_chain_proven": False,
+                "operation_state": record.state.value if record else None}
 
     def _dispatch_under_quarantine_lock(
         self,
@@ -2613,24 +2656,10 @@ class DualKernelGovernor:
         If no provider is configured, falls back to the manual dispatch()
         method (state transition only, no external call).
         """
-        # Full verification of the ledger at the effect boundary (author's
-        # decision of 2026-11-23, 11:22 UTC): the per-decision check is
-        # incremental (verify_new_entries); before any effect, every entry and
-        # every link is re-verified from GENESIS, so an alteration inside the
-        # already verified prefix (the incremental check's declared limit) is
-        # caught before the only step that has an external effect. Fail-closed:
-        # a ledger that does not verify dispatches nothing. Linear in the size
-        # of the ledger, once per dispatch, never per HOLD (declared cost).
-        if self.policy.ledger_full_verification_at_dispatch and not self.ledger.verify_chain():
-            record = self.registry.get(idempotency_key)
-            reason = ("LEDGER_INTEGRITY_FAILED: the hash chain of the decision ledger does not "
-                      "verify; no dispatch (fail-closed). Audit the ledger (verify_ledger()) "
-                      "before any further effect.")
-            self.ledger.append(kernel="api", decision=Decision.HARD_VETO.value, rationale=reason,
-                               passage_id=record.passage_id if record else "",
-                               idempotency_key=idempotency_key)
-            return {"dispatched": False, "ledger_integrity_failed": True, "reason": reason,
-                    "operation_state": record.state.value if record else None}
+        # The full verification of the ledger (R13) runs inside dispatch(),
+        # under the quarantine gate, immediately before the DISPATCHING claim:
+        # every path to a claim goes through it (this method, a direct
+        # dispatch() call, the SDK client). See _refuse_on_ledger_integrity.
 
         # Freeze the exact JSON payload before either verification or provider
         # use so another thread cannot mutate the caller's mapping between the

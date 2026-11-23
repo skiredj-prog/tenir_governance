@@ -203,3 +203,53 @@ def test_an_intact_ledger_dispatches_and_the_check_can_be_left_to_the_caller():
 def test_policy_flag_must_be_a_bool():
     with pytest.raises(ValueError):
         CompositionPolicy(ledger_full_verification_at_dispatch="yes").validate()
+
+
+def test_a_direct_dispatch_call_also_refuses_on_a_ledger_that_does_not_verify():
+    """Author's decision of 2026-11-23, 14:54 UTC (option A, after the human
+    review of 14:42): the full verification lives in dispatch(), under the
+    quarantine gate, right before the DISPATCHING claim. A caller that skips
+    dispatch_and_execute and claims directly is covered too."""
+    gov, provider = _dispatching_governor()
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(p, **M_OK, payload={"action_type": "payment"}, resource_id="budget", amount=10.0)
+    gov.ledger.entries[0].rationale = "rewritten"
+    d = gov.dispatch(p.idempotency_key, "budget", 10.0, payload={"action_type": "payment"},
+                     flag_conditions_met=ACK)
+    assert d["dispatched"] is False and d.get("ledger_integrity_failed") is True
+    assert d["audit_entry_chain_proven"] is False     # declared: the audit entry extends a broken chain
+    assert gov.registry.get(p.idempotency_key).state.value == "reserved", "no claim was taken"
+    assert gov.ledger.entries[-1].kernel == "api" and gov.ledger.entries[-1].decision == "HARD_VETO"
+    assert gov.ledger.verify_chain() is False          # still broken: the refusal does not repair anything
+
+
+def test_the_sdk_client_dispatch_is_covered_by_the_full_verification():
+    """The SDK client is the deployment surface; its dispatch() goes through
+    the governor's dispatch() and therefore through the verification."""
+    import warnings
+    from tenir_governance.objects import Resource
+    from tenir_governance.sdk import DualKernelCompositionClient
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        client = DualKernelCompositionClient(policy=CompositionPolicy(
+            flag_conditions=("ops supervision",),
+            hold_tau_k_seconds=3600.0, hold_tau_k_source="test fixture: one hour, not an SLA"))
+    client.register_agent(Agent(agent_id="alice", authority_score=0.9))
+    client.register_resource(Resource(resource_id="budget", capacity=100.0))
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    r = client.adjudicate(p, **M_OK, resource_id="budget", amount=10.0)
+    assert r["composed_decision"] in ("PASS", "FLAG")
+    client.governor.ledger.entries[0].rationale = "rewritten"
+    d = client.dispatch(p.idempotency_key, "budget", 10.0, flag_conditions_met=ACK)
+    assert d["dispatched"] is False and d.get("ledger_integrity_failed") is True
+    assert client.governor.registry.get(p.idempotency_key).state.value == "reserved"
+
+
+def test_an_intact_ledger_lets_a_direct_dispatch_claim():
+    gov, _ = _dispatching_governor()
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(p, **M_OK, payload={"action_type": "payment"}, resource_id="budget", amount=10.0)
+    d = gov.dispatch(p.idempotency_key, "budget", 10.0, payload={"action_type": "payment"},
+                     flag_conditions_met=ACK)
+    assert d["dispatched"] is True
+    assert gov.ledger.verify_chain() is True
