@@ -97,7 +97,7 @@ def test_placeholders_never_reach_a_facet_on_the_reference_geometry():
 
 # --- R7: option_space is unknown like every other measure --------------------
 
-@pytest.mark.parametrize("value", [None, float("nan"), 1.5])
+@pytest.mark.parametrize("value", [None, float("nan")])
 def test_unknown_option_space_takes_the_insufficient_evidence_path(value):
     adapter = ScoringKernelAdapter(TenirKernel())
     r = adapter.adjudicate(**{**M, "option_space": value})

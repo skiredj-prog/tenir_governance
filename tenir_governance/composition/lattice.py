@@ -150,11 +150,38 @@ class LedgerEntry:
 
 
 class HashChainedLedger:
-    """Tamper-evident hash-chained ledger for governance decisions."""
+    """Tamper-evident hash-chained ledger for governance decisions.
+
+    Two verifications (candidate 5.7.7, author's decision of 2026-11-23,
+    verify_chain option A):
+
+    * ``verify_chain()`` is the full verification: every entry is re-hashed
+      and every link is checked, from GENESIS to the last entry. O(N). It
+      detects any alteration of any entry, old or new. Call it on demand (an
+      audit, a manifest check, the end of a run).
+    * ``verify_new_entries()`` is the incremental verification: it re-hashes
+      only the entries appended since the previous verification, checks that
+      they link to each other and to the verified prefix, and checks that the
+      anchor (the last verified entry) still carries the hash it had. O(k)
+      for k new entries, so constant per decision. It is what a decision
+      result reports as ``ledger_valid``. Declared limit: an alteration of an
+      entry inside the already verified prefix, other than its anchor, is not
+      seen by the incremental check until the next full verification, which
+      is why that one exists.
+
+    Up to 5.7.6 every decision ran the full verification, which made the cost
+    of a decision grow with the size of the ledger (measured on this
+    candidate, 2026-11-23: 97 % of the time of ``adjudicate`` at 1000 held
+    operations).
+    """
 
     def __init__(self):
         self._entries: list[LedgerEntry] = []
         self._last_hash = "GENESIS"
+        # Verified prefix: number of entries verified so far, and the chain
+        # hash of the last of them (GENESIS when none).
+        self._verified_count = 0
+        self._verified_hash = "GENESIS"
 
     @property
     def entries(self) -> list[LedgerEntry]:
@@ -163,6 +190,27 @@ class HashChainedLedger:
     @property
     def entry_count(self) -> int:
         return len(self._entries)
+
+    @property
+    def verified_count(self) -> int:
+        """Entries covered by the last verification (full or incremental)."""
+        return self._verified_count
+
+    @staticmethod
+    def _entry_hash(entry: LedgerEntry) -> str:
+        payload = json.dumps({
+            "kernel": entry.kernel,
+            "decision": entry.decision,
+            "rationale": entry.rationale,
+            "passage_id": entry.passage_id,
+            "idempotency_key": entry.idempotency_key,
+            "previous_hash": entry.previous_hash,
+            "timestamp": entry.timestamp,
+            "scoring_result": entry.scoring_result,
+            "membrane_result": entry.membrane_result,
+            "composed_decision": entry.composed_decision,
+        }, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(payload.encode()).hexdigest()
 
     def append(
         self,
@@ -186,45 +234,44 @@ class HashChainedLedger:
             membrane_result=membrane_result or {},
             composed_decision=composed_decision,
         )
-        payload = json.dumps({
-            "kernel": entry.kernel,
-            "decision": entry.decision,
-            "rationale": entry.rationale,
-            "passage_id": entry.passage_id,
-            "idempotency_key": entry.idempotency_key,
-            "previous_hash": entry.previous_hash,
-            "timestamp": entry.timestamp,
-            "scoring_result": entry.scoring_result,
-            "membrane_result": entry.membrane_result,
-            "composed_decision": entry.composed_decision,
-        }, sort_keys=True, separators=(",", ":"), default=str)
-        entry.chain_hash = hashlib.sha256(payload.encode()).hexdigest()
+        entry.chain_hash = self._entry_hash(entry)
         self._last_hash = entry.chain_hash
         self._entries.append(entry)
         return entry.chain_hash
 
-    def verify_chain(self) -> bool:
-        prev = "GENESIS"
-        for entry in self._entries:
+    def _verify_range(self, start: int, prev: str) -> bool:
+        """Check links and hashes of entries[start:] against ``prev``."""
+        for entry in self._entries[start:]:
             if entry.previous_hash != prev:
                 return False
-            payload = json.dumps({
-                "kernel": entry.kernel,
-                "decision": entry.decision,
-                "rationale": entry.rationale,
-                "passage_id": entry.passage_id,
-                "idempotency_key": entry.idempotency_key,
-                "previous_hash": entry.previous_hash,
-                "timestamp": entry.timestamp,
-                "scoring_result": entry.scoring_result,
-                "membrane_result": entry.membrane_result,
-                "composed_decision": entry.composed_decision,
-            }, sort_keys=True, separators=(",", ":"), default=str)
-            computed = hashlib.sha256(payload.encode()).hexdigest()
-            if entry.chain_hash != computed:
+            if entry.chain_hash != self._entry_hash(entry):
                 return False
             prev = entry.chain_hash
         return True
+
+    def verify_chain(self) -> bool:
+        """Full verification, from GENESIS: every entry, every link. O(N)."""
+        ok = self._verify_range(0, "GENESIS")
+        if ok:
+            self._verified_count = len(self._entries)
+            self._verified_hash = self._entries[-1].chain_hash if self._entries else "GENESIS"
+        return ok
+
+    def verify_new_entries(self) -> bool:
+        """Incremental verification of the entries appended since the last
+        verification, anchored on the verified prefix. O(k)."""
+        count = self._verified_count
+        if len(self._entries) < count:
+            return False  # the verified prefix has been truncated
+        if count:
+            anchor = self._entries[count - 1]
+            if anchor.chain_hash != self._verified_hash or anchor.chain_hash != self._entry_hash(anchor):
+                return False  # the anchor was altered or replaced
+        ok = self._verify_range(count, self._verified_hash)
+        if ok:
+            self._verified_count = len(self._entries)
+            self._verified_hash = self._entries[-1].chain_hash if self._entries else "GENESIS"
+        return ok
 
     def find_by_idempotency_key(self, idempotency_key: str) -> list[LedgerEntry]:
         """Find all ledger entries for a given idempotency key."""

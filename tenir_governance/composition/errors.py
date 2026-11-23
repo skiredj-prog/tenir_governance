@@ -15,9 +15,11 @@ as ``composed_decision = "HARD_VETO"`` with ``operation_state =
 What is malformed: an action payload that is not canonical JSON, an execution
 amount that is not a finite non-negative number (or not strictly positive when
 a resource is named), and, under Profile S, a missing or ill-formed payload
-digest or operation identity. What is *not* malformed, and stays a governance
-decision: a request whose measures are absent or invalid (``HOLD`` for
-insufficient evidence, rule A), a payload that does not match the authorized
+digest or operation identity, and a measure whose finite value lies outside
+the scoring kernel's declared domain (P8, 23 November 2026; draft RFC-2 v0.2
+§1.4). What is *not* malformed, and stays a governance decision: a request
+whose measures are absent or non-finite (``HOLD`` for insufficient evidence,
+rule A), a payload that does not match the authorized
 one at dispatch (binding refusal), or any membrane invariant.
 """
 from __future__ import annotations

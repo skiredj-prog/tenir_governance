@@ -6,7 +6,8 @@ author's rule of 20 November 2026 (not ratified either):
   R2  K unknown, no other conclusive veto                -> HOLD
   R3  K > 0 valid, P or V unknown, no independent veto   -> HOLD
   R4  an independent conclusive veto, whatever K         -> HARD_VETO
-5.7.6 applied this to invalid values (NaN, inf, outside [0, 1], non-numbers)
+5.7.6 applied this to invalid values (NaN, inf, non-numbers; a finite value
+outside [0, 1] is rejected at entry since 23 Nov, P8)
 but not to an absent one (None, JSON null): an absent P, V or K was a hard gate,
 and an absent K was read as the placeholder 0.0, which named a TAU BREACH on a
 capacity nobody measured. Here an absent P, V or K is insufficient evidence:
@@ -70,7 +71,7 @@ def test_an_absent_capacity_is_never_read_as_zero():
 def test_absent_and_invalid_are_both_named():
     r = _adapter().adjudicate(**{**BEST, "irreversibility_materiality": 0.0, "pressure": float("nan"), "capacity": None})
     assert r["decision"] == Decision.HOLD.value
-    assert ("INSUFFICIENT_EVIDENCE: invalid measure(s) (non-finite or outside [0, 1]) pressure; "
+    assert ("INSUFFICIENT_EVIDENCE: invalid measure(s) (non-finite or not a number) pressure; "
             "absent measure(s) capacity; S not computed.") in r["rationale"]
     assert r["unmeasured_axes"] == ["pressure"]
 

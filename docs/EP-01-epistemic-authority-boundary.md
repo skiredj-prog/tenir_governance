@@ -13,8 +13,8 @@ precedence.
 
 Missing inputs (candidate 5.7.7, rule A of 23 November 2026, pending
 ratification of the amended RFC-2 v0.2): a missing input (`None`, JSON `null`)
-is unknown, exactly like an invalid one (NaN, ±inf, outside [0, 1], not a
-number). It is insufficient evidence: HOLD, never PASS or FLAG, unless a
+is unknown, exactly like an invalid one (NaN, ±inf, not a number). It is
+insufficient evidence: HOLD, never PASS or FLAG, unless a
 conclusive veto governs, that is one the valid measures establish whatever
 value the unknown ones would take (an S computed from measured P, V and C at or
 below a floor, a hard facet such as the authority floor on a measured value,
@@ -22,6 +22,13 @@ option space at its block floor, a membrane invariant). No veto and no reason
 rest on a placeholder. A measured value of zero is not missing: `authority=0.0`
 meets the authority floor and vetoes. Up to 5.7.6, missing inputs produced
 hard gates (HARD_VETO, terminal for the attempt).
+
+A finite value outside the kernel's declared domain `[0, 1]` (`1.5`, `-0.1`)
+is neither a measure nor an unknown: it is a malformed request, refused
+explicitly at the API boundary as `INVALID_ARGUMENT` before any evaluation
+(author's decision of 23 November 2026, P8; draft RFC-2 v0.2 §1.4: the
+kernel declares its domain, the standard prescribes none). Nothing is held
+and no veto is drawn from it.
 
 ## Four documentary acceptance scenarios (not implemented)
 

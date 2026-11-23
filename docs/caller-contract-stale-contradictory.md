@@ -18,7 +18,9 @@ conclusive veto governs). There is no observation time, no source and no
 second reading.
 The runtime therefore cannot tell a STALE or a CONTRADICTORY measurement
 (RFC-2 v0.1 §2.5) from a current one. What it handles is UNKNOWN: a value that
-is not a finite number in [0, 1] (invalid), or `None` (absent).
+is not a finite number (invalid), or `None` (absent). A finite value outside
+the kernel's declared domain `[0, 1]` is refused at entry as `INVALID_ARGUMENT`
+(P8, 23 November 2026), it is not an unknown measure.
 
 Detecting STALE and CONTRADICTORY, and translating them before the call, is the
 caller's responsibility. TENIR-Gov makes no claim about STALE or CONTRADICTORY

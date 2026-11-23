@@ -103,6 +103,45 @@ class ScoringKernelAdapter:
     return shape so the governor and composition layer work unchanged.
     """
 
+    # The admissible domain this kernel declares for every measure it reads
+    # (draft RFC-2 v0.2 §1.4: the kernel declares its domain, the standard
+    # does not prescribe it). Closed interval; a finite value outside it is
+    # rejected explicitly (INVALID_ARGUMENT), it is never adjudicated.
+    MEASURE_DOMAIN: tuple[float, float] = (0.0, 1.0)
+    MEASURED_AXES: tuple[str, ...] = (
+        "pressure", "velocity", "capacity", "option_space", "authority",
+        "context_fit", "evidence_quality", "irreversibility_materiality",
+    )
+
+    @classmethod
+    def declared_domain(cls) -> dict[str, tuple[float, float]]:
+        """The declared admissible domain of each measured axis, by name."""
+        return {name: cls.MEASURE_DOMAIN for name in cls.MEASURED_AXES}
+
+    @classmethod
+    def out_of_domain(cls, named: dict[str, Any]) -> list[str]:
+        """Names of the measures whose value is a finite number outside the
+        declared domain. ``None`` (absent) and non-finite values (NaN, ±inf)
+        are not in this list: they are unknown measures, handled by rule A.
+        A boolean or a non-number is not a value either."""
+        low, high = cls.MEASURE_DOMAIN
+        return [
+            n for n, v in named.items()
+            if v is not None and not isinstance(v, bool) and isinstance(v, (int, float))
+            and math.isfinite(v) and not (low <= v <= high)
+        ]
+
+    @classmethod
+    def _out_of_domain_reason(cls, named: dict[str, Any], names: list[str]) -> str:
+        low, high = cls.MEASURE_DOMAIN
+        values = "; ".join(f"{n}={named[n]!r}" for n in names)
+        return (
+            f"Measure(s) outside the kernel's declared domain [{low:g}, {high:g}]: {values}. "
+            "Request refused explicitly; not a governance decision. The domain is "
+            "declared by the kernel (ScoringKernelAdapter.declared_domain()); an "
+            "unknown measure is passed as None or NaN, not as an out-of-domain value."
+        )
+
     def __init__(self, tenir_kernel, *, tau_floor: float = 0.42,
                  option_space_alert_floor: float = 0.35,
                  option_space_block_floor: float = 0.20,
@@ -241,24 +280,36 @@ class ScoringKernelAdapter:
         hard_reasons: list[str] = []
         soft_reasons: list[str] = []
 
+        named = {"pressure": pressure, "velocity": velocity, "capacity": capacity,
+                 "option_space": option_space, "authority": authority,
+                 "context_fit": context_fit, "evidence_quality": evidence_quality,
+                 "irreversibility_materiality": irreversibility_materiality}
+        # Declared domain (candidate 5.7.7, author's decision of 23 November
+        # 2026, P8 option A; draft RFC-2 v0.2 §1.4, not ratified): a finite
+        # value outside the domain this kernel declares for its measures is
+        # not a measure of that axis. It is rejected explicitly, before any
+        # evaluation, as INVALID_ARGUMENT, never closed by a decision. Between
+        # 19 and 23 November it was read as an unknown measure (HOLD), which
+        # closed the request by a disposition instead of refusing it.
+        out_of_domain = self.out_of_domain(named)
+        if out_of_domain:
+            raise InvalidArgumentError(
+                self._out_of_domain_reason(named, out_of_domain),
+                field=",".join(out_of_domain),
+            )
         # Decision 5: finiteness guard at the kernel's entry. A non-finite
         # measure (NaN, ±inf, a non-number) is insufficient evidence, never
         # PASS: it must not reach a comparison, where NaN compares false and
         # admits. It is reported as unmeasured, and every conclusive veto the
         # other inputs still support is evaluated and governs (RFC-0 §4).
-        # A finite value outside the normalized range [0, 1] is just as
-        # invalid: the kernel rejects it, and a raise would end in the
-        # fail-closed HOLD that masks a veto. It is handled the same way.
+        # NaN is the caller's own way of saying "unknown" (an unmeasured axis
+        # has no value, in the domain or out of it); it is not a value.
         def _finite(v):
             if v is None:
                 return True  # absence is handled below as a missing measure
             if isinstance(v, bool) or not isinstance(v, (int, float)):
                 return False
-            return math.isfinite(v) and 0.0 <= v <= 1.0
-        named = {"pressure": pressure, "velocity": velocity, "capacity": capacity,
-                 "option_space": option_space, "authority": authority,
-                 "context_fit": context_fit, "evidence_quality": evidence_quality,
-                 "irreversibility_materiality": irreversibility_materiality}
+            return math.isfinite(v)
         non_finite = [n for n, v in named.items() if not _finite(v)]
         absent = [n for n, v in named.items() if v is None]
         # Rule A (candidate 5.7.7, author's decision of 23 November 2026,
@@ -452,7 +503,7 @@ class ScoringKernelAdapter:
         named_unknown = []
         if non_finite:
             named_unknown.append(
-                f"invalid measure(s) (non-finite or outside [0, 1]) {', '.join(non_finite)}")
+                f"invalid measure(s) (non-finite or not a number) {', '.join(non_finite)}")
         if absent:
             named_unknown.append(f"absent measure(s) {', '.join(absent)}")
         detail = "; ".join(named_unknown)
@@ -626,6 +677,18 @@ class DualKernelGovernor:
             )
         amount = normalized_amount
 
+        # P8 (author's decision of 2026-11-23, option A): a measure outside the
+        # kernel's declared domain is refused here, before registration, as
+        # INVALID_ARGUMENT (field = the measure). Nothing is registered or
+        # held; the ledger keeps the refusal under kernel "api".
+        self._refuse_out_of_domain(
+            dict(pressure=pressure, velocity=velocity, capacity=capacity,
+                 option_space=option_space, authority=authority,
+                 context_fit=context_fit, evidence_quality=evidence_quality,
+                 irreversibility_materiality=irreversibility_materiality),
+            passage=passage, idem_key=idem_key,
+        )
+
         # Profile S binds dispatch permission to the complete immutable
         # operation.  Existing deployments remain unchanged because the gate
         # is disabled by default.
@@ -689,7 +752,7 @@ class DualKernelGovernor:
                 "execution_status": existing.state.value,
                 "operation_state": existing.state.value,
                 "ledger_entries": self.ledger.entry_count,
-                "ledger_valid": self.ledger.verify_chain(),
+                "ledger_valid": self.ledger.verify_new_entries(),
             }
 
         # 1. Scoring kernel — fail-closed
@@ -973,7 +1036,7 @@ class DualKernelGovernor:
                     # reservation is taken at re-adjudication.
                     "budget_reserved": bool(final_record and final_record.budget_reserved),
                     "ledger_entries": self.ledger.entry_count,
-                    "ledger_valid": self.ledger.verify_chain(),
+                    "ledger_valid": self.ledger.verify_new_entries(),
                     **self._flag_fields(composed_decision, scoring_result),
                 }
 
@@ -993,6 +1056,31 @@ class DualKernelGovernor:
                 response["operation_state"] = current.state.value
                 response["budget_reserved"] = bool(current.budget_reserved)
         return response
+
+    def _refuse_out_of_domain(self, named: dict[str, Any], *, passage, idem_key: str) -> None:
+        """Refuse a measure outside the scoring kernel's declared domain (P8).
+
+        The domain is the kernel's own declaration (``declared_domain()``);
+        the governor prescribes none. A scoring adapter without a declared
+        domain (no ``out_of_domain``) is not checked here: its own entry
+        decides. The refusal is INVALID_ARGUMENT, never a decision.
+        """
+        probe = getattr(self.scoring, "out_of_domain", None)
+        if probe is None:
+            return
+        names = probe(named)
+        if names:
+            self._refuse_malformed(
+                self.scoring._out_of_domain_reason(named, names),
+                field=",".join(names), passage=passage, idem_key=idem_key,
+            )
+
+    def verify_ledger(self) -> bool:
+        """Full verification of the hash chain, on demand: every entry is
+        re-hashed and every link checked (O(N)). ``ledger_valid`` in a decision
+        result is the incremental check of the links added since the last
+        verification; call this one for an audit."""
+        return self.ledger.verify_chain()
 
     def _refuse_malformed(self, reason: str, *, field: str, passage, idem_key: str) -> None:
         """Refuse a structurally malformed request at the API boundary (R8).
@@ -3638,6 +3726,16 @@ class DualKernelGovernor:
             }
         amount = supplied_amount
 
+        # P8: an out-of-domain measure is a malformed re-adjudication, refused
+        # at entry (INVALID_ARGUMENT); the HOLD is untouched.
+        self._refuse_out_of_domain(
+            dict(pressure=pressure, velocity=velocity, capacity=capacity,
+                 option_space=option_space, authority=authority,
+                 context_fit=context_fit, evidence_quality=evidence_quality,
+                 irreversibility_materiality=irreversibility_materiality),
+            passage=passage, idem_key=idempotency_key,
+        )
+
         if passage is None:
             # A HOLD may only be resolved after fresh adjudication. Never let
             # omission of the passage bypass both kernels and the decision lattice.
@@ -4091,7 +4189,7 @@ class DualKernelGovernor:
                 self.registry.get(idem_key) and self.registry.get(idem_key).budget_reserved
             ),
             "ledger_entries": self.ledger.entry_count,
-            "ledger_valid": self.ledger.verify_chain(),
+            "ledger_valid": self.ledger.verify_new_entries(),
             **self._flag_fields(composed_decision, scoring_result),
             "hold_resolved": hold_resolved,
         }
