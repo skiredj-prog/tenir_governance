@@ -41,6 +41,11 @@ PAYLOAD = {"hotel": "synthetic-hotel", "nights": 1, "unit": "demo-unit"}
 # synthetic condition and acknowledges it explicitly; neither is an assessment.
 FLAG_CONDITIONS = ("synthetic walkthrough: an operator reviews the booking before it is sent",)
 FLAG_CONDITIONS_MET = {FLAG_CONDITIONS[0]: "synthetic acknowledgement recorded by the walkthrough itself"}
+# tau_K is declared because no governed deployment runs without one; this value
+# is a walkthrough fixture, derived from no SLA. A real deployment derives it
+# from the time its operators really take to resolve a HOLD (RFC-5 §1.1).
+TAU_K_SECONDS = 900.0
+TAU_K_SOURCE = "synthetic walkthrough fixture: 15 min, not derived from an SLA"
 FILES = ("evidence.json", "registry.json")
 
 
@@ -128,7 +133,8 @@ def run_demo(output: Path, *, receipt_available: bool = True) -> dict[str, Any]:
     governor = DualKernelGovernor(
         ScoringKernelAdapter(TenirKernel()), TransitionMembrane(state),
         registry=registry, provider=provider,
-        policy=CompositionPolicy(flag_conditions=FLAG_CONDITIONS),
+        policy=CompositionPolicy(flag_conditions=FLAG_CONDITIONS,
+                                 hold_tau_k_seconds=TAU_K_SECONDS, hold_tau_k_source=TAU_K_SOURCE),
     )
     passage = Passage(
         passage_id="synthetic-passage-001", idempotency_key=OPERATION_ID,

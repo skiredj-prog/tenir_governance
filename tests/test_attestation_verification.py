@@ -30,7 +30,7 @@ from tenir_kernel.kernel import TenirKernel
 
 CONDITIONS = ("ops supervision",)
 ACK = {"ops supervision": "ops rota 2026-11-20"}
-POLICY = CompositionPolicy(flag_conditions=CONDITIONS)
+POLICY = CompositionPolicy(flag_conditions=CONDITIONS, hold_tau_k_seconds=3600.0, hold_tau_k_source="test fixture: one hour, not an SLA")
 M = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0, authority=0.9, context_fit=0.9,
          evidence_quality=0.9, option_space=0.9)
 KEYS = {"ops": b"ops-reconciliation-key-0123456789", "audit": b"audit-key-abcdefghijklmnopqrstuvwxyz"}

@@ -194,7 +194,7 @@ def test_acknowledgement_survives_a_restart(tmp_path):
 def test_sdk_passes_the_acknowledgement_through():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        client = DualKernelCompositionClient(policy=CompositionPolicy(flag_conditions=CONDITIONS))
+        client = DualKernelCompositionClient(policy=CompositionPolicy(flag_conditions=CONDITIONS, hold_tau_k_seconds=3600.0, hold_tau_k_source="test fixture: one hour, not an SLA"))
     client.register_agent(Agent(agent_id="alice", authority_score=0.9))
     client.register_resource(Resource(resource_id="budget", capacity=100.0))
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)

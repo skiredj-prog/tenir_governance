@@ -30,10 +30,17 @@ from tenir_governance.operations import HmacAttestationVerifier
 #  - les conditions sous lesquelles un FLAG autorise (RFC-0 §4) ; sans elles,
 #    un FLAG est tenu (HOLD), pas admis ;
 #  - la clé avec laquelle le composant de réconciliation signe ses attestations
-#    de non-exécution ; sans vérificateur, aucune attestation d'appelant ne vaut preuve.
+#    de non-exécution ; sans vérificateur, aucune attestation d'appelant ne vaut preuve ;
+#  - τ_K : le temps réel qu'un humain de votre organisation met à résoudre un HOLD,
+#    mesuré sur vos SLA et vos essais terrain, jamais inventé par le runtime.
+#    Aucun déploiement sans τ_K déclaré : le client refuse de se construire sans lui.
 OPS_SECRET = b"ops-reconciliation-key-0123456789"   # 16 octets minimum, tenu secret
 client = DualKernelCompositionClient(
-    policy=CompositionPolicy(flag_conditions=("revue humaine de l'effet sous 24 h",)),
+    policy=CompositionPolicy(
+        flag_conditions=("revue humaine de l'effet sous 24 h",),
+        hold_tau_k_seconds=24 * 3600,
+        hold_tau_k_source="SLA de revue humaine : un HOLD est traité sous 24 h (exemple ; mesurez le vôtre)",
+    ),
     attestation_verifier=HmacAttestationVerifier({"ops": OPS_SECRET}),
 )
 
@@ -65,7 +72,7 @@ assert result["composed_decision"] == "FLAG"
 assert result["flag_conditions"] == ["revue humaine de l'effet sous 24 h"]
 ```
 
-Depuis 5.7.5, aucun axe non mesuré ne reçoit de valeur favorable. Un appel sans `authority`, `context_fit` ou `evidence_quality` (ou sans `pressure`, `velocity`, `capacity`) n'est pas admis. Depuis 5.7.7 (candidat non publié ; règle A du 23 novembre 2026, en attente de ratification), il est tenu (`HOLD`, réservation conservée), comme une mesure invalide, au lieu d'être refusé (`HARD_VETO` en 5.7.5 et 5.7.6) : l'absence d'une mesure n'est ni la preuve d'une violation ni celle d'une admissibilité. Un veto concluant que les mesures valides établissent seules garde la priorité (par exemple `authority=0.0`, qui est une mesure). Sans `τ_K` déclaré par la politique, ce HOLD et sa réservation restent ouverts jusqu'à leur résolution :
+Depuis 5.7.5, aucun axe non mesuré ne reçoit de valeur favorable. Un appel sans `authority`, `context_fit` ou `evidence_quality` (ou sans `pressure`, `velocity`, `capacity`) n'est pas admis. Depuis 5.7.7 (candidat non publié ; règle A du 23 novembre 2026, en attente de ratification), il est tenu (`HOLD`, réservation conservée), comme une mesure invalide, au lieu d'être refusé (`HARD_VETO` en 5.7.5 et 5.7.6) : l'absence d'une mesure n'est ni la preuve d'une violation ni celle d'une admissibilité. Un veto concluant que les mesures valides établissent seules garde la priorité (par exemple `authority=0.0`, qui est une mesure). Un tel HOLD est borné par le `τ_K` que la politique déclare (obligatoire pour tout déploiement via le client SDK depuis le candidat 5.7.7 ; voir « τ_K : aucun déploiement sans lui » ci-dessous) ; avec le gouverneur de bibliothèque construit sans `τ_K`, il reste ouvert jusqu'à sa résolution, et il n'immobilise aucun budget :
 
 ```python
 p_missing = Passage(agent_id="alice", action_type="payment", amount=10.0)
@@ -93,7 +100,9 @@ Un FLAG n'autorise que sous des conditions explicites (RFC-0 §4). Le déploieme
 
 ```python
 from tenir_governance.sdk import DualKernelCompositionClient as _Client
-client_default = _Client()  # politique par défaut : flag_conditions=()
+# Aucune condition de FLAG déclarée (flag_conditions=() par défaut) ; τ_K, lui, est obligatoire.
+client_default = _Client(policy=CompositionPolicy(hold_tau_k_seconds=24 * 3600,
+                                                  hold_tau_k_source="SLA de revue humaine : 24 h (exemple)"))
 client_default.register_agent(Agent(agent_id="alice", authority_score=0.9))
 client_default.register_resource(Resource(resource_id="budget", capacity=100.0))
 r = client_default.adjudicate(Passage(agent_id="alice", action_type="payment", amount=10.0),
@@ -103,6 +112,13 @@ r = client_default.adjudicate(Passage(agent_id="alice", action_type="payment", a
 assert r["scoring_decision"] == "FLAG" and r["composed_decision"] == "HOLD"
 assert "FLAG states no condition" in r["composed_rationale"]
 ```
+### τ_K : aucun déploiement sans lui
+
+**`τ_K` n'est pas un paramètre technique. C'est la mesure opérationnelle du temps réel qu'il faut à un humain de votre organisation pour résoudre un HOLD.** Il se dérive de vos SLA existants et de vos essais terrain (astreinte, délai de revue humaine déjà appliqué à cette classe d'actions, fenêtres réglementaires ; RFC-0 §6, RFC-5 §1.1) ; le runtime ne l'invente jamais et n'en propose aucun défaut. Si votre SLA dit qu'un opérateur traite un HOLD en 4 h, alors `hold_tau_k_seconds=4 * 3600`, et `hold_tau_k_source` dit d'où vient ce chiffre, pour l'auditeur. C'est une décision de gouvernance, prise **avant** le déploiement.
+
+Ce que `τ_K` change : un HOLD n'est plus un état sans fin. À l'échéance, l'opération échoue fermée (`FAILED`, `CONFIRMED_NONEXECUTION`, réservation libérée), où qu'elle tente d'avancer. Sans `τ_K`, chaque HOLD non résolu reste au registre tant que le déploiement vit, et `expire_hold` répond « No τ_K bound set » (mesuré le 23 novembre 2026 : 1000 HOLD jamais expirables, aucune purge). C'est pourquoi, depuis le candidat 5.7.7, **`DualKernelCompositionClient` refuse de se construire si la politique ne déclare pas `hold_tau_k_seconds` et `hold_tau_k_source`** (décision de l'auteur du runtime du 23 novembre 2026, option C de R11). Le gouverneur de bibliothèque (`DualKernelGovernor`) accepte encore une politique sans `τ_K`, pour les tests et les instruments ; ce n'est pas un chemin de déploiement.
+
+
 
 ---
 
@@ -221,7 +237,9 @@ Entre l'admission et le dispatch, le mandat peut changer : agent retiré, délé
 
 ```python
 client_rv = DualKernelCompositionClient(
-    policy=CompositionPolicy(flag_conditions=("revue humaine de l'effet sous 24 h",)))
+    policy=CompositionPolicy(flag_conditions=("revue humaine de l'effet sous 24 h",),
+                             hold_tau_k_seconds=24 * 3600,
+                             hold_tau_k_source="SLA de revue humaine : 24 h (exemple)"))
 client_rv.register_agent(Agent(agent_id="alice", authority_score=0.9))
 client_rv.register_resource(Resource(resource_id="budget", capacity=100.0))
 budget_rv = client_rv.governor.membrane.state.resources["budget"]
@@ -322,7 +340,9 @@ from tenir_governance.composition import CompositionPolicy
 # Seuil personnalisé à 50 %, client distinct : il faut enregistrer agent et budget
 client_50 = DualKernelCompositionClient(
     policy=CompositionPolicy(budget_escalation_threshold=0.50,
-                             flag_conditions=("revue humaine de l'effet sous 24 h",))
+                             flag_conditions=("revue humaine de l'effet sous 24 h",),
+                             hold_tau_k_seconds=24 * 3600,
+                             hold_tau_k_source="SLA de revue humaine : 24 h (exemple)")
 )
 client_50.register_agent(Agent(agent_id="alice", authority_score=0.9))
 client_50.register_resource(Resource(resource_id="budget", capacity=100.0))

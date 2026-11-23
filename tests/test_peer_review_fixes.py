@@ -25,7 +25,7 @@ from tenir_governance.operations.budget import InProcessBudgetCoordinator
 # their acknowledgement is required at dispatch. The test deployment declares one.
 TEST_FLAG_CONDITIONS = ("test supervision",)
 TEST_FLAG_ACK = {"test supervision": "acknowledged by the test"}
-TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS)
+TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS, hold_tau_k_seconds=3600.0, hold_tau_k_source="test fixture: one hour, not an SLA")
 
 
 

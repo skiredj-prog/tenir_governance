@@ -364,7 +364,7 @@ def test_malformed_request_is_rejected_at_entry_not_held(malformed):
 
 def test_json_null_authority_on_the_sdk_path_holds():
     """Decision 6: null on the wire is an absent measure, not a zero."""
-    client = DualKernelCompositionClient(policy=CompositionPolicy(flag_conditions=CONDITIONS))
+    client = DualKernelCompositionClient(policy=CompositionPolicy(flag_conditions=CONDITIONS, hold_tau_k_seconds=3600.0, hold_tau_k_source="test fixture: one hour, not an SLA"))
     client.register_resource(Resource(resource_id="budget", capacity=100.0))
     measured = json.loads(json.dumps({**M, "authority": None}))
     r = client.adjudicate(Passage(agent_id="a", action_type="x"), **measured)
