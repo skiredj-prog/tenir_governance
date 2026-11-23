@@ -175,7 +175,7 @@ class HashChainedLedger:
     candidate, 2026-11-23: 97 % of the time of ``adjudicate`` at 1000 held
     operations).
 
-    Concurrency (candidate 5.7.7, project owner's review of 2026-11-23, 17:37
+    Concurrency (candidate 5.7.7, internal review of 2026-11-23, 17:37
     UTC): ``append`` and both verifications run under one re-entrant lock.
     Up to 5.7.6 and in the earlier states of this candidate ``append`` read
     and wrote ``_last_hash`` without a lock, so two threads appending at once
@@ -206,9 +206,34 @@ class HashChainedLedger:
     # an unpickled ledger gets a fresh one (a snapshot of the ledger is an
     # audit object; the REG harness takes one to check the manifest).
     def __getstate__(self):
-        state = self.__dict__.copy()
-        state.pop("_lock", None)
-        return state
+        """The state of this ledger at one instant, for copy and pickle.
+
+        Taken under the lock, with ``_entries`` replaced by a copy of the list
+        (decision of 2026-11-23, 21:25 UTC, option A, on finding N2 of the
+        internal review of 20:03). ``deepcopy`` and ``pickle`` copy the values
+        AFTER this method returns: without the snapshot they walked the live
+        list while it grew, so the state was taken across two instants, the
+        list running ahead of ``_last_hash``. Such a copy verified, but its
+        ``_last_hash`` designated an earlier link, still present in the copy;
+        its first append chained onto that link and broke the copy's own
+        chain, which the next ``verify_chain()`` refused (measured: 5 runs out
+        of 5). Under writes that never stopped the copy never finished
+        (copier starvation, not finished at 280 s).
+
+        The lock is held for the shallow copy of the list only, never for the
+        caller's deep copy: a writer waits for a copy of pointers (about a
+        millisecond at 100 000 entries, measured; the observed maxima, 258.7 ms
+        and 792.6 ms, are orders of magnitude and not a bound), not for the
+        caller. Declared limit:
+        the snapshot freezes the list, not the objects in it, so an entry that
+        another thread alters DURING the caller's deep copy is copied as
+        altered.
+        """
+        with self._lock:
+            state = self.__dict__.copy()
+            state["_entries"] = list(self._entries)
+            state.pop("_lock", None)
+            return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)

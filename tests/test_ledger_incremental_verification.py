@@ -257,7 +257,7 @@ def test_an_intact_ledger_lets_a_direct_dispatch_claim():
     assert gov.ledger.verify_chain() is True
 
 
-# -- project owner's review of 2026-11-23, 17:37 UTC: concurrency, incident, order --
+# -- internal review of 2026-11-23, 17:37 UTC: concurrency, incident, order --
 
 def test_concurrent_appends_do_not_fork_the_chain():
     """Eight threads adjudicating on one governor: the chain still verifies and
@@ -329,7 +329,7 @@ def test_one_audit_entry_per_integrity_incident_and_the_incident_closes_on_a_ver
 
 
 def test_a_repaired_chain_closes_the_incident_at_the_claim_and_a_later_alteration_opens_a_new_one():
-    """Owner's decision of 2026-11-23, 21:25 UTC (option A), on finding N1 of his
+    """Decision of 2026-11-23, 21:25 UTC (option A), on finding N1 of the internal
     review of 20:03: before it, only verify_ledger() closed an incident, so after
     a repair a second, distinct alteration was refused without writing anything
     and one audit entry covered two alterations."""
@@ -376,6 +376,38 @@ def test_an_incident_still_closes_on_an_explicit_audit():
     assert gov.verify_ledger() is True and gov.ledger_integrity_incident is None
 
 
+def test_without_a_claim_or_an_audit_between_two_alterations_one_entry_still_covers_both():
+    """Declared limit of the correction above (measured 2026-11-23): an incident
+    is closed by a chain that verifies again AT A CLAIM, or by an explicit
+    verify_ledger(). An alteration, a repair, then a new and distinct alteration
+    with neither a claim nor an audit in between leave the incident open, so the
+    second refusal writes nothing (incident_recorded: False) and one audit entry
+    still covers two alterations. Pinned here so the limit cannot disappear
+    without a test changing."""
+    gov, _ = _dispatching_governor()
+    pay = {"action_type": "payment"}
+    keys = []
+    for _ in range(3):
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        gov.adjudicate(p, **M_OK, payload=pay, resource_id="budget", amount=10.0)
+        keys.append(p.idempotency_key)
+    vetoes = lambda: [e for e in gov.ledger.entries
+                      if e.kernel == "api" and "LEDGER_INTEGRITY_FAILED" in e.rationale]
+    original = gov.ledger.entries[0].rationale
+    gov.ledger.entries[0].rationale = "altered once"
+    first = gov.dispatch(keys[0], "budget", 10.0, payload=pay, flag_conditions_met=ACK)
+    assert first["ledger_integrity_failed"] is True and first["incident_recorded"] is True
+    assert len(vetoes()) == 1
+    gov.ledger.entries[0].rationale = original           # repaired: no claim, no audit
+    assert gov.ledger.verify_chain() is True
+    assert gov.ledger_integrity_incident is not None     # the incident is still open
+    gov.ledger.entries[2].rationale = "altered twice"    # second, distinct alteration
+    second = gov.dispatch(keys[1], "budget", 10.0, payload=pay, flag_conditions_met=ACK)
+    assert second["ledger_integrity_failed"] is True
+    assert second["incident_recorded"] is False          # declared: nothing is written
+    assert len(vetoes()) == 1                            # one entry for two alterations
+
+
 def test_a_profile_s_authorization_is_not_consumed_when_the_ledger_does_not_verify(monkeypatch):
     """The single-use commit authorization is consumed only after the ledger
     verified; a refusal leaves it intact (regression of the earlier candidate
@@ -417,3 +449,63 @@ def test_a_ledger_can_be_deep_copied_and_pickled_and_the_copy_has_its_own_lock()
     assert snap.entry_count == 3 and ledger.entry_count == 4          # independent copies
     assert snap.verify_chain() is True and ledger.verify_chain() is True
 
+
+def test_a_copy_taken_while_the_ledger_is_written_is_coherent():
+    """Decision of 2026-11-23, 21:25 UTC (option A), on finding N2: the state is
+    taken under the lock, so a copy is no longer taken across two instants, with
+    its entry list running ahead of its _last_hash. Before it, such a copy
+    verified, but its _last_hash designated an earlier link still present in it;
+    its first append chained onto that link and broke the copy's own chain, which
+    the next verify_chain() refused (5 runs out of 5)."""
+    ledger = _ledger(2000)
+    writes = 40000
+    done = threading.Event()
+
+    def writer():
+        for i in range(writes):
+            ledger.append("scoring", "PASS", f"w{i}")
+        done.set()
+
+    th = threading.Thread(target=writer)
+    th.start()
+    try:
+        snaps = [copy.deepcopy(ledger) for _ in range(3)]
+    finally:
+        th.join(timeout=60)
+    for snap in snaps:
+        assert snap.verify_chain() is True
+        assert snap.entries and snap._last_hash == snap.entries[-1].chain_hash
+        snap.append("scoring", "PASS", "appended to the copy")
+        assert snap.verify_chain() is True, "the first append broke the copy's chain"
+    assert ledger.verify_chain() is True
+
+
+def test_a_copy_finishes_while_the_ledger_is_written_without_stopping():
+    """The lock is held for the shallow list copy only, not for the caller's deep
+    copy: a writer that never stops cannot starve the copier (finding N2, second
+    half: before it, the copy did not finish in 15 s here, nor at 280 s in the
+    internal review of 20:03). It still costs more than a copy at rest: 28.5 s
+    against 1.06 s in the measurement of 22:06 UTC, declared, not bounded."""
+    ledger = _ledger(2000)
+    stop = threading.Event()
+    out = {}
+
+    def writer():
+        i = 0
+        while not stop.is_set():
+            ledger.append("scoring", "PASS", f"w{i}")
+            i += 1
+
+    def copier():
+        out["entries"] = len(copy.deepcopy(ledger).entries)
+
+    w = threading.Thread(target=writer, daemon=True)
+    c = threading.Thread(target=copier, daemon=True)
+    w.start()
+    time.sleep(0.05)
+    c.start()
+    c.join(timeout=30)
+    stop.set()
+    w.join(timeout=10)
+    assert "entries" in out, "the copy did not finish while the ledger was written"
+    assert out["entries"] >= 2000

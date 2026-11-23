@@ -627,7 +627,7 @@ class DualKernelGovernor:
         # Durable DISPATCHING recovery remains available after process restart.
         self._active_dispatches: set[str] = set()
         self._active_dispatches_lock = threading.RLock()
-        # Ledger-integrity incident (project owner's review of 2026-11-23, 17:37
+        # Ledger-integrity incident (internal review of 2026-11-23, 17:37
         # UTC): the first dispatch refused on a ledger that does not verify
         # writes one api/HARD_VETO entry and opens the incident; further
         # refusals while it stays open write nothing more (the chain is
@@ -2236,7 +2236,7 @@ class DualKernelGovernor:
                     quarantine_active = self._quarantine_blocks()
                     # Single-use Profile S authorization: refuse on a ledger that
                     # does not verify BEFORE consuming it, so a refusal leaves the
-                    # authorization intact (project owner's review of 2026-11-23,
+                    # authorization intact (internal review of 2026-11-23,
                     # 17:37 UTC; the earlier state of this candidate consumed it
                     # first). The claim below re-verifies under the gate: on this
                     # path the full verification runs twice (declared cost).
@@ -2349,8 +2349,8 @@ class DualKernelGovernor:
         operation stays in its state (RESERVED): no claim, no effect.
 
         A chain that verifies again closes an open incident here, at the claim
-        (owner's decision of 2026-11-23, 21:25 UTC, option A): see the comment
-        below for what that changes.
+        (decision of 2026-11-23, 21:25 UTC, option A): see the comment below
+        for what that changes, and for what it still does not cover.
         """
         if not self.policy.ledger_full_verification_at_dispatch:
             return None
@@ -2360,12 +2360,15 @@ class DualKernelGovernor:
             # this, a repaired chain left the incident open for ever, so a
             # LATER alteration, distinct from the first, was refused without
             # writing anything (incident_recorded: false): one audit entry
-            # covered two alterations and the second left no trace (project
-            # owner's review of 2026-11-23, 20:03 UTC, finding N1). A new
-            # alteration now opens a NEW incident with its own entry. What
-            # closes an incident is still verify_chain(): internal consistency,
-            # not authenticity, so a rechained ledger closes it too (declared
-            # limit, unchanged).
+            # covered two alterations and the second left no trace (internal
+            # review of 2026-11-23, 20:03 UTC, finding N1). A new alteration
+            # now opens a NEW incident with its own entry. Declared limits,
+            # measured: (1) what closes an incident is still verify_chain(),
+            # internal consistency and not authenticity, so a rechained ledger
+            # closes it too; (2) the incident closes only here or in
+            # verify_ledger(), so an alteration, a repair and a new alteration
+            # with no claim and no audit in between still leave one entry for
+            # the two.
             self._ledger_integrity_incident = None
             return None
         record = self.registry.get(idempotency_key)
