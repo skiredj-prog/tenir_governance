@@ -14,6 +14,7 @@ Integrity properties this file proves:
   full verification (the incremental check's declared limit);
 - the cost of the incremental check does not grow with the ledger.
 """
+import copy
 import threading
 import time
 
@@ -327,6 +328,54 @@ def test_one_audit_entry_per_integrity_incident_and_the_incident_closes_on_a_ver
     assert gov.dispatch(keys[2], "budget", 10.0, payload=pay, flag_conditions_met=ACK)["dispatched"] is True
 
 
+def test_a_repaired_chain_closes_the_incident_at_the_claim_and_a_later_alteration_opens_a_new_one():
+    """Owner's decision of 2026-11-23, 21:25 UTC (option A), on finding N1 of his
+    review of 20:03: before it, only verify_ledger() closed an incident, so after
+    a repair a second, distinct alteration was refused without writing anything
+    and one audit entry covered two alterations."""
+    gov, _ = _dispatching_governor()
+    pay = {"action_type": "payment"}
+    keys = []
+    for _ in range(3):
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        gov.adjudicate(p, **M_OK, payload=pay, resource_id="budget", amount=10.0)
+        keys.append(p.idempotency_key)
+    vetoes = lambda: [e for e in gov.ledger.entries
+                      if e.kernel == "api" and "LEDGER_INTEGRITY_FAILED" in e.rationale]
+    original = gov.ledger.entries[0].rationale
+    gov.ledger.entries[0].rationale = "rewritten"
+    first = gov.dispatch(keys[0], "budget", 10.0, payload=pay, flag_conditions_met=ACK)
+    assert first["ledger_integrity_failed"] and first["incident_recorded"] is True
+    assert len(vetoes()) == 1 and gov.ledger_integrity_incident is not None
+
+    gov.ledger.entries[0].rationale = original                      # the chain verifies again
+    claimed = gov.dispatch(keys[1], "budget", 10.0, payload=pay, flag_conditions_met=ACK)
+    assert claimed["dispatched"] is True
+    assert gov.ledger_integrity_incident is None, "a claim on a verified chain closes the incident"
+    assert len(vetoes()) == 1, "closing writes nothing to the ledger"
+
+    gov.ledger.entries[1].rationale = "rewritten again"             # a second, distinct alteration
+    second = gov.dispatch(keys[2], "budget", 10.0, payload=pay, flag_conditions_met=ACK)
+    assert second["ledger_integrity_failed"] is True
+    assert second["incident_recorded"] is True and second["incident_refusals"] == 1
+    assert len(vetoes()) == 2, "a new incident writes its own audit entry"
+    assert gov.registry.get(keys[2]).state.value == "reserved"
+
+
+def test_an_incident_still_closes_on_an_explicit_audit():
+    gov, _ = _dispatching_governor()
+    pay = {"action_type": "payment"}
+    p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+    gov.adjudicate(p, **M_OK, payload=pay, resource_id="budget", amount=10.0)
+    original = gov.ledger.entries[0].rationale
+    gov.ledger.entries[0].rationale = "rewritten"
+    assert gov.dispatch(p.idempotency_key, "budget", 10.0, payload=pay,
+                        flag_conditions_met=ACK)["ledger_integrity_failed"] is True
+    assert gov.verify_ledger() is False and gov.ledger_integrity_incident is not None
+    gov.ledger.entries[0].rationale = original
+    assert gov.verify_ledger() is True and gov.ledger_integrity_incident is None
+
+
 def test_a_profile_s_authorization_is_not_consumed_when_the_ledger_does_not_verify(monkeypatch):
     """The single-use commit authorization is consumed only after the ledger
     verified; a refusal leaves it intact (regression of the earlier candidate
@@ -367,3 +416,4 @@ def test_a_ledger_can_be_deep_copied_and_pickled_and_the_copy_has_its_own_lock()
     ledger.append(kernel="t", decision="PASS", rationale="after")
     assert snap.entry_count == 3 and ledger.entry_count == 4          # independent copies
     assert snap.verify_chain() is True and ledger.verify_chain() is True
+

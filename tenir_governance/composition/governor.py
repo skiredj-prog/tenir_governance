@@ -2347,8 +2347,26 @@ class DualKernelGovernor:
         appended to a chain already known not to verify, so the chain itself
         cannot prove it; it is readable and timestamped, not chain-proven. The
         operation stays in its state (RESERVED): no claim, no effect.
+
+        A chain that verifies again closes an open incident here, at the claim
+        (owner's decision of 2026-11-23, 21:25 UTC, option A): see the comment
+        below for what that changes.
         """
-        if not self.policy.ledger_full_verification_at_dispatch or self.ledger.verify_chain():
+        if not self.policy.ledger_full_verification_at_dispatch:
+            return None
+        if self.ledger.verify_chain():
+            # The incident is closed by a chain that verifies again, at the
+            # claim, not only by an explicit audit (verify_ledger()). Before
+            # this, a repaired chain left the incident open for ever, so a
+            # LATER alteration, distinct from the first, was refused without
+            # writing anything (incident_recorded: false): one audit entry
+            # covered two alterations and the second left no trace (project
+            # owner's review of 2026-11-23, 20:03 UTC, finding N1). A new
+            # alteration now opens a NEW incident with its own entry. What
+            # closes an incident is still verify_chain(): internal consistency,
+            # not authenticity, so a rechained ledger closes it too (declared
+            # limit, unchanged).
+            self._ledger_integrity_incident = None
             return None
         record = self.registry.get(idempotency_key)
         reason = ("LEDGER_INTEGRITY_FAILED: the hash chain of the decision ledger does not "
