@@ -408,6 +408,50 @@ def test_without_a_claim_or_an_audit_between_two_alterations_one_entry_still_cov
     assert len(vetoes()) == 1                            # one entry for two alterations
 
 
+def test_each_repeated_cycle_of_alteration_and_repair_writes_its_own_audit_entry():
+    """Declared limit (measured 2026-11-24): one entry per incident means one
+    entry per CYCLE. A caller that alters, is refused, repairs and claims again
+    opens a new incident each time, so the audit trail grows with the number of
+    cycles and nothing here caps it. Pinned so the cost is visible."""
+    cycles = 4                      # 8 claims of 10.0 against the fixture's budget of 100.0
+    gov, _ = _dispatching_governor()
+    pay = {"action_type": "payment"}
+    keys = []
+    for _ in range(2 * cycles):
+        p = Passage(agent_id="alice", action_type="payment", amount=10.0)
+        gov.adjudicate(p, **M_OK, payload=pay, resource_id="budget", amount=10.0)
+        keys.append(p.idempotency_key)
+    vetoes = lambda: [e for e in gov.ledger.entries
+                      if e.kernel == "api" and "LEDGER_INTEGRITY_FAILED" in e.rationale]
+    for i in range(cycles):
+        original = gov.ledger.entries[0].rationale
+        gov.ledger.entries[0].rationale = f"altered-{i}"
+        assert gov.dispatch(keys[2 * i], "budget", 10.0, payload=pay,
+                            flag_conditions_met=ACK)["ledger_integrity_failed"] is True
+        gov.ledger.entries[0].rationale = original
+        assert gov.dispatch(keys[2 * i + 1], "budget", 10.0, payload=pay,
+                            flag_conditions_met=ACK)["dispatched"] is True   # closes the incident
+    assert len(vetoes()) == cycles
+    assert gov.ledger_integrity_incident is None
+
+
+def test_a_shallow_copy_of_the_ledger_shares_its_entries():
+    """Declared limit (measured 2026-11-24): __getstate__ snapshots the LIST, so
+    copy.copy gets its own list but the same entry objects; altering an entry
+    through the shallow copy alters the original. Neither this runtime nor the
+    REG port uses copy.copy on a ledger: a snapshot is taken with deepcopy or
+    pickle. Pinned so the difference cannot be forgotten."""
+    ledger = _ledger(3)
+    shallow = copy.copy(ledger)
+    deep = copy.deepcopy(ledger)
+    assert shallow._entries is not ledger._entries          # own list
+    assert shallow.entries[0] is ledger.entries[0]          # shared entries
+    assert deep.entries[0] is not ledger.entries[0]         # deepcopy: its own
+    shallow.entries[0].rationale = "altered through the shallow copy"
+    assert ledger.verify_chain() is False                   # the original is hit
+    assert deep.verify_chain() is True                      # the deep copy is not
+
+
 def test_a_profile_s_authorization_is_not_consumed_when_the_ledger_does_not_verify(monkeypatch):
     """The single-use commit authorization is consumed only after the ledger
     verified; a refusal leaves it intact (regression of the earlier candidate

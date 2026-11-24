@@ -224,10 +224,16 @@ class HashChainedLedger:
         caller's deep copy: a writer waits for a copy of pointers (about a
         millisecond at 100 000 entries, measured; the observed maxima, 258.7 ms
         and 792.6 ms, are orders of magnitude and not a bound), not for the
-        caller. Declared limit:
-        the snapshot freezes the list, not the objects in it, so an entry that
-        another thread alters DURING the caller's deep copy is copied as
-        altered.
+        caller.
+
+        **Declared limits.** (1) The snapshot freezes the list, not the objects
+        in it, so an entry that another thread alters DURING the caller's deep
+        copy is copied as altered. (2) A SHALLOW copy (``copy.copy``) gets its
+        own list but the SAME entry objects, so altering an entry through the
+        shallow copy alters the original and its ``verify_chain()`` then fails
+        (measured 2026-11-24). Neither this runtime nor the REG port uses
+        ``copy.copy`` on a ledger; a ledger snapshot must be taken with
+        ``copy.deepcopy`` or ``pickle``.
         """
         with self._lock:
             state = self.__dict__.copy()

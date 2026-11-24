@@ -1113,7 +1113,17 @@ class DualKernelGovernor:
         """Full verification of the hash chain, on demand: every entry is
         re-hashed and every link checked (O(N)). ``ledger_valid`` in a decision
         result is the incremental check of the links added since the last
-        verification; call this one for an audit."""
+        verification; call this one for an audit.
+
+        Closes an open ledger-integrity incident when the chain verifies again.
+        **Declared limit** (internal review of 2026-11-24, 06:35 UTC): this
+        closure takes the ledger lock only, NOT the quarantine gate that
+        ``dispatch()`` holds around its own verification and claim. An audit
+        running concurrently with a dispatch can therefore close an incident
+        that the dispatch is about to re-open, or close one between a refusal
+        and the moment its caller reads it. Declared, not fixed: taking the
+        gate here would make an audit wait for a quarantine activation.
+        """
         ok = self.ledger.verify_chain()
         if ok and self._ledger_integrity_incident is not None:
             self._ledger_integrity_incident = None
