@@ -1121,8 +1121,20 @@ class DualKernelGovernor:
         ``dispatch()`` holds around its own verification and claim. An audit
         running concurrently with a dispatch can therefore close an incident
         that the dispatch is about to re-open, or close one between a refusal
-        and the moment its caller reads it. Declared, not fixed: taking the
-        gate here would make an audit wait for a quarantine activation.
+        and the moment its caller reads it. Declared, not fixed, by the
+        decision of the author of ``tenir_governance``, 2026-11-24 17:15 UTC:
+        the gate is taken here in 5.8.0, where it becomes cross-process and
+        the cost has to be measured again. The ground given earlier -- that
+        taking the gate here would make an audit wait for a quarantine
+        activation -- does not hold and is withdrawn: the gate is held 6.2 us
+        at the median (max 54.9 us, n = 200) to activate a quarantine and
+        released, not held for the quarantine's duration, and taking it in
+        this method costs nothing measurable in this process (measured
+        2026-11-24 at 10 000 and 100 000 entries: audit latency x0.96-1.14,
+        dispatch throughput x0.94-1.07, the noise of the machine), because an
+        audit and a dispatch already exclude each other on the ledger's own
+        lock. "Nothing measurable in this perimeter" is not "no cost": one
+        process, one writer, one auditor.
         """
         ok = self.ledger.verify_chain()
         if ok and self._ledger_integrity_incident is not None:
