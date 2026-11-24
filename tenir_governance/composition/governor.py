@@ -4463,20 +4463,25 @@ class DualKernelGovernor:
         reason: str = "",
         approve: bool = True,
     ) -> dict[str, Any]:
-        """Authorized exit from ESCALATED state.
+        """Exit from ESCALATED state, with the authorization recorded as supplied.
 
         Per v7.1 §19: ESCALATED remains absorbing until an authorization
         model defines who signs, under what scope, and with which receipt.
-
-        Per Blueprint v4.4 §5: overrides constitutionnels uniquement via
-        Ceremony G-R5-001 (authentification opérateur).
+        This method does not implement that model: ``authorized_by``,
+        ``scope`` and ``authorization`` are written into the ExitReceipt as
+        given, and none of them is verified, not even for emptiness
+        (declared limit, CHANGELOG 5.7.7). The operator-authentication
+        ceremony of Blueprint v4.4 §5 (G-R5-001) is not performed here.
+        Integrations must authenticate whoever calls this method; releasing
+        a QUARANTINE_LOCK, by contrast, requires a configured verifier.
 
         Args:
-            authorized_by: who is authorizing the exit (operator ID)
-            scope: scope of the authorization
-            authorization: authorization mechanism (e.g., "ceremony-G-R5-001")
-            reason: why the exit is being authorized
-            approve: True → proceed (RESERVED); False → deny (FAILED)
+            authorized_by: who claims to authorize the exit (recorded, not verified)
+            scope: scope of the claimed authorization (recorded, not verified)
+            authorization: reference of the claimed mechanism (recorded, not verified)
+            reason: why the exit is requested
+            approve: True → HOLD (a complete re-adjudication is required
+                before any admission); False → FAILED (CONFIRMED_NONEXECUTION)
         """
         try:
             with self._settlement_lock:

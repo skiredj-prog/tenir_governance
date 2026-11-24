@@ -1153,7 +1153,7 @@ class TestSchemaAdapter:
         assert "disclosure" in result
         d = result["disclosure"]
         assert d["doctrinal_version"] == "TENIR 2.0"
-        assert d["platform_version"] == "5.6.1"
+        assert d["platform_version"] == "5.7.7"
         assert d["contract_version"] == "1.2"
         assert d["compliance_class"] == "profile-bound"
         assert "agentic-governance-profile-v1.0.0" in d["active_profiles"]

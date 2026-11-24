@@ -221,19 +221,20 @@ class HoldManager:
         reason: str = "",
         approve: bool = True,
     ) -> dict[str, Any]:
-        """Authorized exit from ESCALATED state.
+        """Exit from ESCALATED state, with the authorization recorded as supplied.
 
         Per v7.1 §19: ESCALATED remains absorbing until an authorization model
-        defines who signs, under what scope, and with which receipt.
-
-        Per Blueprint v4.4 §5: overrides constitutionnels uniquement via
-        Ceremony G-R5-001 (authentification opérateur).
+        defines who signs, under what scope, and with which receipt. This
+        method does not implement that model: the three strings below are
+        written into the ExitReceipt as given, and none of them is verified
+        (declared limit, CHANGELOG 5.7.7). The operator-authentication
+        ceremony of Blueprint v4.4 §5 (G-R5-001) is not performed here.
 
         Args:
-            authorized_by: who is authorizing the exit (operator ID)
-            scope: scope of the authorization
-            authorization: authorization mechanism (e.g., "ceremony-G-R5-001")
-            reason: why the exit is being authorized
+            authorized_by: who claims to authorize the exit (recorded, not verified)
+            scope: scope of the claimed authorization (recorded, not verified)
+            authorization: reference of the claimed mechanism (recorded, not verified)
+            reason: why the exit is requested
             approve: True → transition to HOLD (authorization recorded,
                      fresh re-adjudication required before admission);
                      False → transition to FAILED (deny)
@@ -241,6 +242,7 @@ class HoldManager:
         Returns a dict with:
             - exited: bool
             - operation_state: str
+            - execution_record: "CONFIRMED_NONEXECUTION" after a denial, else None
             - exit_receipt: dict | None
             - reason: str
         """

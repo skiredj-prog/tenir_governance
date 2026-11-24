@@ -11,7 +11,7 @@ Governance Branch:    tenir_governance/
 ├── nomenclature.py          — Sprint 0: canonical term registry (R4+R5 unified)
 ├── policy_engine.py         — Sprint 1: policy contract + membrane decision
 ├── validator.py             — Sprint 1/3: CI gate (standalone + pytest fixture)
-├── regression_corpus.py     — Sprint 4: 281 golden cases
+├── regression_corpus.py     — Sprint 4: 55 golden cases
 ├── sdk.py                   — Sprint 5: SDK/Governance branch public client
 ├── polymorphic_surface.py   — Sprint 10: V5 surface state contract
 ├── copy_lint.py             — Sprint 9: public-safe lexicon enforcement
