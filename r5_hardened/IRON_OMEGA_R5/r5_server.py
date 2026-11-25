@@ -31,6 +31,7 @@ import logging
 import base64
 import hashlib
 import hmac
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,7 +41,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, WebSocket, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from tenir_kernel import KernelPolicy, TenirKernel
 from tenir_kernel.schema import validate_runtime_object
@@ -226,13 +227,41 @@ _COCKPIT_PATH = (
 )
 
 
-def _cockpit_file() -> FileResponse:
+def _cockpit_file() -> HTMLResponse:
+    """Serve the cockpit with a per-response script nonce.
+
+    The page is one HTML file with a static stylesheet and script. The nonce
+    allows those two blocks and nothing else: no unsafe-eval, no extra inline
+    script. Style attributes already written in the file stay allowed;
+    connect-src is this origin plus loopback HTTP/WS only.
+    """
     if not _COCKPIT_PATH.is_file():
         raise HTTPException(status_code=404, detail="Operator cockpit HTML is not installed")
-    return FileResponse(
-        str(_COCKPIT_PATH),
-        media_type="text/html; charset=utf-8",
-        headers={"Cache-Control": "no-store"},
+    raw = _COCKPIT_PATH.read_text(encoding="utf-8")
+    nonce = secrets.token_urlsafe(18)
+    html = raw.replace("<style>", f'<style nonce="{nonce}">', 1)
+    html = html.replace("<script>", f'<script nonce="{nonce}">', 1)
+    policy = (
+        "default-src 'none'; "
+        f"script-src 'nonce-{nonce}'; "
+        "script-src-attr 'none'; "
+        f"style-src 'nonce-{nonce}'; "
+        "style-src-attr 'unsafe-inline'; "
+        "img-src data:; "
+        "connect-src 'self' "
+        "http://127.0.0.1:* http://localhost:* http://[::1]:* "
+        "ws://127.0.0.1:* ws://localhost:* ws://[::1]:* "
+        "wss://127.0.0.1:* wss://localhost:* wss://[::1]:*; "
+        "base-uri 'none'; form-action 'none'; object-src 'none'; frame-ancestors 'none'"
+    )
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": policy,
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -633,6 +662,8 @@ async def request_transition(req: TransitionRequest):
 
     # The local append-only ledger is authoritative; only advance live mode once
     # it has durably accepted the signed control transition.
+    # This flag is the R5 process mode. It does not call DualKernelGovernor,
+    # the operation registry, or the 5.7.x SDK, and it grants them no authority.
     app.state.mode = req.target_mode
     logger.info(
         f"[R5] Mode transition: {from_mode} → {req.target_mode} "

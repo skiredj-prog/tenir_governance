@@ -109,6 +109,17 @@ def test_cockpit_page_is_served_from_the_api_origin(client):
     assert "TENIR_OPERATOR_ID" in page
     assert "runtime_object" in page
     assert "http://localhost:8000" not in page
+    assert "innerHTML" not in page
+    assert "insertAdjacentHTML" not in page
+    policy = response.headers["content-security-policy"]
+    assert "script-src 'nonce-" in policy
+    assert "unsafe-eval" not in policy
+    assert "connect-src 'self'" in policy
+    assert "http://127.0.0.1:*" in policy
+    nonce = policy.split("nonce-", 1)[1].split("'", 1)[0]
+    assert f'nonce="{nonce}"' in page
+    remembered = page.split("function rememberSession()", 1)[1].split("function loadSession()", 1)[0]
+    assert "jwtInp" not in remembered
     alias = client.get("/cockpit")
     assert alias.status_code == 200
     assert "Operator Cockpit" in alias.text or "Cockpit" in alias.text

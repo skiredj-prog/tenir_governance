@@ -294,6 +294,10 @@ input[type=range].sl::-webkit-slider-thumb:hover { transform:scale(1.25); }
   font-size:11px; color:var(--teal);
   background:var(--teal-bg); border:1px solid rgba(0,200,150,.2);
   border-radius:4px; padding:5px 9px; line-height:1.6;
+  white-space:pre-line;
+}
+.tl-empty {
+  text-align:center; color:var(--dim); font-size:11px; padding:32px;
 }
 .warn-box {
   font-size:11px; color:var(--amber);
@@ -441,7 +445,7 @@ select.inp {
     <input type="password" class="tok-inp" id="jwtInp" placeholder="TENIR_API_TOKEN" style="width:190px;text-transform:none" autocomplete="off">
   </label>
   <button class="btn btn-ghost" id="btnApplyConn" type="button">APPLY</button>
-  <span class="conn-hint" id="connHint">Paste the local API token and operator id. Both are required.</span>
+  <span class="conn-hint" id="connHint">Paste the local API token and operator id. The token stays in memory for this page only and is cleared on reload.</span>
 </div>
 
 <main class="main">
@@ -615,9 +619,7 @@ select.inp {
       </div>
       <div class="cer-body">
         <div class="warn-box">
-          The server signs an oath only when operator id matches TENIR_OPERATOR_ID.
-          The returned nonce and timestamp are part of the signature. Submit them unchanged.
-          ENFORCE is accepted only after a recorded transition through SHADOW_CRITICAL.
+          Local demo only. The ceremony checks the shared TENIR_API_TOKEN and the configured TENIR_OPERATOR_ID. It does not prove a personal identity. ENFORCE here is this R5 process only: it does not grant authority on the 5.7.x governance kernel. Submit the returned nonce and timestamp unchanged. ENFORCE is accepted only after a recorded transition through SHADOW_CRITICAL.
         </div>
         <div class="fg">
           <label class="fl">Operator ID</label>
@@ -695,9 +697,9 @@ const BUF = 60; // trajectory buffer size
 const STORE = {
   api: 'tenir.cockpit.apiBase',
   ws: 'tenir.cockpit.wsBase',
-  op: 'tenir.cockpit.operatorId',
-  token: 'tenir.cockpit.token'
+  op: 'tenir.cockpit.operatorId'
 };
+const LEGACY_TOKEN_KEY = 'tenir.cockpit.token';
 
 // ── STATE ──────────────────────────────────────────────────
 const st = {
@@ -872,10 +874,21 @@ function asView(d) {
   return view;
 }
 
+function asText(value) {
+  if (value == null) return '';
+  return typeof value === 'string' ? value : String(value);
+}
+
+function asNumber(value) {
+  if (typeof value === 'boolean' || value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function updateBar(raw) {
   const d = asView(raw);
-  if (d.operating_mode) st.mode = d.operating_mode;
-  st.s = d.s_score;
+  if (d.operating_mode) st.mode = asText(d.operating_mode);
+  st.s = asNumber(d.s_score);
   const p = posture(st.s);
 
   const pb = document.getElementById('pbPosture');
@@ -883,7 +896,7 @@ function updateBar(raw) {
   pb.className = 'badge ' + (p==='NORMAL'?'b-teal':p==='CAUTION'?'b-amber':'b-red');
 
   const pc = document.getElementById('pbCES');
-  const cv = d.ces_state || '—';
+  const cv = asText(d.ces_state) || '—';
   pc.textContent = cv;
   pc.className = 'badge ' + (CES_CLASS[cv] || 'b-dim');
 
@@ -891,17 +904,19 @@ function updateBar(raw) {
   document.getElementById('pbS').style.color = sColor(st.s);
 
   const pm = document.getElementById('pbMem');
-  const mv = d.membrane_decision || '—';
+  const mv = asText(d.membrane_decision) || '—';
   pm.textContent = mv;
   pm.className = 'badge ' + (MEM_CLASS[mv] || 'b-dim');
 
-  document.getElementById('pbMode').textContent = d.operating_mode || '—';
+  document.getElementById('pbMode').textContent = asText(d.operating_mode) || '—';
 
-  if (d.latest_hash) document.getElementById('pbHash').textContent = d.latest_hash.slice(0,18) + '…';
-  if (d.epoch_id) document.getElementById('epochLbl').textContent = 'epoch · ' + d.epoch_id.slice(0,8);
+  if (d.latest_hash) document.getElementById('pbHash').textContent = asText(d.latest_hash).slice(0, 18) + '…';
+  if (d.epoch_id != null && d.epoch_id !== '') {
+    document.getElementById('epochLbl').textContent = 'epoch · ' + asText(d.epoch_id).slice(0, 8);
+  }
 
   drawGauge(st.s);
-  updateDerivs(d.ds_de, d.d2s_de2);
+  updateDerivs(asNumber(d.ds_de), asNumber(d.d2s_de2));
 }
 
 // ── GAUGE (canvas arc) ─────────────────────────────────────
@@ -1078,19 +1093,33 @@ function addEvent(d, type='EVENT') {
   const t = new Date();
   const ts = t.toTimeString().split(' ')[0];
   const ces = d.ces_state || type;
-  const col = CES_COLOR[ces] || 'var(--txt)';
+  const col = Object.prototype.hasOwnProperty.call(CES_COLOR, ces) ? CES_COLOR[ces] : 'var(--txt)';
   const h = d.hash || d.entry_hash || '';
   const mem = d.membrane_decision || '';
 
   const div = document.createElement('div');
   div.className = 'ev';
-  div.innerHTML = `
-    <div class="ev-t">${ts}</div>
-    <div class="ev-b">
-      <div class="ev-type" style="color:${col}">${ces}</div>
-      <div class="ev-meta">S=${d.s_score!=null?d.s_score.toFixed(3):'—'}${mem?' · '+mem:''}</div>
-      ${h?`<div class="ev-hash">${h.slice(0,22)}…</div>`:''}
-    </div>`;
+  const timeEl = document.createElement('div');
+  timeEl.className = 'ev-t';
+  timeEl.textContent = ts;
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'ev-b';
+  const typeEl = document.createElement('div');
+  typeEl.className = 'ev-type';
+  typeEl.style.color = col;
+  typeEl.textContent = String(ces);
+  const metaEl = document.createElement('div');
+  metaEl.className = 'ev-meta';
+  const score = (d.s_score != null && Number.isFinite(Number(d.s_score))) ? Number(d.s_score).toFixed(3) : '—';
+  metaEl.textContent = 'S=' + score + (mem ? ' · ' + String(mem) : '');
+  bodyEl.append(typeEl, metaEl);
+  if (h) {
+    const hashEl = document.createElement('div');
+    hashEl.className = 'ev-hash';
+    hashEl.textContent = String(h).slice(0, 22) + '…';
+    bodyEl.appendChild(hashEl);
+  }
+  div.append(timeEl, bodyEl);
   stream.insertBefore(div, stream.firstChild);
   while (stream.children.length > 50) stream.removeChild(stream.lastChild);
 }
@@ -1214,7 +1243,11 @@ document.getElementById('adjBtn').addEventListener('click', async () => {
     pushPoint(Object.assign({ pressure: runtime.scores.pressure, velocity: runtime.scores.velocity, capacity: runtime.scores.capacity }, r));
     addEvent(Object.assign({}, r, { type:'ADJUDICATION' }));
   } catch(e) {
-    detail.innerHTML = `<span class="err-box">${esc(e.message)}</span>`;
+    detail.replaceChildren();
+    const box = document.createElement('span');
+    box.className = 'err-box';
+    box.textContent = e.message;
+    detail.appendChild(box);
   } finally {
     btn.disabled=false; btn.textContent='ADJUDICATE';
   }
@@ -1229,7 +1262,13 @@ document.getElementById('btnLoad').addEventListener('click', async () => {
     st.entries = Array.isArray(d) ? d : (d.entries || []);
     renderTL(st.entries);
   } catch(e) {
-    document.getElementById('timeline').innerHTML = `<div class="err-box" style="margin:16px">${esc(e.message)}</div>`;
+    const tl = document.getElementById('timeline');
+    tl.replaceChildren();
+    const box = document.createElement('div');
+    box.className = 'err-box';
+    box.style.margin = '16px';
+    box.textContent = e.message;
+    tl.appendChild(box);
   } finally { btn.disabled=false; btn.textContent='LOAD ENTRIES'; }
 });
 
@@ -1264,48 +1303,95 @@ document.getElementById('fSearch').addEventListener('input', () => {
   renderTL(q ? st.entries.filter(e=>JSON.stringify(e).toLowerCase().includes(q)) : st.entries);
 });
 
+function chip(text, className) {
+  const span = document.createElement('span');
+  span.className = 'badge ' + className;
+  span.style.fontSize = '9px';
+  span.textContent = text;
+  return span;
+}
+
 function renderTL(entries) {
   const tl = document.getElementById('timeline');
+  tl.replaceChildren();
   if (!entries.length) {
-    tl.innerHTML = '<div style="text-align:center;color:var(--dim);font-size:11px;padding:32px">No entries match.</div>';
+    const empty = document.createElement('div');
+    empty.className = 'tl-empty';
+    empty.textContent = 'No entries match.';
+    tl.appendChild(empty);
     return;
   }
-  tl.innerHTML = '';
-  [...entries].reverse().forEach((entry,idx) => {
-    const type = entry.entry_type || entry.type || 'UNKNOWN';
+  [...entries].reverse().forEach((entry, idx) => {
+    const type = String(entry.entry_type || entry.type || 'UNKNOWN');
     const ts = entryDate(entry.timestamp);
     const rel = relTime(ts);
-    const hash = entry.hash || entry.entry_hash || '';
-    const parentHash = entry.previous_hash || entry.parent_hash || '';
-    const op = entry.override_operator || entry.operator_id || entry.actor || '';
-    const ces = entry.ces_state || '';
-    const dec = entry.membrane_decision || entry.decision || '';
-
-    const typeClass = {ADJUDICATION:'b-blue',TRANSITION:'b-purple',OATH:'b-amber',GENESIS:'b-dim'}[type]||'b-dim';
-    const dotClass  = {ADJUDICATION:'td-ADJ',TRANSITION:'td-TRANS',OATH:'td-OATH',GENESIS:'td-GEN'}[type]||'td-GEN';
+    const hash = String(entry.hash || entry.entry_hash || '');
+    const parentHash = String(entry.previous_hash || entry.parent_hash || '');
+    const op = String(entry.override_operator || entry.operator_id || entry.actor || '');
+    const ces = String(entry.ces_state || '');
+    const dec = String(entry.membrane_decision || entry.decision || '');
+    const known = { ADJUDICATION:'b-blue', TRANSITION:'b-purple', OATH:'b-amber', GENESIS:'b-dim',
+      observation:'b-blue', control_transition:'b-purple' };
+    const dots = { ADJUDICATION:'td-ADJ', TRANSITION:'td-TRANS', OATH:'td-OATH', GENESIS:'td-GEN',
+      observation:'td-ADJ', control_transition:'td-TRANS' };
 
     const row = document.createElement('div');
-    row.className='tl-row';
-    row.innerHTML = `
-      <div class="tl-t">
-        <div class="tl-rel">${rel}</div>
-        <div class="tl-tabs">${ts.toTimeString().split(' ')[0]}</div>
-      </div>
-      <div class="tl-dot-col"><div class="tl-dot ${dotClass}"></div></div>
-      <div class="tl-card" id="tlc${idx}">
-        <div class="tl-head" onclick="togTL(${idx})">
-          <span class="badge ${typeClass}" style="font-size:9px">${type}</span>
-          ${ces?`<span class="badge ${CES_CLASS[ces]||'b-dim'}" style="font-size:9px">${ces}</span>`:''}
-          ${dec?`<span class="badge ${MEM_CLASS[dec]||'b-dim'}" style="font-size:9px">${dec}</span>`:''}
-          ${op?`<span class="tl-op">${op}</span>`:''}
-          ${hash?`<span class="tl-hp">${hash.slice(0,14)}…</span>`:''}
-          <div class="tl-int ${hash?'ok':'nd'}"></div>
-        </div>
-        <div class="tl-detail" id="tld${idx}">
-          <pre class="json-pre">${JSON.stringify(entry,null,2)}</pre>
-          ${parentHash?`<div style="font-size:10px;color:var(--dim);margin-top:8px">← parent: ${parentHash.slice(0,22)}…</div>`:''}
-        </div>
-      </div>`;
+    row.className = 'tl-row';
+    const timeCol = document.createElement('div');
+    timeCol.className = 'tl-t';
+    const relEl = document.createElement('div');
+    relEl.className = 'tl-rel';
+    relEl.textContent = rel;
+    const absEl = document.createElement('div');
+    absEl.className = 'tl-tabs';
+    absEl.textContent = ts.toTimeString().split(' ')[0];
+    timeCol.append(relEl, absEl);
+    const dotCol = document.createElement('div');
+    dotCol.className = 'tl-dot-col';
+    const dot = document.createElement('div');
+    dot.className = 'tl-dot ' + (dots[type] || 'td-GEN');
+    dotCol.appendChild(dot);
+    const card = document.createElement('div');
+    card.className = 'tl-card';
+    card.id = 'tlc' + idx;
+    const head = document.createElement('div');
+    head.className = 'tl-head';
+    head.addEventListener('click', () => togTL(idx));
+    head.appendChild(chip(type, known[type] || 'b-dim'));
+    if (ces) head.appendChild(chip(ces, CES_CLASS[ces] || 'b-dim'));
+    if (dec) head.appendChild(chip(dec, MEM_CLASS[dec] || 'b-dim'));
+    if (op) {
+      const opEl = document.createElement('span');
+      opEl.className = 'tl-op';
+      opEl.textContent = op;
+      head.appendChild(opEl);
+    }
+    if (hash) {
+      const hp = document.createElement('span');
+      hp.className = 'tl-hp';
+      hp.textContent = hash.slice(0, 14) + '…';
+      head.appendChild(hp);
+    }
+    const mark = document.createElement('div');
+    mark.className = 'tl-int ' + (hash ? 'ok' : 'nd');
+    head.appendChild(mark);
+    const detail = document.createElement('div');
+    detail.className = 'tl-detail';
+    detail.id = 'tld' + idx;
+    const pre = document.createElement('pre');
+    pre.className = 'json-pre';
+    pre.textContent = JSON.stringify(entry, null, 2);
+    detail.appendChild(pre);
+    if (parentHash) {
+      const parent = document.createElement('div');
+      parent.style.fontSize = '10px';
+      parent.style.color = 'var(--dim)';
+      parent.style.marginTop = '8px';
+      parent.textContent = '← parent: ' + parentHash.slice(0, 22) + '…';
+      detail.appendChild(parent);
+    }
+    card.append(head, detail);
+    row.append(timeCol, dotCol, card);
     tl.appendChild(row);
   });
 }
@@ -1423,14 +1509,12 @@ function relTime(ts) {
 }
 
 // ── CEREMONY ───────────────────────────────────────────────
-function esc(value) {
-  return String(value ?? '').replace(/[&<>"']/g, ch => ({
-    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
-  }[ch]));
-}
-
-function showBox(el, kind, html) {
-  el.innerHTML = `<div class="${kind}">${html}</div>`;
+function showBox(parent, kind, text) {
+  parent.replaceChildren();
+  const box = document.createElement('div');
+  box.className = kind;
+  box.textContent = text;
+  parent.appendChild(box);
 }
 
 function syncOperatorFields() {
@@ -1450,25 +1534,29 @@ function storageSet(key, value) {
   catch (_) {}
 }
 
+function purgeStoredToken() {
+  try { sessionStorage.removeItem(LEGACY_TOKEN_KEY); }
+  catch (_) {}
+}
+
 function rememberSession() {
-  const fields = [
+  // The bearer token is memory-only. A reload must ask for it again.
+  purgeStoredToken();
+  [
     ['apiBase', STORE.api],
     ['wsBase', STORE.ws],
-    ['opSession', STORE.op],
-    ['jwtInp', STORE.token]
-  ];
-  fields.forEach(([id, key]) => {
-    storageSet(key, document.getElementById(id).value);
-  });
+    ['opSession', STORE.op]
+  ].forEach(([id, key]) => storageSet(key, document.getElementById(id).value));
   syncOperatorFields();
 }
 
 function loadSession() {
+  purgeStoredToken();
   const query = new URLSearchParams(location.search);
   document.getElementById('apiBase').value = query.get('api') || storageGet(STORE.api);
   document.getElementById('wsBase').value = query.get('ws') || storageGet(STORE.ws);
   document.getElementById('opSession').value = storageGet(STORE.op);
-  document.getElementById('jwtInp').value = storageGet(STORE.token);
+  document.getElementById('jwtInp').value = '';
   if (query.has('token') || query.has('api_token')) {
     document.getElementById('connHint').textContent = 'Do not put the API token in the URL. Paste it into the Bearer field.';
   }
@@ -1493,7 +1581,7 @@ document.getElementById('btnOath').addEventListener('click', async () => {
   syncOperatorFields();
   const op = document.getElementById('oathOp').value.trim() || operatorId();
   if (!op) { showBox(res, 'err-box', 'operator_id required'); return; }
-  btn.disabled=true; btn.textContent='REQUESTING…'; res.innerHTML='';
+  btn.disabled=true; btn.textContent='REQUESTING…'; res.replaceChildren();
   try {
     const r = await call('POST', '/api/v1/oath/sign', { operator_id: op });
     const txt = r.oath_text || '';
@@ -1513,7 +1601,7 @@ document.getElementById('btnOath').addEventListener('click', async () => {
     document.getElementById('tTimestamp').value = r.timestamp || '';
     showBox(res, 'ok-box', 'Oath signed. Nonce and timestamp were copied into the transition form. Submit them unchanged.');
   } catch(e) {
-    showBox(res, 'err-box', esc(e.message));
+    showBox(res, 'err-box', e.message);
   } finally { btn.disabled=false; btn.textContent='REQUEST OATH'; }
 });
 
@@ -1526,7 +1614,7 @@ document.getElementById('btnCopySig').addEventListener('click', () => {
 document.getElementById('btnTrans').addEventListener('click', async () => {
   const btn=document.getElementById('btnTrans');
   const res=document.getElementById('transRes');
-  btn.disabled=true; btn.textContent='SUBMITTING…'; res.innerHTML='';
+  btn.disabled=true; btn.textContent='SUBMITTING…'; res.replaceChildren();
   try {
     const nonce = document.getElementById('tNonce').value.trim();
     const timestamp = document.getElementById('tTimestamp').value.trim();
@@ -1544,13 +1632,13 @@ document.getElementById('btnTrans').addEventListener('click', async () => {
     const r = await call('POST','/api/v1/transition', body);
     const mode = r.to_mode || r.new_mode || r.operating_mode || '—';
     const entry = r.ledger_entry_id || r.entry_id || r.event_id || '—';
-    showBox(res, 'ok-box', `Transition committed.<br>Mode: <b>${esc(mode)}</b><br>Entry: <span style="font-family:var(--mono);font-size:10px">${esc(entry)}</span><br>Sign a new oath before the next transition.`);
+    showBox(res, 'ok-box', 'Transition committed.\nMode: ' + mode + '\nEntry: ' + entry + '\nSign a new oath before the next transition.\nThis R5 mode does not grant authority on the 5.7.x governance kernel.');
     document.getElementById('tNonce').value = '';
     document.getElementById('tTimestamp').value = '';
     document.getElementById('tOathSig').value = '';
     poll();
   } catch(e) {
-    showBox(res, 'err-box', esc(e.message));
+    showBox(res, 'err-box', e.message);
   } finally { btn.disabled=false; btn.textContent='SUBMIT TRANSITION'; }
 });
 
