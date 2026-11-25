@@ -1,0 +1,364 @@
+# RV-003 DEV3 Gate B — B3 independent witness (manual, read-only)
+#
+# Purpose: on a fresh GitHub-hosted runner, (1) verify the integrity of the frozen
+# B3 evidence bundle against a pinned SHA-256, (2) re-run the ORIGINAL B3 harness
+# (tools__run_b3.py, D0-T01..D0-T21 = 21 tests / 93 sub-cases) taken byte-for-byte
+# from that bundle, unmodified, and (3) archive raw logs and a machine-readable
+# verdict.json as a workflow artifact.
+#
+# Frozen bundle : RV003_DEV3_B3_rv003-dev3-B3-20261117T110153Z.zip
+#   SHA-256      : 231c44aeeaa832bdc7614fcbb3707d343e392defdc1914e2ca50ae58b5002ff7
+#   size         : 206615 bytes
+#   native source: skiredj-prog/tenir_governance @ 674c8606089251ea2f74890bd47bce3a717c3b91
+#   candidate SHA: 1e9722a088be273e50aa4c9672d8fe2a71b6faf9909c2ec0a63dded74dd3766d
+#   harness      : CANDIDATE/source_snapshot/tools__run_b3.py
+#                  sha256 185b64de1514953dbcf4e25d66800030609e94b4ebe490e204a96bc29ec2f41c
+#   recorded producer outcome: B3_CAMPAIGN_HOLD, 20/21 tests, 92/93 sub-cases (D0-T04 FAIL)
+#
+# "REPRODUCED" means the runner obtained the SAME per-test statuses and per-sub-case
+# pass/fail flags as the frozen bundle. It does NOT mean the campaign passed, and it
+# is not a certification, not production evidence and not a human review.
+#
+# LIMITATION — WITNESS INDEPENDENCE (recorded in every verdict.json):
+#   This workflow is triggered from the project owner's mobile phone, using the
+#   project owner's own authenticated GitHub account. The run is therefore NOT
+#   organizationally independent of the owner/producer. Independence is limited to
+#   execution on a fresh, ephemeral GitHub-hosted runner, from a frozen bundle whose
+#   SHA-256 is verified before any of its content is executed.
+#   Reviews produced by AI assistants are not human reviews.
+#
+# No deployment, release, tag, package publication, push or PR/issue write happens
+# here. Permissions are read-only and no secret is used. Do not merge without PMO review.
+
+name: RV-003 B3 independent witness
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_url:
+        description: "HTTPS URL of the frozen B3 bundle ZIP (direct download, no login)"
+        required: true
+        type: string
+      expected_bundle_sha256:
+        description: "Expected SHA-256 of the bundle ZIP (pinned; do not change)"
+        required: true
+        type: string
+        default: "231c44aeeaa832bdc7614fcbb3707d343e392defdc1914e2ca50ae58b5002ff7"
+      witness_note:
+        description: "Optional free-text note from the person triggering the run"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rv003-b3-witness
+  cancel-in-progress: false
+
+jobs:
+  witness:
+    name: Verify frozen bundle and reproduce B3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      PINNED_BUNDLE_SHA256: "231c44aeeaa832bdc7614fcbb3707d343e392defdc1914e2ca50ae58b5002ff7"
+      PINNED_BUNDLE_SIZE: "206615"
+      PINNED_BUNDLE_ROOT: "RV003_DEV3_B3_rv003-dev3-B3-20261117T110153Z"
+      PINNED_SOURCE_SHA: "674c8606089251ea2f74890bd47bce3a717c3b91"
+      PINNED_CANDIDATE_SHA: "1e9722a088be273e50aa4c9672d8fe2a71b6faf9909c2ec0a63dded74dd3766d"
+      PINNED_HARNESS_SHA256: "185b64de1514953dbcf4e25d66800030609e94b4ebe490e204a96bc29ec2f41c"
+      PINNED_TESTDEFS_SHA256: "1535a48d4517d7b2735db562cd8b832130638188999c24965010098ab5cc1875"
+      PINNED_GATE_B_SHA256: "84d954ef1602124e8620f9cf5e23c377d7bd585a103a8cd2cfeb5fd56fdf03e6"
+      IN_BUNDLE_URL: ${{ inputs.bundle_url }}
+      IN_EXPECTED_SHA256: ${{ inputs.expected_bundle_sha256 }}
+      IN_WITNESS_NOTE: ${{ inputs.witness_note }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Set up Python 3.14.10 (as recorded in the frozen bundle)
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14.10"
+
+      - name: Prepare workspace and record runner environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/rv003w"; OUT="$W/witness_out"
+          echo "W=$W" >> "$GITHUB_ENV"; echo "OUT=$OUT" >> "$GITHUB_ENV"
+          mkdir -p "$W" "$OUT/logs"
+          {
+            echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "github_run_id=$GITHUB_RUN_ID"
+            echo "github_run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "github_sha=$GITHUB_SHA"
+            echo "github_ref=$GITHUB_REF"
+            echo "github_workflow_sha=${GITHUB_WORKFLOW_SHA:-}"
+            echo "github_actor=$GITHUB_ACTOR"
+            echo "github_triggering_actor=${GITHUB_TRIGGERING_ACTOR:-}"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "runner_image_os=${ImageOS:-}"
+            echo "runner_image_version=${ImageVersion:-}"
+            echo "python=$(python -c 'import sys;print(sys.version.split()[0])')"
+            echo "kernel=$(uname -srm)"
+          } | tee "$OUT/logs/00_runner_env.txt"
+          (cat /etc/os-release; echo; git --version; unzip -v | head -1; ip -V) > "$OUT/logs/00_os_tools.txt" 2>&1 || true
+
+      - name: Fetch frozen bundle (no credentials)
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$IN_BUNDLE_URL" in
+            https://*) ;;
+            *) echo "bundle_url must be an https:// URL" | tee "$OUT/logs/01_fetch.txt"; exit 1 ;;
+          esac
+          curl --fail --location --proto '=https' --tlsv1.2 --max-filesize 52428800 \
+               --retry 3 --silent --show-error --output "$W/bundle.zip" "$IN_BUNDLE_URL" \
+               2> "$OUT/logs/01_fetch_stderr.txt"
+          echo "fetched_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) bytes=$(stat -c %s "$W/bundle.zip")" | tee "$OUT/logs/01_fetch.txt"
+
+      - name: Verify bundle integrity BEFORE executing anything from it
+        id: integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, os, pathlib, re, shutil, zipfile
+          W = pathlib.Path(os.environ["W"]); OUT = pathlib.Path(os.environ["OUT"])
+          rep = {"checks": {}, "errors": []}
+          def chk(name, ok, detail=None):
+              rep["checks"][name] = {"pass": bool(ok), "detail": detail}
+              if not ok: rep["errors"].append(name)
+          exp_in = os.environ["IN_EXPECTED_SHA256"].strip().lower()
+          pinned = os.environ["PINNED_BUNDLE_SHA256"]
+          chk("expected_input_is_64_hex", re.fullmatch(r"[0-9a-f]{64}", exp_in) is not None, exp_in)
+          chk("expected_input_equals_pinned", exp_in == pinned, {"input": exp_in, "pinned": pinned})
+          zp = W / "bundle.zip"
+          data = zp.read_bytes() if zp.exists() else b""
+          obs = hashlib.sha256(data).hexdigest()
+          rep["bundle_sha256_observed"] = obs; rep["bundle_size_observed"] = len(data)
+          chk("zip_sha256_matches_pinned", obs == pinned, obs)
+          chk("zip_size_matches_pinned", len(data) == int(os.environ["PINNED_BUNDLE_SIZE"]), len(data))
+          ex = W / "frozen"
+          if not rep["errors"]:
+              with zipfile.ZipFile(zp) as z:
+                  names = z.namelist()
+                  bad = [n for n in names if n.startswith("/") or ".." in pathlib.PurePosixPath(n).parts]
+                  chk("zip_member_paths_safe", not bad, bad)
+                  if not bad:
+                      z.extractall(ex)
+              roots = sorted(p.name for p in ex.iterdir()) if ex.exists() else []
+              chk("single_expected_root", roots == [os.environ["PINNED_BUNDLE_ROOT"]], roots)
+          if not rep["errors"]:
+              root = ex / os.environ["PINNED_BUNDLE_ROOT"]
+              lines = [l for l in (root / "MANIFEST.sha256").read_text().splitlines() if l.strip()]
+              man = {}
+              malformed = []
+              for l in lines:
+                  h, _, rel = l.partition("  ")
+                  if not re.fullmatch(r"[0-9a-f]{64}", h) or not rel or rel.startswith("/") or ".." in rel.split("/"):
+                      malformed.append(l)
+                  man[rel] = h
+              files = sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and p.name != "MANIFEST.sha256")
+              mism = [r for r, h in man.items() if (root / r).is_file() and hashlib.sha256((root / r).read_bytes()).hexdigest() != h]
+              chk("manifest_entries_well_formed", not malformed, malformed)
+              chk("manifest_no_missing_files", not sorted(set(man) - set(files)), sorted(set(man) - set(files)))
+              chk("manifest_no_unmanifested_files", not sorted(set(files) - set(man)), sorted(set(files) - set(man)))
+              chk("manifest_all_hashes_match", not mism, mism)
+              rep["manifest_entries"] = len(man)
+              snap = root / "CANDIDATE/source_snapshot"
+              cm = json.loads((root / "CANDIDATE/candidate_manifest.json").read_text())
+              cm_obs = {f.name: hashlib.sha256(f.read_bytes()).hexdigest() for f in sorted(snap.iterdir()) if f.is_file()}
+              chk("candidate_manifest_matches_snapshot", cm_obs == cm["files"], None)
+              cand = hashlib.sha256(json.dumps(cm_obs, sort_keys=True).encode()).hexdigest()
+              chk("candidate_sha_matches_pinned", cand == os.environ["PINNED_CANDIDATE_SHA"] == cm["CANDIDATE_SHA"], cand)
+              hs = hashlib.sha256((snap / "tools__run_b3.py").read_bytes()).hexdigest()
+              chk("harness_sha256_matches_pinned", hs == os.environ["PINNED_HARNESS_SHA256"], hs)
+              td = hashlib.sha256((root / "PRECHECK/test_definitions.json").read_bytes()).hexdigest()
+              chk("frozen_test_definitions_sha256", td == os.environ["PINNED_TESTDEFS_SHA256"], td)
+              pdfs = list((root / "AUTHORIZATION").glob("*.pdf"))
+              ps = hashlib.sha256(pdfs[0].read_bytes()).hexdigest() if len(pdfs) == 1 else None
+              prov = json.loads((root / "AUTHORIZATION/authorization_provenance.json").read_text())
+              chk("gate_b_authorization_sha256", ps == os.environ["PINNED_GATE_B_SHA256"] == prov.get("sha256"), ps)
+              lock = json.loads((root / "PRECHECK/SOURCE_LOCK.json").read_text())
+              chk("frozen_source_lock_head", lock.get("head") == os.environ["PINNED_SOURCE_SHA"] and lock.get("all_match") is True, lock.get("head"))
+              cov = json.loads((root / "PRODUCER/test_coverage.json").read_text())
+              c = cov.get("counts", {})
+              chk("frozen_counts_21_tests_93_subcases", c.get("tests_total") == 21 and c.get("sub_cases_total") == 93, c)
+              # Rebuild the harness layout byte-for-byte (rename only) — nothing is edited.
+              cdir = W / "candidate"
+              (cdir / "lab").mkdir(parents=True, exist_ok=True); (cdir / "tools").mkdir(exist_ok=True)
+              for f in ["__init__.py", "c14n.py", "issuer_lab.py", "receiver.py", "adapter.py", "diag_capture.py", "q3_mandate.py"]:
+                  shutil.copyfile(snap / f, cdir / "lab" / f)
+              for f in ["acquire_sources.py", "make_test_definitions.py", "run_b1.py", "run_b3.py"]:
+                  shutil.copyfile(snap / ("tools__" + f), cdir / "tools" / f)
+              shutil.copyfile(snap / "REPRODUCE.md", cdir / "REPRODUCE.md")
+              re_cm = {}
+              for p in sorted(cdir.rglob("*")):
+                  if p.is_file():
+                      rel = str(p.relative_to(cdir)); key = rel.replace("lab/", "").replace("tools/", "tools__")
+                      re_cm[key] = hashlib.sha256(p.read_bytes()).hexdigest()
+              chk("rebuilt_layout_byte_identical", re_cm == cm["files"], None)
+          rep["integrity"] = "PASS" if not rep["errors"] else "FAIL"
+          (OUT / "integrity.json").write_text(json.dumps(rep, indent=2))
+          print(json.dumps({"integrity": rep["integrity"], "errors": rep["errors"]}, indent=2))
+          raise SystemExit(0 if not rep["errors"] else 1)
+          PY
+
+      - name: Install dependencies (versions recorded with the frozen run)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --no-cache-dir "cryptography==46.0.5" 2>&1 | tee "$OUT/logs/02_pip_install.txt"
+          # Pre-seed the harness pylibs with the exact versions found in the original run directory;
+          # the original acquire_sources.py then skips its own (range-pinned) pip step.
+          python -m pip install --disable-pip-version-check --no-cache-dir --target "$W/rv003_run/pylibs" \
+            "jsonschema==4.26.0" "jcs==0.3.0" 2>&1 | tee -a "$OUT/logs/02_pip_install.txt"
+          python -m pip freeze > "$OUT/logs/02_pip_freeze_interpreter.txt"
+          ls "$W/rv003_run/pylibs" | grep -i 'dist-info' > "$OUT/logs/02_pylibs_dist_info.txt"
+
+      - name: Acquire native source (original acquire_sources.py, outside netns)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RV003_BASE="$W/rv003_run"
+          python "$W/candidate/tools/acquire_sources.py" > "$OUT/logs/03_acquire_stdout.txt" 2> "$OUT/logs/03_acquire_stderr.txt"
+          cat "$OUT/logs/03_acquire_stdout.txt"
+          test "$(git -C "$W/rv003_run/ref_clone" rev-parse HEAD)" = "$PINNED_SOURCE_SHA"
+
+      - name: Run original B3 harness unmodified in an empty network namespace
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor; the original
+          # launcher uses `unshare -rn`, so this restriction is lifted on the ephemeral runner only.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 > "$OUT/logs/04_sysctl.txt" 2>&1 || true
+          export RV003_BASE="$W/rv003_run"
+          export RV003_CANDIDATE="$W/candidate"
+          export RV003_GATE_B="$(ls "$W/frozen/$PINNED_BUNDLE_ROOT"/AUTHORIZATION/*.pdf)"
+          echo "harness_start_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee "$OUT/logs/04_harness_timing.txt"
+          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u NO_PROXY \
+              -u http_proxy -u https_proxy -u all_proxy -u no_proxy \
+              timeout 4800 unshare -rn python "$W/candidate/tools/run_b3.py" \
+              > "$OUT/logs/04_harness_stdout.txt" 2> "$OUT/logs/04_harness_stderr.txt"
+          rc=$?
+          echo "harness_end_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) exit_code=$rc" | tee -a "$OUT/logs/04_harness_timing.txt"
+          tail -n 5 "$OUT/logs/04_harness_stdout.txt" || true
+          echo "$rc" > "$OUT/logs/04_harness_exit_code.txt"
+          exit 0
+
+      - name: Compare with frozen results and write verdict.json
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          python - <<'PY'
+          import glob, hashlib, json, os, pathlib, datetime
+          W = pathlib.Path(os.environ["W"]); OUT = pathlib.Path(os.environ["OUT"]); OUT.mkdir(parents=True, exist_ok=True)
+          def load(p):
+              try: return json.loads(pathlib.Path(p).read_text())
+              except Exception: return None
+          integ = load(OUT / "integrity.json") or {"integrity": "FAIL", "errors": ["integrity_step_did_not_complete"], "checks": {}}
+          frozen = load(W / "frozen" / os.environ["PINNED_BUNDLE_ROOT"] / "PRODUCER/test_coverage.json")
+          regen = load(W / "rv003_run/RESULTS_B3.json")
+          rc_p = OUT / "logs/04_harness_exit_code.txt"
+          harness_rc = int(rc_p.read_text().strip()) if rc_p.exists() else None
+          per_test, diffs = {}, []
+          if frozen and regen:
+              ft, rt = frozen["results_by_test"], regen.get("results_by_test", {})
+              for tid in sorted(set(ft) | set(rt)):
+                  f, r = ft.get(tid), rt.get(tid)
+                  fs = {k: v.get("pass") for k, v in (f or {}).get("sub_cases", {}).items()}
+                  rs = {k: v.get("pass") for k, v in (r or {}).get("sub_cases", {}).items()}
+                  same = f is not None and r is not None and f.get("status") == r.get("status") and fs == rs
+                  per_test[tid] = {"frozen_status": (f or {}).get("status"), "witness_status": (r or {}).get("status"),
+                                   "frozen_subcases": fs, "witness_subcases": rs, "match": same}
+                  if not same: diffs.append(tid)
+          rc = (regen or {}).get("counts", {})
+          env = (regen or {}).get("environment", {})
+          regen_root = None
+          if regen and regen.get("run_id"):
+              regen_root = W / "rv003_run/bundle" / ("RV003_DEV3_B3_" + regen["run_id"])
+          td_obs = None
+          if regen_root and (regen_root / "PRECHECK/test_definitions.json").exists():
+              td_obs = hashlib.sha256((regen_root / "PRECHECK/test_definitions.json").read_bytes()).hexdigest()
+          side = {
+              "harness_exit_code_zero": harness_rc == 0,
+              "counts_21_tests_93_subcases": rc.get("tests_total") == 21 and rc.get("sub_cases_total") == 93,
+              "test_definitions_sha256_matches": td_obs == os.environ["PINNED_TESTDEFS_SHA256"],
+              "source_sha_matches": (regen or {}).get("source_sha") == os.environ["PINNED_SOURCE_SHA"],
+              "candidate_sha_matches": (regen or {}).get("candidate_sha") == os.environ["PINNED_CANDIDATE_SHA"],
+              "network_external_attempts_zero": env.get("network_external_attempts") == 0,
+              "per_test_and_subcase_outcomes_match_frozen": bool(per_test) and not diffs,
+          }
+          if integ.get("integrity") != "PASS":
+              overall = "INTEGRITY_FAIL"
+          elif all(side.values()):
+              overall = "REPRODUCED"
+          else:
+              overall = "NOT_REPRODUCED"
+          verdict = {
+              "schema": "rv003-b3-independent-witness-verdict/v1",
+              "generated_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "workflow": {"repository": os.environ.get("GITHUB_REPOSITORY"), "run_id": os.environ.get("GITHUB_RUN_ID"),
+                           "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"), "commit_sha": os.environ.get("GITHUB_SHA"),
+                           "workflow_sha": os.environ.get("GITHUB_WORKFLOW_SHA"), "ref": os.environ.get("GITHUB_REF"),
+                           "actor": os.environ.get("GITHUB_ACTOR"), "triggering_actor": os.environ.get("GITHUB_TRIGGERING_ACTOR"),
+                           "runner_image": {"os": os.environ.get("ImageOS"), "version": os.environ.get("ImageVersion")}},
+              "inputs": {"bundle_url": os.environ.get("IN_BUNDLE_URL"), "expected_bundle_sha256": os.environ.get("IN_EXPECTED_SHA256"),
+                         "witness_note": os.environ.get("IN_WITNESS_NOTE")},
+              "bundle": {"name": os.environ["PINNED_BUNDLE_ROOT"] + ".zip",
+                         "sha256_expected": os.environ["PINNED_BUNDLE_SHA256"],
+                         "sha256_observed": integ.get("bundle_sha256_observed"),
+                         "size_expected": int(os.environ["PINNED_BUNDLE_SIZE"]),
+                         "size_observed": integ.get("bundle_size_observed")},
+              "integrity": {"result": integ.get("integrity"), "failed_checks": integ.get("errors"), "checks": integ.get("checks")},
+              "harness": {"path_in_bundle": "CANDIDATE/source_snapshot/tools__run_b3.py",
+                          "sha256": os.environ["PINNED_HARNESS_SHA256"], "modified": False,
+                          "exit_code": harness_rc, "network_namespace": "unshare -rn (empty)",
+                          "witness_run_id": (regen or {}).get("run_id"), "witness_status": (regen or {}).get("status")},
+              "counts": {"frozen": (frozen or {}).get("counts"), "witness": rc or None},
+              "environment": {"frozen": (frozen or {}).get("environment"), "witness": env or None},
+              "reproduction_checks": side,
+              "mismatched_tests": diffs,
+              "per_test": per_test,
+              "verdict": overall,
+              "verdict_meaning": {
+                  "REPRODUCED": "Bundle integrity verified and the unmodified harness, on a fresh runner, gave the same per-test statuses and per-sub-case pass/fail flags as the frozen bundle (21 tests / 93 sub-cases). It reproduces the recorded producer outcome, including any recorded FAIL; it is not a campaign PASS.",
+                  "NOT_REPRODUCED": "Integrity verified but the run did not complete or did not give the same outcomes; see reproduction_checks and mismatched_tests.",
+                  "INTEGRITY_FAIL": "The fetched bundle did not match the pinned SHA-256/manifest; nothing from it was executed."},
+              "scope": "Lab reproduction of RV-003 DEV3 B3 (D0-T01..D0-T21) only. Not a certification, not production evidence, not a human review, no statement about Integration Lock / E2E / production.",
+              "limitations": [
+                  "WITNESS INDEPENDENCE: this run was triggered from the project owner's mobile phone using the project owner's own authenticated GitHub account. It is therefore not organizationally independent of the owner/producer; independence is limited to execution on a fresh GitHub-hosted runner from a frozen, SHA-256-verified bundle.",
+                  "The workflow file and pinned hashes were prepared by an AI assistant at the owner's request; AI-produced reviews are not human reviews, and no human review is represented by this run.",
+                  "The harness is the producer's own code taken from the bundle; the witness verifies integrity and reproducibility, not the correctness or adequacy of the test design.",
+                  "The bundle URL is supplied by the person triggering the run; trust rests on the pinned SHA-256, not on the hosting location.",
+                  "Native source is fetched from GitHub at 674c860 before network isolation; dependency wheels come from PyPI (cryptography 46.0.5, jsonschema 4.26.0, jcs 0.3.0).",
+                  "Runner image, kernel and SQLite build differ from the producer host; these are recorded, not controlled.",
+                  "On a public repository, workflow logs and artifacts are visible to other GitHub users; the Gate B PDF and the regenerated ZIP are excluded from the artifact, only their hashes are kept."]
+          }
+          (OUT / "verdict.json").write_text(json.dumps(verdict, indent=2, ensure_ascii=False))
+          print(json.dumps({"verdict": overall, "integrity": integ.get("integrity"), "counts": rc, "mismatched_tests": diffs, "checks": side}, indent=2))
+          if regen_root and regen_root.exists():
+              import shutil
+              dst = OUT / "witness_regenerated_bundle"
+              shutil.copytree(regen_root, dst, ignore=shutil.ignore_patterns("*.pdf"))
+              shutil.copyfile(W / "rv003_run/RESULTS_B3.json", OUT / "witness_RESULTS_B3.json")
+          for z in glob.glob(str(W / "rv003_run/RV003_DEV3_B3_*.zip")):
+              (OUT / "witness_regenerated_zip.sha256").write_text(hashlib.sha256(open(z, "rb").read()).hexdigest() + "  " + os.path.basename(z) + "\n")
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as s:
+              s.write(f"## RV-003 B3 witness: **{overall}**\n\n- integrity: {integ.get('integrity')}\n- witness counts: {rc}\n- mismatched tests: {diffs or 'none'}\n\n"
+                      "> Limitation: triggered from the project owner's phone with the owner's GitHub account; not organizationally independent. Not a certification.\n")
+          raise SystemExit(0 if overall == "REPRODUCED" else 1)
+          PY
+
+      - name: Upload raw logs and verdict (artifact, 90 days)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rv003-b3-witness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rv003w/witness_out
+          retention-days: 90
+          if-no-files-found: warn
