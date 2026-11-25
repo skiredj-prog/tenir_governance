@@ -20,6 +20,7 @@ Exports:
     POSTURE_MAP, EXECUTION_DISPOSITION_MAP — KB3 posture mappings
 """
 from .decisions import Decision, ExecutionStatus, CheckType
+from .errors import InvalidArgumentError
 from .policy import CompositionPolicy
 from .lattice import compose, HashChainedLedger, LedgerEntry
 from .governor import DualKernelGovernor, ScoringKernelAdapter
@@ -33,6 +34,7 @@ from .._profile_meta import DISCLOSURE
 
 __all__ = [
     "Decision", "ExecutionStatus", "CheckType", "CompositionPolicy",
+    "InvalidArgumentError",
     "compose", "HashChainedLedger", "LedgerEntry",
     "DualKernelGovernor", "ScoringKernelAdapter",
     "CompositionHoldStrategy", "CompositionHoldManager",

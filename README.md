@@ -168,20 +168,20 @@ The formula is an implementation construct of the v5.3.0 policy model. It should
 
 ### Kernel verdicts
 
-For the demonstrator policy profile:
+For the default kernel policy (`tenir_kernel.KernelPolicy`):
 
 | Condition                          | Kernel verdict | Full middleware disposition |
 | ---------------------------------- | -------------- | --------------------------- |
 | `S ≥ flag_below`                   | `PASS`         | `allow`                     |
-| `hard_veto_below ≤ S < flag_below` | `FLAG`         | `allow_with_alert`          |
-| `S < hard_veto_below`              | `HARD_VETO`    | `block`                     |
+| `hard_veto_below < S < flag_below` | `FLAG`         | `allow_with_alert`          |
+| `S ≤ hard_veto_below`              | `HARD_VETO`    | `block`                     |
 
-Default demonstrator thresholds:
+Default thresholds of `tenir_kernel.KernelPolicy`:
 
 ```text
 epsilon          = 1e-6
-hard_veto_below  = 0.5
-flag_below       = 1.2
+hard_veto_below  = 0.75
+flag_below       = 0.90
 ```
 
 Thresholds are **policy parameters**, not universal constants.
@@ -260,7 +260,7 @@ client = TENIRGovernanceClient()
 
 result = client.adjudicate(
     GovernanceEvent(
-        pressure=0.7,
+        irreversibility_materiality=0.0, pressure=0.7,
         velocity=0.5,
         capacity=1.2
     )
@@ -346,26 +346,26 @@ Endpoint availability depends on the selected runtime/profile.
 
 # Policy Profiles
 
-## Kernel Demonstrator Profile
+## Kernel Default Policy
 
 | Parameter         |  Value |
 | ----------------- | -----: |
 | `epsilon`         | `1e-6` |
-| `hard_veto_below` |  `0.5` |
-| `flag_below`      |  `1.2` |
+| `hard_veto_below` | `0.75` |
+| `flag_below`      | `0.90` |
 
 ## Full Middleware
 
-| Profile     | Factory                              | Purpose                  |
-| ----------- | ------------------------------------ | ------------------------ |
-| `default`   | `PolicyEngine.default()`             | Canonical baseline       |
-| `partner_a` | `PolicyEngine.um6p_shadow_v4()`      | Shadow-monitor profile   |
-| `partner_b` | `PolicyEngine.ocp_sovereign_pilot()` | Industrial pilot profile |
+| Profile   | Factory                  | Purpose          |
+| --------- | ------------------------ | ---------------- |
+| `default` | `PolicyEngine.default()` | Default baseline |
 
-Default policy fingerprint:
+No other policy factory ships with this package. The full middleware (`TENIRGovernanceClient` with `PolicyEngine`) is outside the scope of the KB3 rendering: see the 5.7.7 entry of the CHANGELOG.
+
+Default policy fingerprint (`PolicyEngine.default().fingerprint()`):
 
 ```text
-d083e0b82a16c04d
+cb96dd8d35197ab0
 ```
 
 Profiles are deployment configurations. They should not be interpreted as universal TENIR policy values.
@@ -416,9 +416,10 @@ The repository includes policy and invariant validation:
 
 ```bash
 tenir-validate --policy default
-tenir-validate --policy partner_a --json
-tenir-validate --policy partner_b
+tenir-validate --policy default --json
 ```
+
+`default` is the only policy the validator accepts.
 
 The validation command checks the selected policy against the repository's defined invariants.
 

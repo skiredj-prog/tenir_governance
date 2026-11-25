@@ -333,7 +333,7 @@ class TestDualKernelGovernor:
             idempotency_key="quarantine-admission-race",
         )
         result = self._adjudicate(gov,
-            passage, pressure=0.2, velocity=0.3, capacity=1.0,
+            passage, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         assert result["composed_decision"] == Decision.HARD_VETO.value
@@ -355,7 +355,7 @@ class TestDualKernelGovernor:
             idempotency_key="quarantine-unbudgeted-race",
         )
         result = self._adjudicate(gov,
-            passage, pressure=0.2, velocity=0.3, capacity=1.0,
+            passage, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
         )
         assert result["composed_decision"] == Decision.HARD_VETO.value
         assert result["operation_state"] != OperationState.RESERVED.value
@@ -364,7 +364,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         assert result["operation_state"] == OperationState.RESERVED.value
@@ -404,7 +404,7 @@ class TestDualKernelGovernor:
             idempotency_key="active-provider-race",
         )
         result = self._adjudicate(gov,
-            passage, pressure=0.2, velocity=0.3, capacity=1.0,
+            passage, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         assert result["operation_state"] == OperationState.RESERVED.value
@@ -444,7 +444,7 @@ class TestDualKernelGovernor:
             idempotency_key="dispatch-flag-write-failure",
         )
         result = self._adjudicate(gov,
-            passage, pressure=0.2, velocity=0.3, capacity=1.0,
+            passage, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         assert result["operation_state"] == OperationState.RESERVED.value
@@ -471,8 +471,12 @@ class TestDualKernelGovernor:
         assert current.budget_reserved is True
         assert current.budget_committed is False
 
-    def test_resolve_hold_missing_fresh_epistemic_inputs_fails_closed(self):
-        """HOLD re-adjudication must not inherit favorable epistemic defaults."""
+    def test_resolve_hold_missing_fresh_epistemic_inputs_stays_held(self):
+        """HOLD re-adjudication must not inherit favorable epistemic defaults.
+
+        Rule A (candidate 5.7.7): measures still absent at re-adjudication are
+        insufficient evidence, not a veto. The HOLD is kept, never admitted;
+        5.7.6 hard-gated them and closed the attempt FAILED."""
         gov, _state = self._setup()
         key = "hold-missing-epistemic-evidence"
         record = OperationRecord(
@@ -494,15 +498,16 @@ class TestDualKernelGovernor:
 
         result = gov.resolve_hold(key, passage=passage)
 
-        assert result["scoring_decision"] == Decision.HARD_VETO.value
-        assert result["composed_decision"] == Decision.HARD_VETO.value
-        # Missing evidence must veto and terminally close the HOLD.
-        # "hold_resolved" means safely terminal, not admitted for execution.
-        assert result["hold_resolved"] is True
-        assert result["operation_state"] == OperationState.FAILED.value
-        assert "authority missing" in result["scoring_rationale"]
-        assert "context_fit missing" in result["scoring_rationale"]
-        assert "evidence_quality missing" in result["scoring_rationale"]
+        assert result["scoring_decision"] == Decision.HOLD.value
+        assert result["composed_decision"] == Decision.HOLD.value
+        # Missing evidence is neither a violation nor an admission: the HOLD
+        # stays, and nothing can be dispatched from it.
+        assert result["hold_resolved"] is False
+        assert result["operation_state"] == OperationState.HOLD.value
+        assert gov.registry.get(key).state == OperationState.HOLD
+        assert ("absent measure(s) pressure, velocity, capacity, option_space, authority, "
+                "context_fit, evidence_quality") in result["scoring_rationale"]
+        assert "missing: cannot adjudicate" not in result["scoring_rationale"]
 
     def test_resolve_hold_without_passage_does_not_re_adjudicate(self):
         """Omitting the passage must leave the operation in HOLD."""
@@ -527,22 +532,24 @@ class TestDualKernelGovernor:
         assert gov.registry.get(key).state == OperationState.HOLD
 
     def test_governor_missing_epistemic_inputs_fail_closed(self):
+        """Fail-closed means never admitted. Rule A (candidate 5.7.7): absent
+        epistemic inputs are a HOLD, not a HARD_VETO (5.7.6)."""
         gov, _state = self._setup()
         passage = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = gov.adjudicate(
-            passage, pressure=0.2, velocity=0.3, capacity=1.0,
+            passage, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
         )
-        assert result["scoring_decision"] == Decision.HARD_VETO.value
-        assert result["composed_decision"] == Decision.HARD_VETO.value
-        assert "authority missing" in result["scoring_rationale"]
-        assert "context_fit missing" in result["scoring_rationale"]
-        assert "evidence_quality missing" in result["scoring_rationale"]
+        assert result["scoring_decision"] == Decision.HOLD.value
+        assert result["composed_decision"] == Decision.HOLD.value
+        assert result["operation_state"] == OperationState.HOLD.value
+        assert ("absent measure(s) option_space, authority, context_fit, evidence_quality"
+                in result["scoring_rationale"])
 
     def test_safe_payment_both_pass(self):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         assert result["composed_decision"] in (Decision.PASS.value, Decision.FLAG.value)
@@ -553,7 +560,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = self._adjudicate(gov,
-            p, pressure=0.95, velocity=0.95, capacity=0.3,
+            p, irreversibility_materiality=0.0, pressure=0.95, velocity=0.95, capacity=0.3,
             resource_id="budget", amount=10.0,
         )
         assert result["scoring_decision"] == Decision.HARD_VETO.value
@@ -564,7 +571,7 @@ class TestDualKernelGovernor:
         p = Passage(agent_id="alice", action_type="delegation", recipient_id="eve")
         delegation = Delegation(delegating_agent_id="alice", delegatee_agent_id="eve")
         result = self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             delegation=delegation,
         )
         assert result["scoring_decision"] in (Decision.PASS.value, Decision.FLAG.value)
@@ -576,7 +583,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup(budget_capacity=50.0)
         p1 = Passage(agent_id="alice", action_type="payment", amount=30.0)
         r1 = self._adjudicate(gov,
-            p1, pressure=0.2, velocity=0.3, capacity=1.0,
+            p1, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=30.0,
         )
         assert r1["composed_decision"] in (Decision.PASS.value, Decision.FLAG.value)
@@ -584,7 +591,7 @@ class TestDualKernelGovernor:
 
         p2 = Passage(agent_id="alice", action_type="payment", amount=30.0)
         r2 = self._adjudicate(gov,
-            p2, pressure=0.2, velocity=0.3, capacity=1.0,
+            p2, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=30.0,
         )
         assert r2["scoring_decision"] in (Decision.PASS.value, Decision.FLAG.value)
@@ -595,7 +602,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = self._adjudicate(gov,
-            p, pressure=0.9, velocity=0.9, capacity=0.7,
+            p, irreversibility_materiality=0.0, pressure=0.9, velocity=0.9, capacity=0.7,
             resource_id="budget", amount=10.0,
         )
         assert result["scoring_decision"] == Decision.FLAG.value
@@ -605,7 +612,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         entries = gov.ledger.entries
@@ -621,7 +628,7 @@ class TestDualKernelGovernor:
         p = Passage(agent_id="alice", action_type="delegation", recipient_id="eve")
         delegation = Delegation(delegating_agent_id="alice", delegatee_agent_id="eve")
         result = self._adjudicate(gov,
-            p, pressure=0.01, velocity=0.01, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.01, velocity=0.01, capacity=1.0,
             delegation=delegation,
         )
         assert result["scoring_decision"] in (Decision.PASS.value, Decision.FLAG.value)
@@ -633,7 +640,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup(budget_capacity=100.0)
         p1 = Passage(agent_id="alice", action_type="payment", amount=80.0)
         r1 = self._adjudicate(gov,
-            p1, pressure=0.2, velocity=0.3, capacity=1.0,
+            p1, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=80.0,
         )
         assert r1["composed_decision"] in (Decision.PASS.value, Decision.FLAG.value)
@@ -641,7 +648,7 @@ class TestDualKernelGovernor:
 
         p2 = Passage(agent_id="alice", action_type="payment", amount=5.0)
         r2 = self._adjudicate(gov,
-            p2, pressure=0.9, velocity=0.9, capacity=0.7,
+            p2, irreversibility_materiality=0.0, pressure=0.9, velocity=0.9, capacity=0.7,
             resource_id="budget", amount=5.0,
         )
         assert r2["scoring_decision"] == Decision.FLAG.value
@@ -652,7 +659,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         assert "execution_status" in result
@@ -670,7 +677,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         r1 = self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         assert r1["composed_decision"] in (Decision.PASS.value, Decision.FLAG.value)
@@ -679,7 +686,7 @@ class TestDualKernelGovernor:
         p2 = Passage(agent_id="alice", action_type="payment", amount=10.0,
                      idempotency_key=p.idempotency_key)
         r2 = self._adjudicate(gov,
-            p2, pressure=0.2, velocity=0.3, capacity=1.0,
+            p2, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         assert r2["composed_decision"] == Decision.HARD_VETO.value
@@ -697,7 +704,7 @@ class TestDualKernelGovernor:
         gov.scoring = BrokenScoring()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         # Must be HOLD, not PASS
@@ -709,7 +716,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup(budget_capacity=100.0, policy=CompositionPolicy(budget_escalation_threshold=0.50, **TEST_POLICY_KW))
         p1 = Passage(agent_id="alice", action_type="payment", amount=45.0)
         r1 = self._adjudicate(gov,
-            p1, pressure=0.2, velocity=0.3, capacity=1.0,
+            p1, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=45.0,
         )
         assert r1["composed_decision"] in (Decision.PASS.value, Decision.FLAG.value)
@@ -718,7 +725,7 @@ class TestDualKernelGovernor:
         # FLAG + 50% budget with 50% threshold → HOLD
         p2 = Passage(agent_id="alice", action_type="payment", amount=5.0)
         r2 = self._adjudicate(gov,
-            p2, pressure=0.9, velocity=0.9, capacity=0.7,
+            p2, irreversibility_materiality=0.0, pressure=0.9, velocity=0.9, capacity=0.7,
             resource_id="budget", amount=5.0,
         )
         assert r2["scoring_decision"] == Decision.FLAG.value
@@ -729,7 +736,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         r1 = self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         assert r1["composed_decision"] in (Decision.PASS.value, Decision.FLAG.value)
@@ -749,7 +756,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup(budget_capacity=100.0)
         p = Passage(agent_id="alice", action_type="payment", amount=30.0)
         r1 = self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=30.0,
         )
         assert r1["composed_decision"] in (Decision.PASS.value, Decision.FLAG.value)
@@ -771,7 +778,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         adj = self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         result = gov.resume_existing(p.idempotency_key)
@@ -789,7 +796,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         gov.dispatch(p.idempotency_key, resource_id="budget", amount=10.0, flag_conditions_met=TEST_FLAG_ACK)
@@ -803,12 +810,16 @@ class TestDualKernelGovernor:
     def test_invalid_amount_fails_closed_before_reservation(self, amount):
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
-        result = self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
-            resource_id="budget", amount=amount,
-        )
-        assert result["composed_decision"] == Decision.HARD_VETO.value
-        assert result["execution_status"] == "blocked"
+        # R8: a malformed request is refused at the API boundary, never
+        # adjudicated: INVALID_ARGUMENT, not a governance HARD_VETO.
+        from tenir_governance.composition import InvalidArgumentError
+        with pytest.raises(InvalidArgumentError) as exc_info:
+            self._adjudicate(gov,
+                p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
+                resource_id="budget", amount=amount,
+            )
+        assert exc_info.value.code == "INVALID_ARGUMENT"
+        assert exc_info.value.field == "amount"
         assert gov.registry.get(p.idempotency_key) is None
         assert state.resources["budget"].reserved == 0.0
 
@@ -832,7 +843,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         assert result["operation_state"] == OperationState.RESERVED.value
@@ -847,7 +858,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = self._adjudicate(
-            gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
+            gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
             payload={"recipient": "merchant-1", "currency": "USD"},
         )
@@ -868,7 +879,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = self._adjudicate(
-            gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
+            gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
             payload={"currency": "USD", "recipient": "merchant-1"},
         )
@@ -886,16 +897,20 @@ class TestDualKernelGovernor:
 
     @pytest.mark.parametrize("payload", [{"amount": float("nan")}, {1: "non-string-key"}, {"value": object()}])
     def test_adjudication_rejects_payload_outside_canonical_json(self, payload):
+        """R8 (5.7.7 candidate): a malformed request is an API-level
+        INVALID_ARGUMENT, not a governance HARD_VETO. Nothing is registered."""
+        from tenir_governance.composition import InvalidArgumentError
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
 
-        result = self._adjudicate(
-            gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
-            resource_id="budget", amount=10.0, payload=payload,
-        )
+        with pytest.raises(InvalidArgumentError) as exc:
+            self._adjudicate(
+                gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
+                resource_id="budget", amount=10.0, payload=payload,
+            )
 
-        assert result["composed_decision"] == Decision.HARD_VETO.value
-        assert result["operation_state"] == "not_registered"
+        assert exc.value.code == "INVALID_ARGUMENT" and exc.value.field == "payload"
+        assert exc.value.to_dict()["operation_state"] == "not_registered"
         assert gov.registry.get(p.idempotency_key) is None
         assert state.resources["budget"].reserved == 0.0
 
@@ -903,7 +918,7 @@ class TestDualKernelGovernor:
         gov, state = self._setup()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = self._adjudicate(gov,
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         assert result["operation_state"] == OperationState.RESERVED.value
@@ -926,29 +941,30 @@ class TestScoringKernelAdapter:
     def test_safe_inputs_pass(self):
         adapter = self._setup()
         result = adapter.adjudicate(
-            pressure=0.2, velocity=0.3, capacity=1.0,
+            irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             authority=1.0, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         )
         assert result["decision"] in (Decision.PASS.value, Decision.FLAG.value)
         assert result["s_score"] is not None
 
     def test_missing_mandatory_epistemic_inputs_fail_closed(self):
+        """Rule A (candidate 5.7.7): HOLD, never admitted; 5.7.6 hard-gated."""
         adapter = self._setup()
-        result = adapter.adjudicate(pressure=0.2, velocity=0.3, capacity=1.0)
-        assert result["decision"] == Decision.HARD_VETO.value
-        assert "authority missing" in result["rationale"]
-        assert "context_fit missing" in result["rationale"]
-        assert "evidence_quality missing" in result["rationale"]
+        result = adapter.adjudicate(irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0)
+        assert result["decision"] == Decision.HOLD.value
+        assert ("INSUFFICIENT_EVIDENCE: absent measure(s) option_space, authority, "
+                "context_fit, evidence_quality" in result["rationale"])
+        assert result["constraint_geometry"] is None  # never evaluated on placeholders
 
     def test_high_stress_hard_veto(self):
         adapter = self._setup()
-        result = adapter.adjudicate(pressure=0.95, velocity=0.95, capacity=0.3)
+        result = adapter.adjudicate(irreversibility_materiality=0.0, pressure=0.95, velocity=0.95, capacity=0.3)
         assert result["decision"] == Decision.HARD_VETO.value
 
     def test_moderate_stress_flag(self):
         adapter = self._setup()
         result = adapter.adjudicate(
-            pressure=0.9, velocity=0.9, capacity=0.7,
+            irreversibility_materiality=0.0, pressure=0.9, velocity=0.9, capacity=0.7,
             authority=1.0, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         )
         assert result["decision"] == Decision.FLAG.value
@@ -956,7 +972,7 @@ class TestScoringKernelAdapter:
     def test_low_evidence_quality_flag(self):
         adapter = self._setup()
         result = adapter.adjudicate(
-            pressure=0.2, velocity=0.3, capacity=1.0,
+            irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             authority=1.0, context_fit=1.0, evidence_quality=0.3, option_space=0.9
         )
         assert result["decision"] == Decision.FLAG.value
@@ -973,7 +989,7 @@ class TestScoringKernelAdapter:
     def test_constraint_geometry_returned(self):
         adapter = self._setup()
         result = adapter.adjudicate(
-            pressure=0.2, velocity=0.3, capacity=1.0,
+            irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             authority=1.0, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         )
         assert "constraint_geometry" in result
@@ -983,7 +999,7 @@ class TestScoringKernelAdapter:
     def test_returns_kernel_identifier(self):
         adapter = self._setup()
         result = adapter.adjudicate(
-            pressure=0.2, velocity=0.3, capacity=1.0,
+            irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             authority=1.0, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         )
         assert result["kernel"] == "scoring"
@@ -1020,7 +1036,7 @@ class TestSchemaAdapter:
                 "confidence_ceiling": "high",
             },
             "scores": {
-                "pressure": 0.2,
+                "irreversibility_materiality": 0.0, "pressure": 0.2,
                 "velocity": 0.3,
                 "capacity": 1.0,
                 "option_space": 0.8,
@@ -1052,7 +1068,7 @@ class TestSchemaAdapter:
             "trace": {"trace_id": "fixture-trace", "stages": []},
             "synthesis": {
                 "structural_core": {
-                    "pressure": 0.2,
+                    "irreversibility_materiality": 0.0, "pressure": 0.2,
                     "velocity": 0.3,
                     "capacity": 1.0,
                     "option_space": 0.8,
@@ -1137,7 +1153,7 @@ class TestSchemaAdapter:
         assert "disclosure" in result
         d = result["disclosure"]
         assert d["doctrinal_version"] == "TENIR 2.0"
-        assert d["platform_version"] == "5.6.1"
+        assert d["platform_version"] == "5.7.7"
         assert d["contract_version"] == "1.2"
         assert d["compliance_class"] == "profile-bound"
         assert "agentic-governance-profile-v1.0.0" in d["active_profiles"]

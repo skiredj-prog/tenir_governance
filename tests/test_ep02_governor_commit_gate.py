@@ -297,9 +297,14 @@ def test_adjudication_requires_and_persists_complete_commit_identity(tmp_path):
         agent_id="agent-1", action_type="payment",
     )
 
-    rejected = governor.adjudicate(
-        missing, institutional_scope="institution-a",
-    )
+    import pytest
+    from tenir_governance.composition import InvalidArgumentError
+
+    # R8 (5.7.7 candidate): a request without the Profile S digest is
+    # malformed for this gate: INVALID_ARGUMENT at the API boundary, not a
+    # governance HARD_VETO; nothing is registered.
+    with pytest.raises(InvalidArgumentError) as rejected:
+        governor.adjudicate(missing, institutional_scope="institution-a")
     accepted = governor.adjudicate(
         complete,
         payload_digest=PAYLOAD_DIGEST,
@@ -307,7 +312,8 @@ def test_adjudication_requires_and_persists_complete_commit_identity(tmp_path):
         institutional_scope="institution-a",
     )
 
-    assert rejected["operation_state"] == "not_registered"
+    assert rejected.value.code == "INVALID_ARGUMENT"
+    assert rejected.value.to_dict()["operation_state"] == "not_registered"
     assert registry.get("idem-missing") is None
     assert accepted["operation_state"] == OperationState.RESERVED.value
     durable = registry.get("idem-complete")

@@ -11,13 +11,13 @@ Governance Branch:    tenir_governance/
 ├── nomenclature.py          — Sprint 0: canonical term registry (R4+R5 unified)
 ├── policy_engine.py         — Sprint 1: policy contract + membrane decision
 ├── validator.py             — Sprint 1/3: CI gate (standalone + pytest fixture)
-├── regression_corpus.py     — Sprint 4: 281 golden cases
+├── regression_corpus.py     — Sprint 4: 55 golden cases
 ├── sdk.py                   — Sprint 5: SDK/Governance branch public client
 ├── polymorphic_surface.py   — Sprint 10: V5 surface state contract
 ├── copy_lint.py             — Sprint 9: public-safe lexicon enforcement
 └── ledger_migrate.py        — Sprint 11: legacy label migration
 
-Version: 5.7.6 (TENIR 2.0 runtime kernel)
+Version: 5.7.7, unreleased candidate (TENIR 2.0 runtime kernel)
 Policy: tenir-canonical-v1.0.0
 Policy fingerprint: d083e0b82a16c04d0
 """
@@ -131,7 +131,7 @@ from .assessment import (
     AssessmentReport,
 )
 
-__version__ = "5.7.6"
+__version__ = "5.7.7"
 __policy_version__ = "tenir-canonical-v1.0.0"
 __profile_version__ = "agentic-governance-profile-v1.0.0"
 __schema_version__ = "1.2"

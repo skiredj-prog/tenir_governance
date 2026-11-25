@@ -45,6 +45,7 @@ import json
 import math
 import re
 import threading
+import time
 from typing import Any, Mapping, Optional
 from uuid import uuid4
 
@@ -62,6 +63,7 @@ from ..operations.registry import (
 )
 from ..operations.hold import HoldManager
 from ..operations.payload_binding import canonical_payload_hash
+from .errors import InvalidArgumentError
 from ..assessment.assessor import PostExecutionAssessor, AssessmentReport
 
 
@@ -102,6 +104,64 @@ class ScoringKernelAdapter:
     return shape so the governor and composition layer work unchanged.
     """
 
+    # The admissible domain this kernel declares for every measure it reads
+    # (draft RFC-2 v0.2 §1.4: the kernel declares its domain, the standard
+    # does not prescribe it). Closed interval; a finite value outside it is
+    # rejected explicitly (INVALID_ARGUMENT), it is never adjudicated.
+    MEASURE_DOMAIN: tuple[float, float] = (0.0, 1.0)
+    MEASURED_AXES: tuple[str, ...] = (
+        "pressure", "velocity", "capacity", "option_space", "authority",
+        "context_fit", "evidence_quality", "irreversibility_materiality",
+    )
+
+    @classmethod
+    def declared_domain(cls) -> dict[str, tuple[float, float]]:
+        """The declared admissible domain of each measured axis, by name."""
+        return {name: cls.MEASURE_DOMAIN for name in cls.MEASURED_AXES}
+
+    @classmethod
+    def out_of_domain(cls, named: dict[str, Any]) -> list[str]:
+        """Names of the measures whose value is a finite number outside the
+        declared domain. ``None`` (absent) and non-finite values (NaN, ±inf)
+        are not in this list: they are unknown measures, handled by rule A.
+        A boolean or a non-number is not a value either."""
+        low, high = cls.MEASURE_DOMAIN
+        return [
+            n for n, v in named.items()
+            if v is not None and not isinstance(v, bool) and isinstance(v, (int, float))
+            and math.isfinite(v) and not (low <= v <= high)
+        ]
+
+    @classmethod
+    def malformed_measures(cls, named: dict[str, Any]) -> list[str]:
+        """Names of the measures whose value is not a number at all: a
+        boolean, a string, a container. Not a measure, not an unknown either
+        (author's decision of 23 November 2026, 11:22 UTC: rejected like a
+        value outside the declared domain). ``None`` and NaN/±inf are not in
+        this list: they are unknown measures (rule A)."""
+        return [n for n, v in named.items()
+                if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)))]
+
+    @classmethod
+    def _malformed_reason(cls, named: dict[str, Any], names: list[str]) -> str:
+        values = "; ".join(f"{n}={named[n]!r} ({type(named[n]).__name__})" for n in names)
+        return (
+            f"Measure(s) that are not numbers: {values}. Request refused explicitly; not a "
+            "governance decision. A measure is a finite number in the kernel's declared "
+            "domain; an unknown measure is passed as None or NaN."
+        )
+
+    @classmethod
+    def _out_of_domain_reason(cls, named: dict[str, Any], names: list[str]) -> str:
+        low, high = cls.MEASURE_DOMAIN
+        values = "; ".join(f"{n}={named[n]!r}" for n in names)
+        return (
+            f"Measure(s) outside the kernel's declared domain [{low:g}, {high:g}]: {values}. "
+            "Request refused explicitly; not a governance decision. The domain is "
+            "declared by the kernel (ScoringKernelAdapter.declared_domain()); an "
+            "unknown measure is passed as None or NaN, not as an out-of-domain value."
+        )
+
     def __init__(self, tenir_kernel, *, tau_floor: float = 0.42,
                  option_space_alert_floor: float = 0.35,
                  option_space_block_floor: float = 0.20,
@@ -111,6 +171,36 @@ class ScoringKernelAdapter:
         self._option_space_alert_floor = option_space_alert_floor
         self._option_space_block_floor = option_space_block_floor
         self._reaction_budget_events = reaction_budget_events
+        self._reject_facets_on_never_measured_axes()
+
+    # Axes this interface never measures. The kernel requires a structurally
+    # complete geometry point, so the main path fills them with a neutral
+    # placeholder (0.5) that no facet may read (R7, author's decision of
+    # 2026-11-23: an omitted axis is unknown, no default may trigger a
+    # geometric veto). A geometry whose facet reads one of them is rejected
+    # when the adapter is built: no veto, flag or reason can then rest on a
+    # placeholder. The reference geometry reads none of them.
+    _NEVER_MEASURED_AXES = frozenset({
+        "cooperative_control_score", "trajectory_risk_score", "manipulation_risk", "drift",
+    })
+
+    def _reject_facets_on_never_measured_axes(self) -> None:
+        geometry = getattr(getattr(self._kernel, "policy", None), "geometry", None)
+        facets = getattr(geometry, "facets", None) or ()
+        offending = []
+        for facet in facets:
+            axes = sorted(set(getattr(facet, "normal", {}) or {}) & self._NEVER_MEASURED_AXES)
+            if axes:
+                offending.append(
+                    f"{getattr(facet, 'facet_id', '?')} ({getattr(facet, 'severity', '?')}) "
+                    f"reads {', '.join(axes)}")
+        if offending:
+            raise ValueError(
+                "Geometry rejected: a facet reads an axis this interface never measures, "
+                "so it would be evaluated on a placeholder, never on a measure: "
+                + "; ".join(offending)
+                + ". Measure the axis through the interface, or remove the facet."
+            )
 
     def _build_coordinates(
         self,
@@ -143,8 +233,9 @@ class ScoringKernelAdapter:
         self._unmeasured_axes: list[str] = []
 
         # Mandatory epistemic inputs must never acquire favorable defaults.
-        # A neutral placeholder keeps the geometry structurally complete; the
-        # missing measurement is separately converted into a hard gate below.
+        # A neutral placeholder keeps the geometry structurally complete. Since
+        # 5.7.7 (candidate) adjudicate() holds an absent mandatory input before
+        # building coordinates (rule A); the placeholder stays for direct calls.
         mandatory = {
             "authority": authority,
             "context_fit": context_fit,
@@ -198,7 +289,7 @@ class ScoringKernelAdapter:
         authority: float | None = None,
         context_fit: float | None = None,
         evidence_quality: float | None = None,
-        irreversibility_materiality: float = 0.0,
+        irreversibility_materiality: float | None = None,
     ) -> dict[str, Any]:
         """Delegate to TenirKernel with injected gate reasons.
 
@@ -209,62 +300,66 @@ class ScoringKernelAdapter:
         hard_reasons: list[str] = []
         soft_reasons: list[str] = []
 
-        # Decision 5: finiteness guard at the kernel's entry. A non-finite
-        # measure (NaN, ±inf, a non-number) is insufficient evidence, never
-        # PASS: it must not reach a comparison, where NaN compares false and
-        # admits. It is reported as unmeasured, and every conclusive veto the
-        # other inputs still support is evaluated and governs (RFC-0 §4).
-        # A finite value outside the normalized range [0, 1] is just as
-        # invalid: the kernel rejects it, and a raise would end in the
-        # fail-closed HOLD that masks a veto. It is handled the same way.
-        def _finite(v):
-            if v is None:
-                return True  # absence is handled below as a missing measure
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                return False
-            return math.isfinite(v) and 0.0 <= v <= 1.0
         named = {"pressure": pressure, "velocity": velocity, "capacity": capacity,
                  "option_space": option_space, "authority": authority,
                  "context_fit": context_fit, "evidence_quality": evidence_quality,
                  "irreversibility_materiality": irreversibility_materiality}
-        non_finite = [n for n, v in named.items() if not _finite(v)]
-        pvc_non_finite = [n for n in ("pressure", "velocity", "capacity") if n in non_finite]
-        if "option_space" in non_finite:
-            option_space = None
-        if "authority" in non_finite:
-            authority = 0.5
-        if "context_fit" in non_finite:
-            context_fit = 0.5
-        if "evidence_quality" in non_finite:
-            evidence_quality = 0.5
-        if "irreversibility_materiality" in non_finite:
-            irreversibility_materiality = 0.5
-        if pvc_non_finite:
-            # S cannot be computed: no S-based verdict is drawn from a placeholder.
-            measured = {n: v for n, v in named.items()
-                        if v is not None and n not in non_finite}
-            return self._insufficient_evidence_without_s(
-                non_finite, option_space=option_space,
-                capacity=None if "capacity" in non_finite else capacity,
-                missing=[n for n in ("authority", "context_fit", "evidence_quality")
-                         if named[n] is None],
-                measured=measured,
+        # Declared domain (candidate 5.7.7, author's decision of 23 November
+        # 2026, P8 option A; draft RFC-2 v0.2 §1.4, not ratified): a finite
+        # value outside the domain this kernel declares for its measures is
+        # not a measure of that axis. It is rejected explicitly, before any
+        # evaluation, as INVALID_ARGUMENT, never closed by a decision. Between
+        # 19 and 23 November it was read as an unknown measure (HOLD), which
+        # closed the request by a disposition instead of refusing it.
+        malformed = self.malformed_measures(named)
+        if malformed:
+            raise InvalidArgumentError(self._malformed_reason(named, malformed),
+                                       field=",".join(malformed))
+        out_of_domain = self.out_of_domain(named)
+        if out_of_domain:
+            raise InvalidArgumentError(
+                self._out_of_domain_reason(named, out_of_domain),
+                field=",".join(out_of_domain),
             )
+        # Decision 5: finiteness guard at the kernel's entry. A non-finite
+        # measure (NaN, ±inf) is insufficient evidence, never PASS: it must not
+        # reach a comparison, where NaN compares false and admits. It is
+        # reported as unmeasured, and every conclusive veto the other inputs
+        # still support is evaluated and governs (RFC-0 §4). NaN is the
+        # caller's own way of saying "unknown" (an unmeasured axis has no
+        # value, in the domain or out of it); it is not a value. Every value
+        # here is None or a number: the rest was refused above.
+        def _finite(v):
+            return v is None or math.isfinite(v)
+        non_finite = [n for n, v in named.items() if not _finite(v)]
+        absent = [n for n, v in named.items() if v is None]
+        # Rule A (candidate 5.7.7, author's decision of 23 November 2026,
+        # pending ratification of the amended RFC-2 v0.2): a measure that S or
+        # a geometry facet reads is unknown when it is absent (None, JSON null)
+        # exactly as when it is invalid. The absence of a measure is proof
+        # neither of a violation nor of admissibility: HOLD, unless a
+        # conclusive veto governs, one the valid measures establish whatever
+        # value the unknown ones would take. No verdict, and no reason, is
+        # drawn from a placeholder (draft RFC-2 v0.2 §3). 5.7.6 hard-gated an
+        # absent authority, context_fit or evidence_quality, and vetoed on the
+        # authority placeholder (0.5) when authority was invalid.
+        unknown = set(non_finite) | set(absent)
+        if unknown:
+            # option_space included (R7, 2026-11-23): an unknown option space
+            # used to reach the main path on a placeholder (0.5) that a custom
+            # facet could read. It takes the insufficient-evidence path, where
+            # a facet is conclusive only whatever value the unknown axis would
+            # take in [0, 1].
+            return self._insufficient_evidence(named, non_finite, absent)
+        # Every input is a valid measure past this point. The only placeholders
+        # the kernel sees are the never-measured axes, which no facet reads
+        # (rejected at construction).
 
         # Compute the extra signals the prototype's ScoringKernel checked
         # but TenirKernel does not natively evaluate. These become gate reasons
         # injected into TenirKernel.adjudicate().
-        # No favorable default for S (decision 2): a missing P, V or C is a hard
-        # gate. The placeholders only keep the arithmetic defined; capacity 0
-        # is the conservative bound, so the S preview cannot read as safe.
-        missing_pvc = [n for n, v in (("pressure", pressure), ("velocity", velocity),
-                                      ("capacity", capacity)) if v is None]
-        for n in missing_pvc:
-            hard_reasons.append(f"{n} missing: cannot score S without it")
-        if missing_pvc:
-            pressure = 0.5 if pressure is None else pressure
-            velocity = 0.5 if velocity is None else velocity
-            capacity = 0.0 if capacity is None else capacity
+        # Every measure S and the geometry facets read is valid here (an absent
+        # or invalid one returned above): no verdict is drawn from a placeholder.
         s_preview = capacity / (pressure * velocity + 1e-6)
         if s_preview <= self._tau_floor:
             hard_reasons.append(
@@ -303,23 +398,13 @@ class ScoringKernelAdapter:
         # measurements. This prevents a favorable score from being
         # interpreted as evidence of safety on unmeasured dimensions.
         unmeasured = getattr(self, "_unmeasured_axes", [])
-        unmeasured.extend(n for n in missing_pvc if n not in unmeasured)
-        for n in non_finite:
-            if n in unmeasured:
-                unmeasured.remove(n)  # it has a value, but not a measure
-            unmeasured.append(n)
         for axis in unmeasured:
             soft_reasons.append(f"unmeasured axis: {axis} (neutral default, not favorable)")
 
-        # Missing mandatory epistemic inputs are a hard gate. A measured
-        # value of zero is not "missing": it is real evidence for the geometry
-        # to evaluate. Only None denotes absence.
-        if authority is None:
-            hard_reasons.append("authority missing: cannot adjudicate without authority assessment")
-        if context_fit is None:
-            hard_reasons.append("context_fit missing: cannot adjudicate without context assessment")
-        if evidence_quality is None:
-            hard_reasons.append("evidence_quality missing: cannot adjudicate without evidence")
+        # A measured value of zero is not "missing": it is real evidence for
+        # the geometry to evaluate (authority=0.0 meets the authority floor).
+        # An absent mandatory input no longer reaches this point (rule A).
+
         # Delegate core scoring to TenirKernel
         tk_result = self._kernel.adjudicate(
             pressure=pressure,
@@ -345,31 +430,21 @@ class ScoringKernelAdapter:
             decision = Decision.HOLD.value
 
         rationale = tk_result.get("rationale", "")
-        if non_finite and decision in (Decision.PASS.value, Decision.FLAG.value):
-            # Insufficient evidence: no admission on a non-finite measure. A
-            # conclusive veto from the other inputs has already governed above.
-            decision = Decision.HOLD.value
-            rationale = (f"INSUFFICIENT_EVIDENCE: invalid measure(s) (non-finite or outside [0, 1]) {', '.join(non_finite)}; "
-                         "held, not scored as admissible. " + rationale).strip()
-        if option_space is None and decision in (Decision.PASS.value, Decision.FLAG.value):
-            # Decision 2 applied in full (5.7.6): an unmeasured option space is
-            # insufficient evidence, not a neutral admission. The placeholder
-            # keeps the geometry complete and the axis stays declared
-            # unmeasured; every conclusive veto above has already governed.
-            # HOLD, not a veto: the operation waits for the measure.
-            decision = Decision.HOLD.value
-            rationale = ("INSUFFICIENT_EVIDENCE: option_space unmeasured; held, not admitted "
-                         "(re-adjudicate with the option-space measure). " + rationale).strip()
+        # An unknown input (absent or invalid, option_space included) never
+        # reaches this point: it returned from _insufficient_evidence above.
 
         return {
             "kernel": "scoring",
             "s_score": tk_result.get("s_score"),
             "decision": decision,
             "rationale": rationale,
-            # A non-finite input is reported as null (decision 6), not as its placeholder.
-            "authority": None if "authority" in non_finite else authority,
-            "context_fit": None if "context_fit" in non_finite else context_fit,
-            "evidence_quality": None if "evidence_quality" in non_finite else evidence_quality,
+            # True only on the insufficient-evidence path (rule A, 5.7.7
+            # candidate), where the HOLD waits for a measure the caller did
+            # not supply. The governor reserves no budget for such a HOLD.
+            "insufficient_evidence": False,
+            "authority": authority,
+            "context_fit": context_fit,
+            "evidence_quality": evidence_quality,
             "constraint_geometry": tk_result.get("constraint_geometry"),
             "operating_mode": tk_result.get("operating_mode"),
             # Axes that carry no measurement: a neutral placeholder keeps the
@@ -381,48 +456,104 @@ class ScoringKernelAdapter:
     # Adapter input name -> geometry axis name, where they differ.
     _GEOMETRY_AXIS = {"irreversibility_materiality": "irreversible_pathway_materiality"}
 
+    # The measures S = C / (P·V + ε) and the reference geometry's facets read.
+    # One of them unknown (absent or invalid) means insufficient evidence (rule A).
+    _SCORED_MEASURES = ("pressure", "velocity", "capacity", "authority", "context_fit",
+                        "evidence_quality", "irreversibility_materiality")
+
     def _conclusive_geometry_vetoes(self, measured):
-        """Hard facets of the kernel's geometry whose every axis carries a
-        valid measure. Such a facet does not depend on an unknown value, so
-        its violation is conclusive and must govern (RFC-0 §4)."""
+        """Hard facets of the kernel's geometry violated whatever value the
+        axes without a valid measure take. Coordinates are normalized to
+        [0, 1] and a facet is the half-space ``normal · point <= bound``, so
+        the most favorable value of an unknown axis contributes min(0, w).
+        A facet whose every axis is measured is the common case. Such a
+        violation does not depend on an unknown value: it is conclusive and
+        must govern (RFC-0 §4). No facet is evaluated on a placeholder."""
         point = {self._GEOMETRY_AXIS.get(n, n): float(v) for n, v in measured.items()}
         policy = getattr(getattr(self._kernel, "policy", None), "geometry", None)
         reasons = []
         for facet in getattr(policy, "facets", ()):
-            if facet.severity != "hard" or not set(facet.normal) <= set(point):
+            if facet.severity != "hard":
                 continue
-            if sum(w * point[a] for a, w in facet.normal.items()) > facet.bound:
+            least = sum(w * point[a] if a in point else min(0.0, w)
+                        for a, w in facet.normal.items())
+            if least > facet.bound:
                 reasons.append(facet.rationale)
         return reasons
 
-    def _insufficient_evidence_without_s(self, non_finite, *, option_space, capacity, missing,
-                                         measured=None):
-        """P, V or C is invalid: S is unknown. Veto on what is still
-        conclusive without S (a missing mandatory measure, a hard geometry
-        facet whose axes are all measured, such as authority or context_fit
-        below its floor, option space at its block floor, a measured capacity
-        of zero, which makes S = 0 whatever P and V are); otherwise HOLD for
-        insufficient evidence."""
-        hard = [f"{n} missing: cannot adjudicate without it" for n in missing]
-        hard.extend(self._conclusive_geometry_vetoes(measured or {}))
-        if capacity is not None and capacity <= 0:
-            hard.append(f"TAU BREACH: capacity={capacity} gives S=0 ≤ τ={self._tau_floor} "
+    def _insufficient_evidence(self, named, non_finite, absent):
+        """A measure S or a geometry facet reads is unknown (rule A, candidate
+        5.7.7). HOLD for insufficient evidence, unless a conclusive veto
+        governs, that is one the valid measures establish whatever value the
+        unknown ones would take (RFC-0 §4, draft RFC-2 v0.2 §2):
+
+        - P, V and C valid: S is computed from them, and a TAU BREACH or the
+          kernel's hard-veto floor on that S vetoes;
+        - P or V unknown, C measured at zero: S = 0 whatever P and V are;
+        - a hard geometry facet violated whatever its unknown axes are,
+          such as authority or context_fit measured below its floor;
+        - option space measured at its block floor.
+
+        An absent capacity is never read as zero, an absent authority never as
+        its placeholder: no veto and no reason rest on a value nobody measured
+        (draft RFC-2 v0.2 §3). Every conclusive veto of the membrane governs
+        in the composition, whatever this result is."""
+        unknown = set(non_finite) | set(absent)
+        measured = {n: v for n, v in named.items() if n not in unknown}
+        hard: list[str] = []
+        s_score = None
+        if unknown.isdisjoint(("pressure", "velocity", "capacity")):
+            p, v, c = (float(measured[n]) for n in ("pressure", "velocity", "capacity"))
+            s_preview = c / (p * v + 1e-6)
+            if s_preview <= self._tau_floor:
+                hard.append(f"TAU BREACH: S={s_preview:.4f} ≤ τ={self._tau_floor}")
+            policy = getattr(self._kernel, "policy", None)
+            epsilon = getattr(policy, "epsilon", 1e-6)
+            score = c / (p * v + epsilon)
+            s_score = round(score, 8)
+            floor = getattr(policy, "hard_veto_below", None)
+            if floor is not None and score <= floor:
+                hard.append(f"S={score:.6f} is at or below hard-veto floor {floor}")
+        elif "capacity" in measured and measured["capacity"] <= 0:
+            hard.append(f"TAU BREACH: capacity={measured['capacity']} gives S=0 ≤ τ={self._tau_floor} "
                         "whatever pressure and velocity are")
+        hard.extend(self._conclusive_geometry_vetoes(measured))
+        option_space = measured.get("option_space")
         if option_space is not None and option_space <= self._option_space_block_floor:
             hard.append(f"option_space={option_space:.3f} ≤ block floor")
-        reason = f"INSUFFICIENT_EVIDENCE: invalid measure(s) (non-finite or outside [0, 1]) {', '.join(non_finite)}; S not computed."
+        named_unknown = []
+        if non_finite:
+            named_unknown.append(
+                f"invalid measure(s) (non-finite) {', '.join(non_finite)}")
+        if absent:
+            named_unknown.append(f"absent measure(s) {', '.join(absent)}")
+        detail = "; ".join(named_unknown)
+        if hard:
+            reason = (f"Conclusive whatever the unknown measure(s) are: {detail}"
+                      + ("; S not computed." if s_score is None else "."))
+        elif s_score is None:
+            reason = f"INSUFFICIENT_EVIDENCE: {detail}; S not computed."
+        else:
+            reason = (f"INSUFFICIENT_EVIDENCE: {detail}; held, not admitted "
+                      "(re-adjudicate with the missing measure).")
         decision = Decision.HARD_VETO.value if hard else Decision.HOLD.value
         return {
             "kernel": "scoring",
-            "s_score": None,
+            "s_score": s_score,
             "decision": decision,
             "rationale": " ".join(hard + [reason]),
-            "authority": None,
-            "context_fit": None,
-            "evidence_quality": None,
+            "insufficient_evidence": not hard,
+            # An unknown input is reported as null (decision 6), never as a placeholder.
+            "authority": measured.get("authority"),
+            "context_fit": measured.get("context_fit"),
+            "evidence_quality": measured.get("evidence_quality"),
+            # Not evaluated: the geometry would have read placeholders.
             "constraint_geometry": None,
             "operating_mode": None,
-            "declared_unmeasured": list(non_finite) + [m for m in missing if m not in non_finite],
+            # The unknown inputs, then the axes this interface never measures
+            # (declared unmeasured on every result, as in the main path).
+            "declared_unmeasured": [n for n in named if n in unknown]
+                                   + sorted(self._NEVER_MEASURED_AXES),
             "unmeasured_axes": list(non_finite),
         }
 
@@ -496,6 +627,13 @@ class DualKernelGovernor:
         # Durable DISPATCHING recovery remains available after process restart.
         self._active_dispatches: set[str] = set()
         self._active_dispatches_lock = threading.RLock()
+        # Ledger-integrity incident (internal review of 2026-11-23, 17:37
+        # UTC): the first dispatch refused on a ledger that does not verify
+        # writes one api/HARD_VETO entry and opens the incident; further
+        # refusals while it stays open write nothing more (the chain is
+        # already known not to verify, and each entry would lengthen it).
+        # verify_ledger() closes the incident when the chain verifies again.
+        self._ledger_integrity_incident: dict[str, Any] | None = None
         # Serialize terminal budget settlement paths within this governor instance.
         # The registry transition remains the durable terminal-state authority.
         self._settlement_lock = threading.RLock()
@@ -515,7 +653,7 @@ class DualKernelGovernor:
         authority: float | None = None,
         context_fit: float | None = None,
         evidence_quality: float | None = None,
-        irreversibility_materiality: float = 0.0,
+        irreversibility_materiality: float | None = None,
         delegation=None,
         resource_id: str | None = None,
         amount: float = 0.0,
@@ -536,25 +674,18 @@ class DualKernelGovernor:
         """
         idem_key = passage.idempotency_key or f"op-{passage.passage_id}"
 
+        # R8 (author's decision of 2026-11-23): a structurally malformed request
+        # is refused at the API boundary as INVALID_ARGUMENT, never as a
+        # governance decision. Nothing is registered, reserved, held or
+        # vetoed; the ledger keeps the refusal under kernel "api" so the trace
+        # cannot be read as a HARD_VETO on the action.
         try:
             authorized_payload_hash = canonical_payload_hash(payload)
         except (TypeError, ValueError) as exc:
-            rationale = f"Invalid action payload; authorization refused: {exc}."
-            self.ledger.append(
-                kernel="composed", decision=Decision.HARD_VETO.value,
-                rationale=rationale, passage_id=passage.passage_id,
-                idempotency_key=idem_key,
+            self._refuse_malformed(
+                f"Invalid action payload; authorization refused: {exc}.",
+                field="payload", passage=passage, idem_key=idem_key,
             )
-            return {
-                "passage_id": passage.passage_id,
-                "idempotency_key": idem_key,
-                "composed_decision": Decision.HARD_VETO.value,
-                "composed_rationale": rationale,
-                "execution_status": "blocked",
-                "operation_state": "not_registered",
-                "ledger_entries": self.ledger.entry_count,
-                "ledger_valid": self.ledger.verify_chain(),
-            }
 
         # Validate the economic parameter before it can bypass the budget
         # gate (NaN compares false to > 0, and negative values also skip it).
@@ -567,25 +698,24 @@ class DualKernelGovernor:
             invalid_amount = True
             normalized_amount = 0.0
         if invalid_amount:
-            rationale = "Invalid execution amount: must be finite and non-negative, and strictly positive when a resource is specified."
-            self.ledger.append(
-                kernel="composed", decision=Decision.HARD_VETO.value,
-                rationale=rationale, passage_id=passage.passage_id,
-                idempotency_key=idem_key,
+            self._refuse_malformed(
+                "Invalid execution amount: must be finite and non-negative, and strictly "
+                "positive when a resource is specified.",
+                field="amount", passage=passage, idem_key=idem_key,
             )
-            return {
-                "passage_id": passage.passage_id,
-                "idempotency_key": idem_key,
-                "scoring_decision": None,
-                "membrane_decision": None,
-                "composed_decision": Decision.HARD_VETO.value,
-                "composed_rationale": rationale,
-                "execution_status": "blocked",
-                "operation_state": "not_registered",
-                "ledger_entries": self.ledger.entry_count,
-                "ledger_valid": self.ledger.verify_chain(),
-            }
         amount = normalized_amount
+
+        # P8 (author's decision of 2026-11-23, option A): a measure outside the
+        # kernel's declared domain is refused here, before registration, as
+        # INVALID_ARGUMENT (field = the measure). Nothing is registered or
+        # held; the ledger keeps the refusal under kernel "api".
+        self._refuse_out_of_domain(
+            dict(pressure=pressure, velocity=velocity, capacity=capacity,
+                 option_space=option_space, authority=authority,
+                 context_fit=context_fit, evidence_quality=evidence_quality,
+                 irreversibility_materiality=irreversibility_materiality),
+            passage=passage, idem_key=idem_key,
+        )
 
         # Profile S binds dispatch permission to the complete immutable
         # operation.  Existing deployments remain unchanged because the gate
@@ -596,22 +726,10 @@ class DualKernelGovernor:
                 or not re.fullmatch(r"[0-9a-f]{64}", payload_digest)
                 or (payload is not None and authorized_payload_hash != payload_digest)
             ):
-                rationale = "Profile S commit authorization requires a lowercase SHA-256 payload digest."
-                self.ledger.append(
-                    kernel="composed", decision=Decision.HARD_VETO.value,
-                    rationale=rationale, passage_id=passage.passage_id,
-                    idempotency_key=idem_key,
+                self._refuse_malformed(
+                    "Profile S commit authorization requires a lowercase SHA-256 payload digest.",
+                    field="payload_digest", passage=passage, idem_key=idem_key,
                 )
-                return {
-                    "passage_id": passage.passage_id,
-                    "idempotency_key": idem_key,
-                    "composed_decision": Decision.HARD_VETO.value,
-                    "composed_rationale": rationale,
-                    "execution_status": "blocked",
-                    "operation_state": "not_registered",
-                    "ledger_entries": self.ledger.entry_count,
-                    "ledger_valid": self.ledger.verify_chain(),
-                }
             # Profile S's bounded canonical payload digest is the stronger
             # binding. Persist it as the legacy payload hash as well so both
             # gates authorize the same bytes during the integration period.
@@ -624,24 +742,10 @@ class DualKernelGovernor:
                 or not isinstance(institutional_scope, str)
                 or not re.fullmatch(commit_id_pattern, institutional_scope)
             ):
-                rationale = (
-                    "Profile S commit authorization requires valid operation and institutional identities."
+                self._refuse_malformed(
+                    "Profile S commit authorization requires valid operation and institutional identities.",
+                    field="operation_id/institutional_scope", passage=passage, idem_key=idem_key,
                 )
-                self.ledger.append(
-                    kernel="composed", decision=Decision.HARD_VETO.value,
-                    rationale=rationale, passage_id=passage.passage_id,
-                    idempotency_key=idem_key,
-                )
-                return {
-                    "passage_id": passage.passage_id,
-                    "idempotency_key": idem_key,
-                    "composed_decision": Decision.HARD_VETO.value,
-                    "composed_rationale": rationale,
-                    "execution_status": "blocked",
-                    "operation_state": "not_registered",
-                    "ledger_entries": self.ledger.entry_count,
-                    "ledger_valid": self.ledger.verify_chain(),
-                }
 
         # ── DURABLE CLAIM: register the operation BEFORE evaluation ──────
         record = OperationRecord(
@@ -676,7 +780,7 @@ class DualKernelGovernor:
                 "execution_status": existing.state.value,
                 "operation_state": existing.state.value,
                 "ledger_entries": self.ledger.entry_count,
-                "ledger_valid": self.ledger.verify_chain(),
+                "ledger_valid": self.ledger.verify_new_entries(),
             }
 
         # 1. Scoring kernel — fail-closed
@@ -768,7 +872,19 @@ class DualKernelGovernor:
         retains_operation = composed_decision in (
             Decision.PASS.value, Decision.FLAG.value, Decision.HOLD.value,
         )
-        if (retains_operation and budget_in_scope and self.consensus_backend is not None):
+        # Rule A (5.7.7 candidate): a HOLD for insufficient evidence reserves
+        # nothing. Only the caller can lift it, by supplying the measure it
+        # withheld, so a reservation would let any caller lock a shared budget
+        # by omitting a measure. The reservation is taken at re-adjudication,
+        # under I8 at that moment. Every other retained operation (admission,
+        # or a HOLD on complete evidence: escalation, FLAG without condition,
+        # fail-closed kernel error) reserves as before.
+        evidence_hold = (
+            composed_decision == Decision.HOLD.value
+            and bool((scoring_result or {}).get("insufficient_evidence"))
+        )
+        if (retains_operation and budget_in_scope and not evidence_hold
+                and self.consensus_backend is not None):
             # Avoid creating a reservation if quarantine is already active.
             # This short read is intentionally separate from reserve(): the
             # lock may activate immediately afterward, in which case the
@@ -838,6 +954,7 @@ class DualKernelGovernor:
                             )
                     if (budget_in_scope and self.consensus_backend is None
                             and composed_decision != Decision.HARD_VETO.value
+                            and not evidence_hold
                             and not self._reserve_budget(
                                 idem_key, resource_id, amount,
                     )):
@@ -915,7 +1032,20 @@ class DualKernelGovernor:
                             passage_id=passage.passage_id,
                             idempotency_key=idem_key,
                         )
+                    elif evidence_hold and budget_in_scope:
+                        self.ledger.append(
+                            kernel="hold_lifecycle",
+                            decision=Decision.HOLD.value,
+                            rationale=(
+                                "Budget reservation deferred: nothing is reserved while the "
+                                "evidence is insufficient; the amount is reserved at "
+                                "re-adjudication, under I8 at that moment (rule A)."
+                            ),
+                            passage_id=passage.passage_id,
+                            idempotency_key=idem_key,
+                        )
 
+                final_record = self.registry.get(idem_key)
                 response = {
                     "passage_id": passage.passage_id,
                     "idempotency_key": idem_key,
@@ -929,9 +1059,12 @@ class DualKernelGovernor:
                     "composed_decision": composed_decision,
                     "composed_rationale": composed_rationale,
                     "execution_status": membrane_result.get("execution_status", "pending") if membrane_result else "unknown",
-                    "operation_state": self.registry.get(idem_key).state.value if self.registry.get(idem_key) else "unknown",
+                    "operation_state": final_record.state.value if final_record else "unknown",
+                    # False for a HOLD on insufficient evidence (rule A): the
+                    # reservation is taken at re-adjudication.
+                    "budget_reserved": bool(final_record and final_record.budget_reserved),
                     "ledger_entries": self.ledger.entry_count,
-                    "ledger_valid": self.ledger.verify_chain(),
+                    "ledger_valid": self.ledger.verify_new_entries(),
                     **self._flag_fields(composed_decision, scoring_result),
                 }
 
@@ -949,7 +1082,88 @@ class DualKernelGovernor:
             current = self.registry.get(idem_key)
             if current is not None:
                 response["operation_state"] = current.state.value
+                response["budget_reserved"] = bool(current.budget_reserved)
         return response
+
+    def _refuse_out_of_domain(self, named: dict[str, Any], *, passage, idem_key: str) -> None:
+        """Refuse a measure that is not a number, or outside the scoring kernel's declared domain (P8).
+
+        The domain is the kernel's own declaration (``declared_domain()``);
+        the governor prescribes none. A scoring adapter without a declared
+        domain (no ``out_of_domain``) is not checked here: its own entry
+        decides. The refusal is INVALID_ARGUMENT, never a decision.
+        """
+        malformed = getattr(self.scoring, "malformed_measures", None)
+        if malformed is not None:
+            names = malformed(named)
+            if names:
+                self._refuse_malformed(self.scoring._malformed_reason(named, names),
+                                       field=",".join(names), passage=passage, idem_key=idem_key)
+        probe = getattr(self.scoring, "out_of_domain", None)
+        if probe is None:
+            return
+        names = probe(named)
+        if names:
+            self._refuse_malformed(
+                self.scoring._out_of_domain_reason(named, names),
+                field=",".join(names), passage=passage, idem_key=idem_key,
+            )
+
+    def verify_ledger(self) -> bool:
+        """Full verification of the hash chain, on demand: every entry is
+        re-hashed and every link checked (O(N)). ``ledger_valid`` in a decision
+        result is the incremental check of the links added since the last
+        verification; call this one for an audit.
+
+        Closes an open ledger-integrity incident when the chain verifies again.
+        **Declared limit** (internal review of 2026-11-24, 06:35 UTC): this
+        closure takes the ledger lock only, NOT the quarantine gate that
+        ``dispatch()`` holds around its own verification and claim. An audit
+        running concurrently with a dispatch can therefore close an incident
+        that the dispatch is about to re-open, or close one between a refusal
+        and the moment its caller reads it. Declared, not fixed, by the
+        decision of the author of ``tenir_governance``, 2026-11-24 17:15 UTC:
+        the gate is taken here in 5.8.0, where it becomes cross-process and
+        the cost has to be measured again. The ground given earlier -- that
+        taking the gate here would make an audit wait for a quarantine
+        activation -- does not hold and is withdrawn: the gate is held 6.2 us
+        at the median (max 54.9 us, n = 200) to activate a quarantine and
+        released, not held for the quarantine's duration, and taking it in
+        this method costs nothing measurable in this process (measured
+        2026-11-24 at 10 000 and 100 000 entries: audit latency x0.96-1.14,
+        dispatch throughput x0.94-1.07, the noise of the machine), because an
+        audit and a dispatch already exclude each other on the ledger's own
+        lock. "Nothing measurable in this perimeter" is not "no cost": one
+        process, one writer, one auditor.
+        """
+        ok = self.ledger.verify_chain()
+        if ok and self._ledger_integrity_incident is not None:
+            self._ledger_integrity_incident = None
+        return ok
+
+    @property
+    def ledger_integrity_incident(self) -> dict[str, Any] | None:
+        """The open ledger-integrity incident (first refusal, count), or None."""
+        return dict(self._ledger_integrity_incident) if self._ledger_integrity_incident else None
+
+    def _refuse_malformed(self, reason: str, *, field: str, passage, idem_key: str) -> None:
+        """Refuse a structurally malformed request at the API boundary (R8).
+
+        Raises InvalidArgumentError (code INVALID_ARGUMENT, a ValueError).
+        Nothing is registered, reserved, held or vetoed. The refusal is kept
+        in the ledger under kernel "api", never as a composed decision, so the
+        trace cannot be read as a HARD_VETO on the action. 5.7.6 returned
+        these refusals as composed_decision "HARD_VETO" with operation_state
+        "not_registered".
+        """
+        passage_id = getattr(passage, "passage_id", None)
+        self.ledger.append(
+            kernel="api", decision=InvalidArgumentError.code,
+            rationale=f"{reason} Request refused before registration; not a governance decision.",
+            passage_id=passage_id or "", idempotency_key=idem_key,
+        )
+        raise InvalidArgumentError(reason, field=field, passage_id=passage_id,
+                                   idempotency_key=idem_key)
 
     def _flag_fields(self, composed_decision: str, scoring_result: dict | None) -> dict[str, Any]:
         """RFC-0 §4 fields of a result: the FLAG's declared conditions, and the
@@ -1980,6 +2194,12 @@ class DualKernelGovernor:
     ) -> dict[str, Any]:
         """Claim the dispatch slot (RESERVED → DISPATCHING) for one operation.
 
+        Since the 5.7.7 candidate the full verification of the decision ledger
+        runs here, under the quarantine gate, immediately before the claim
+        (``CompositionPolicy.ledger_full_verification_at_dispatch``): a ledger
+        that does not verify claims nothing, whatever the caller
+        (``dispatch_and_execute``, a direct call, the SDK client).
+
         Since 5.7.6 two checks run before the claim, on the default policy:
 
         - a FLAG-admitted operation dispatches only once every condition the
@@ -2036,12 +2256,22 @@ class DualKernelGovernor:
             with self.membrane.state._quarantine_lock:
                 with self.registry.quarantine_guard():
                     quarantine_active = self._quarantine_blocks()
+                    # Single-use Profile S authorization: refuse on a ledger that
+                    # does not verify BEFORE consuming it, so a refusal leaves the
+                    # authorization intact (internal review of 2026-11-23,
+                    # 17:37 UTC; the earlier state of this candidate consumed it
+                    # first). The claim below re-verifies under the gate: on this
+                    # path the full verification runs twice (declared cost).
+                    integrity_refusal = None if quarantine_active else \
+                        self._refuse_on_ledger_integrity(idempotency_key)
                 if quarantine_active:
                     return {
                         "dispatched": False,
                         "reason": "QUARANTINE_LOCK is active; dispatch is blocked.",
                         "operation_state": record.state.value,
                     }
+                if integrity_refusal is not None:
+                    return integrity_refusal
             consumption = self._consume_commit_authorization(idempotency_key)
             if not consumption.get("consumed"):
                 return {
@@ -2056,6 +2286,31 @@ class DualKernelGovernor:
         # slow network I/O must not prevent emergency quarantine activation.
         with self.membrane.state._quarantine_lock:
             with self.registry.quarantine_guard():
+                # Full verification of the ledger at the effect boundary
+                # (author's decisions of 2026-11-23, 11:22 and 14:54 UTC):
+                # the per-decision check is incremental (verify_new_entries);
+                # before the DISPATCHING claim, the last step before any
+                # effect, every entry and every link is re-verified from
+                # GENESIS, under the gate. The verification holds the ledger
+                # lock, so no append lands while it runs; the claim follows
+                # under the same gate, so no other claim slips between them.
+                # The ledger itself can still be mutated by any code holding
+                # a reference to it (``entries`` is the live list), and the
+                # registry's ``transition_to`` is public: a caller that
+                # bypasses dispatch() bypasses this check (declared limits).
+                # Every path through dispatch() passes here:
+                # dispatch_and_execute, a direct dispatch() call, the SDK
+                # client, in this process (the ledger is in memory: another
+                # process or a restart starts from an empty ledger that
+                # verifies). Fail-closed: a ledger that does not verify
+                # claims nothing. Linear in the ledger, once per dispatch
+                # (twice on the Profile S path), never per HOLD; it runs
+                # under the quarantine gate, so a quarantine activation waits
+                # for it (declared cost: 0.54 s at 100 000 entries, measured
+                # 2026-11-23).
+                integrity_refusal = self._refuse_on_ledger_integrity(idempotency_key)
+                if integrity_refusal is not None:
+                    return integrity_refusal
                 result = self._dispatch_under_quarantine_lock(
                     idempotency_key, resource_id, amount, payload=actual_payload,
                 )
@@ -2104,6 +2359,59 @@ class DualKernelGovernor:
             with self._active_dispatches_lock:
                 self._active_dispatches.discard(idempotency_key)
         return result
+
+    def _refuse_on_ledger_integrity(self, idempotency_key: str) -> dict[str, Any] | None:
+        """Refusal dict when the policy asks for a full ledger verification before
+        a claim and the ledger does not verify; None otherwise.
+
+        The refusal is written to the ledger (kernel ``api``, HARD_VETO) so the
+        audit trail says why nothing was claimed. Declared limit: that entry is
+        appended to a chain already known not to verify, so the chain itself
+        cannot prove it; it is readable and timestamped, not chain-proven. The
+        operation stays in its state (RESERVED): no claim, no effect.
+
+        A chain that verifies again closes an open incident here, at the claim
+        (decision of 2026-11-23, 21:25 UTC, option A): see the comment below
+        for what that changes, and for what it still does not cover.
+        """
+        if not self.policy.ledger_full_verification_at_dispatch:
+            return None
+        if self.ledger.verify_chain():
+            # The incident is closed by a chain that verifies again, at the
+            # claim, not only by an explicit audit (verify_ledger()). Before
+            # this, a repaired chain left the incident open for ever, so a
+            # LATER alteration, distinct from the first, was refused without
+            # writing anything (incident_recorded: false): one audit entry
+            # covered two alterations and the second left no trace (internal
+            # review of 2026-11-23, 20:03 UTC, finding N1). A new alteration
+            # now opens a NEW incident with its own entry. Declared limits,
+            # measured: (1) what closes an incident is still verify_chain(),
+            # internal consistency and not authenticity, so a rechained ledger
+            # closes it too; (2) the incident closes only here or in
+            # verify_ledger(), so an alteration, a repair and a new alteration
+            # with no claim and no audit in between still leave one entry for
+            # the two.
+            self._ledger_integrity_incident = None
+            return None
+        record = self.registry.get(idempotency_key)
+        reason = ("LEDGER_INTEGRITY_FAILED: the hash chain of the decision ledger does not "
+                  "verify; no dispatch (fail-closed). Audit the ledger (verify_ledger()) "
+                  "before any further effect.")
+        incident = self._ledger_integrity_incident
+        if incident is None:
+            # First refusal: one api/HARD_VETO entry opens the incident.
+            self.ledger.append(kernel="api", decision=Decision.HARD_VETO.value, rationale=reason,
+                               passage_id=record.passage_id if record else "",
+                               idempotency_key=idempotency_key)
+            incident = self._ledger_integrity_incident = {
+                "opened_at": time.time(), "first_idempotency_key": idempotency_key,
+                "refusals": 0, "audit_entry_index": self.ledger.entry_count - 1}
+        incident["refusals"] += 1
+        return {"dispatched": False, "ledger_integrity_failed": True, "reason": reason,
+                "audit_entry_chain_proven": False,
+                "incident_recorded": incident["refusals"] == 1,
+                "incident_refusals": incident["refusals"],
+                "operation_state": record.state.value if record else None}
 
     def _dispatch_under_quarantine_lock(
         self,
@@ -2437,6 +2745,11 @@ class DualKernelGovernor:
         If no provider is configured, falls back to the manual dispatch()
         method (state transition only, no external call).
         """
+        # The full verification of the ledger (R13) runs inside dispatch(),
+        # under the quarantine gate, immediately before the DISPATCHING claim:
+        # every path to a claim goes through it (this method, a direct
+        # dispatch() call, the SDK client). See _refuse_on_ledger_integrity.
+
         # Freeze the exact JSON payload before either verification or provider
         # use so another thread cannot mutate the caller's mapping between the
         # digest check and the external call.
@@ -3513,7 +3826,7 @@ class DualKernelGovernor:
         authority: float | None = None,
         context_fit: float | None = None,
         evidence_quality: float | None = None,
-        irreversibility_materiality: float = 0.0,
+        irreversibility_materiality: float | None = None,
         delegation=None,
         resource_id: str | None = None,
         amount: float = 0.0,
@@ -3561,11 +3874,11 @@ class DualKernelGovernor:
             supplied_amount = float(amount)
             recorded_amount = float(record.amount)
         except (TypeError, ValueError, OverflowError):
-            return {
-                "hold_resolved": False,
-                "operation_state": record.state.value,
-                "reason": "Amount is invalid for HOLD re-adjudication.",
-            }
+            # Malformed argument, not a governance answer (R8): the HOLD is untouched.
+            self._refuse_malformed(
+                "Amount is invalid for HOLD re-adjudication.", field="amount",
+                passage=passage, idem_key=idempotency_key,
+            )
         if supplied_amount == 0 and recorded_amount > 0:
             supplied_amount = recorded_amount
         if not math.isfinite(supplied_amount) or supplied_amount != recorded_amount:
@@ -3575,6 +3888,16 @@ class DualKernelGovernor:
                 "reason": "Amount differs from the held operation.",
             }
         amount = supplied_amount
+
+        # P8: an out-of-domain measure is a malformed re-adjudication, refused
+        # at entry (INVALID_ARGUMENT); the HOLD is untouched.
+        self._refuse_out_of_domain(
+            dict(pressure=pressure, velocity=velocity, capacity=capacity,
+                 option_space=option_space, authority=authority,
+                 context_fit=context_fit, evidence_quality=evidence_quality,
+                 irreversibility_materiality=irreversibility_materiality),
+            passage=passage, idem_key=idempotency_key,
+        )
 
         if passage is None:
             # A HOLD may only be resolved after fresh adjudication. Never let
@@ -3703,7 +4026,7 @@ class DualKernelGovernor:
         passage,
         pressure: float, velocity: float, capacity: float,
         option_space: float | None, authority: float | None, context_fit: float | None,
-        evidence_quality: float | None, irreversibility_materiality: float,
+        evidence_quality: float | None, irreversibility_materiality: float | None,
         delegation, resource_id: str | None, amount: float,
         trajectory_id: str | None,
     ) -> dict[str, Any]:
@@ -3807,7 +4130,9 @@ class DualKernelGovernor:
             c.get("check_id") == "I6" and c.get("decision") == Decision.HARD_VETO.value
             for c in (membrane_result.get("checks", []) if membrane_result else [])
         )
+        quarantine_retained = False
         if observed_i6_veto or self._quarantine_blocks():
+            quarantine_retained = True
             composed_decision = Decision.HOLD.value
             composed_rationale = (
                 "QUARANTINE_LOCK observed during HOLD re-adjudication; "
@@ -3818,9 +4143,72 @@ class DualKernelGovernor:
                 rationale=composed_rationale, passage_id=passage.passage_id,
                 idempotency_key=idem_key,
             )
+
+        # Rule A (5.7.7 candidate): a HOLD on insufficient evidence reserved
+        # nothing (see adjudicate). Once the evidence is complete, the retained
+        # operation takes its reservation here, under I8 as evaluated above
+        # with existing_reservation_amount = 0. A re-adjudication that is
+        # still insufficient reserves nothing. A HOLD that already holds its
+        # reservation (5.7.6 HOLDs on complete evidence) is unchanged.
+        held_record = self.registry.get(idem_key)
+        still_evidence_hold = (
+            composed_decision == Decision.HOLD.value
+            and bool((scoring_result or {}).get("insufficient_evidence"))
+        )
+        reserved_now = False
+        if (budget_in_scope and not quarantine_retained and not still_evidence_hold
+                and composed_decision in (
+                    Decision.PASS.value, Decision.FLAG.value, Decision.HOLD.value)
+                and not (held_record and held_record.budget_reserved)):
+            try:
+                if self.consensus_backend is not None:
+                    with self.registry.settlement_lock(idem_key, require_persistent=True):
+                        current = self.registry.get(idem_key)
+                        reserved_now = bool(
+                            current is not None
+                            and current.state == OperationState.HOLD
+                            and self._reserve_budget(idem_key, resource_id, amount)
+                        )
+                else:
+                    reserved_now = bool(self._reserve_budget(idem_key, resource_id, amount))
+            except Exception:
+                reserved_now = False
+            if not reserved_now:
+                composed_decision = Decision.HARD_VETO.value
+                composed_rationale = (
+                    "Budget reservation failed at re-adjudication: the amount is no "
+                    "longer available (nothing was reserved while the evidence was "
+                    "insufficient) — fail-closed HARD_VETO."
+                )
+                self.ledger.append(
+                    kernel="composed", decision=composed_decision,
+                    rationale=composed_rationale, passage_id=passage.passage_id,
+                    idempotency_key=idem_key,
+                )
+            else:
+                self.ledger.append(
+                    kernel="hold_lifecycle", decision=composed_decision,
+                    rationale="Budget reserved at re-adjudication: the evidence is complete (rule A).",
+                    passage_id=passage.passage_id, idempotency_key=idem_key,
+                )
+
+        def _compensate_reservation_taken_now(retained_rationale: str) -> None:
+            # The HOLD stays; a reservation taken in this call must not stay
+            # with it (an evidence HOLD holds none). Release what was reserved
+            # here; if that fails, say so instead of claiming a clean HOLD.
+            nonlocal composed_rationale
+            if not reserved_now:
+                return
+            current = self.registry.get(idem_key)
+            error = (self._release_hold_budget_before_terminal_transition(idem_key, current)
+                     if current is not None else "Operation record missing after reservation.")
+            if error:
+                composed_rationale = retained_rationale + " Reservation taken at re-adjudication could not be released; reconciliation required: " + error
+
         if composed_decision in (Decision.PASS.value, Decision.FLAG.value):
-            # No new reservation here: the HOLD already holds it. Serialize
-            # the final admission, not the potentially slow kernel evaluation.
+            # Serialize the final admission, not the potentially slow kernel
+            # evaluation. The reservation is the HOLD's (5.7.6) or the one
+            # taken just above (rule A).
             with self.membrane.state._quarantine_lock:
                 with self.registry.quarantine_guard():
                     if self._quarantine_blocks():
@@ -3836,6 +4224,7 @@ class DualKernelGovernor:
                             rationale=composed_rationale, passage_id=passage.passage_id,
                             idempotency_key=idem_key,
                         )
+                        _compensate_reservation_taken_now(composed_rationale)
                     else:
                         success, _prev = self.registry.transition_to(
                             idem_key, OperationState.RESERVED,
@@ -3853,6 +4242,7 @@ class DualKernelGovernor:
                                 "Re-adjudication produced PASS/FLAG but RESERVED "
                                 "transition failed — staying in HOLD."
                             )
+                            _compensate_reservation_taken_now(composed_rationale)
         elif composed_decision == Decision.HARD_VETO.value:
             held_record = self.registry.get(idem_key)
             # Only release a reservation that this durable operation actually owns.
@@ -3958,8 +4348,11 @@ class DualKernelGovernor:
             "composed_rationale": composed_rationale,
             "execution_status": membrane_result.get("execution_status", "pending") if membrane_result else "unknown",
             "operation_state": self.registry.get(idem_key).state.value if self.registry.get(idem_key) else "unknown",
+            "budget_reserved": bool(
+                self.registry.get(idem_key) and self.registry.get(idem_key).budget_reserved
+            ),
             "ledger_entries": self.ledger.entry_count,
-            "ledger_valid": self.ledger.verify_chain(),
+            "ledger_valid": self.ledger.verify_new_entries(),
             **self._flag_fields(composed_decision, scoring_result),
             "hold_resolved": hold_resolved,
         }
@@ -4070,20 +4463,25 @@ class DualKernelGovernor:
         reason: str = "",
         approve: bool = True,
     ) -> dict[str, Any]:
-        """Authorized exit from ESCALATED state.
+        """Exit from ESCALATED state, with the authorization recorded as supplied.
 
         Per v7.1 §19: ESCALATED remains absorbing until an authorization
         model defines who signs, under what scope, and with which receipt.
-
-        Per Blueprint v4.4 §5: overrides constitutionnels uniquement via
-        Ceremony G-R5-001 (authentification opérateur).
+        This method does not implement that model: ``authorized_by``,
+        ``scope`` and ``authorization`` are written into the ExitReceipt as
+        given, and none of them is verified, not even for emptiness
+        (declared limit, CHANGELOG 5.7.7). The operator-authentication
+        ceremony of Blueprint v4.4 §5 (G-R5-001) is not performed here.
+        Integrations must authenticate whoever calls this method; releasing
+        a QUARANTINE_LOCK, by contrast, requires a configured verifier.
 
         Args:
-            authorized_by: who is authorizing the exit (operator ID)
-            scope: scope of the authorization
-            authorization: authorization mechanism (e.g., "ceremony-G-R5-001")
-            reason: why the exit is being authorized
-            approve: True → proceed (RESERVED); False → deny (FAILED)
+            authorized_by: who claims to authorize the exit (recorded, not verified)
+            scope: scope of the claimed authorization (recorded, not verified)
+            authorization: reference of the claimed mechanism (recorded, not verified)
+            reason: why the exit is requested
+            approve: True → HOLD (a complete re-adjudication is required
+                before any admission); False → FAILED (CONFIRMED_NONEXECUTION)
         """
         try:
             with self._settlement_lock:

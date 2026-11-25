@@ -71,10 +71,14 @@ def test_non_finite_s_input_does_not_hide_a_block_floor_veto():
 
 
 @pytest.mark.parametrize("bad", ["0.9", True])
-def test_non_number_is_not_a_measure(bad):
-    r = _adapter().adjudicate(**{**BEST, "authority": bad})
-    assert r["decision"] != Decision.PASS.value and r["decision"] != Decision.FLAG.value
-    assert "authority" in r["unmeasured_axes"]
+def test_non_number_is_refused_explicitly(bad):
+    """Decision 5 read a non-number as an unknown measure. Since the author's
+    decision of 23 Nov 2026 (11:22 UTC) it is refused at entry, INVALID_ARGUMENT,
+    like a value outside the declared domain: it is not a measure of anything."""
+    from tenir_governance.composition import InvalidArgumentError
+    with pytest.raises(InvalidArgumentError) as exc:
+        _adapter().adjudicate(**{**BEST, "capacity": bad})
+    assert exc.value.field == "capacity"
 
 
 def test_zero_capacity_vetoes_even_with_unknown_pressure():
@@ -101,22 +105,31 @@ def test_lattice_scoring_hold_with_membrane_pass_is_hold():
 
 # Follow-up (reproduced by the veto-masking script, 19 Nov): a finite value
 # outside [0, 1] made the kernel raise, and the fail-closed HOLD masked the veto.
+# 19-23 Nov: it was read as an unknown measure (HOLD). Since the author's
+# decision of 23 Nov (P8, option A), it is outside the kernel's declared domain
+# and rejected explicitly as INVALID_ARGUMENT before any evaluation: not a
+# raise the governor turns into a HOLD, not a decision either.
 @pytest.mark.parametrize("axis,bad", [
     ("evidence_quality", 1.5), ("evidence_quality", -0.1), ("authority", 1.5),
     ("context_fit", -0.1), ("option_space", 1.5), ("irreversibility_materiality", 1.5),
     ("pressure", -0.1), ("velocity", 5.0), ("capacity", 7.0),
 ])
-def test_out_of_range_value_is_invalid_not_a_raise(axis, bad):
-    r = _adapter().adjudicate(**{**BEST, axis: bad})
-    assert r["decision"] == Decision.HOLD.value
-    assert axis in r["unmeasured_axes"]
-    assert "INSUFFICIENT_EVIDENCE" in r["rationale"]
+def test_out_of_domain_value_is_rejected_explicitly(axis, bad):
+    from tenir_governance.composition import InvalidArgumentError
+    with pytest.raises(InvalidArgumentError) as exc:
+        _adapter().adjudicate(**{**BEST, axis: bad})
+    assert exc.value.code == "INVALID_ARGUMENT"
+    assert exc.value.field == axis
+    assert "declared domain [0, 1]" in exc.value.reason
 
 
 @pytest.mark.parametrize("bad", [1.5, -0.1])
-def test_tau_breach_governs_over_out_of_range_evidence(bad):
-    r = _adapter().adjudicate(**{**BEST, **TAU_BREACH, "evidence_quality": bad})
-    assert r["decision"] == Decision.HARD_VETO.value
+def test_out_of_domain_evidence_is_refused_even_under_a_tau_breach(bad):
+    """The refusal precedes the adjudication: no veto is drawn from a request
+    that is malformed, the caller is told to send a measure (RFC-2 draft §1.4)."""
+    from tenir_governance.composition import InvalidArgumentError
+    with pytest.raises(InvalidArgumentError):
+        _adapter().adjudicate(**{**BEST, **TAU_BREACH, "evidence_quality": bad})
 
 
 @pytest.mark.parametrize("veto", [{"authority": 0.0}, {"context_fit": 0.0}])

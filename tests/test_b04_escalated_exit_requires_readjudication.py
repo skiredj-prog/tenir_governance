@@ -32,7 +32,7 @@ def test_approved_escalated_exit_requires_fresh_readjudication_before_admission(
     gov.scoring = BrokenScoring()
 
     initial = gov.adjudicate(
-        passage, pressure=0.2, velocity=0.2, capacity=0.9,
+        passage, irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         resource_id="budget", amount=10.0,
     )
@@ -62,7 +62,7 @@ def test_approved_escalated_exit_requires_fresh_readjudication_before_admission(
     resolved = gov.resolve_hold(
         passage.idempotency_key,
         passage=passage,
-        pressure=0.2, velocity=0.2, capacity=0.9,
+        irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
         authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
         resource_id="budget", amount=10.0,
     )

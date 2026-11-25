@@ -442,7 +442,10 @@ class DualKernelCompositionClient:
         Args:
             tenir_kernel: Optional TenirKernel instance. If None, a default
                 instance is created.
-            policy: Optional CompositionPolicy. If None, the default is used.
+            policy: CompositionPolicy declaring at least ``hold_tau_k_seconds``
+                and ``hold_tau_k_source``. Since the 5.7.7 candidate the client
+                refuses to construct without a declared tau_K (see below); the
+                other fields keep their defaults when omitted.
             store_path: Path to a persistent store file for the durable
                 operation registry. If None, the registry is in-memory only
                 (claims are lost on restart). If require_persistence is True
@@ -489,6 +492,22 @@ class DualKernelCompositionClient:
         self._membrane_state = MembraneState()
         self._membrane = TransitionMembrane(self._membrane_state)
         self._policy = policy or CompositionPolicy()
+        # No deployment without a declared tau_K (runtime author's decision of
+        # 2026-11-23, R11 option C; RFC-0 §6, RFC-5 §1.1). tau_K is the
+        # operational measurement of the real time a human needs to resolve a
+        # HOLD: derived from the organization's SLAs and tested on the ground,
+        # never invented by the runtime. Without it a HOLD has no end, and held
+        # operations accumulate in the registry for as long as the deployment
+        # lives (measured 2026-11-23: 1000 unresolved HOLDs, none expirable).
+        if self._policy.hold_tau_k_seconds is None:
+            raise ValueError(
+                "No deployment without a declared tau_K. Pass a CompositionPolicy with "
+                "hold_tau_k_seconds (the maximum time a human has to resolve a HOLD, in "
+                "seconds) and hold_tau_k_source (the SLA, regulation or field measurement it "
+                "was derived from). tau_K is an operational measurement of your organization, "
+                "not a runtime parameter: derive it from real SLAs and real-world testing, "
+                "do not invent it (RFC-0 §6, RFC-5 §1.1)."
+            )
         self._registry = DurableOperationRegistry(store_path=store_path)
 
         # Post-execution assessor (optional). When enabled, the governor
@@ -535,7 +554,7 @@ class DualKernelCompositionClient:
         authority: float | None = None,
         context_fit: float | None = None,
         evidence_quality: float | None = None,
-        irreversibility_materiality: float = 0.0,
+        irreversibility_materiality: float | None = None,
         delegation=None,
         resource_id: str | None = None,
         amount: float = 0.0,

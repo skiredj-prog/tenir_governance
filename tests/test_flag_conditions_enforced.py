@@ -28,7 +28,7 @@ from tenir_kernel.kernel import TenirKernel
 CONDITIONS = ("human review of the effect within 24 h", "amount capped at 100")
 ACK = {"human review of the effect within 24 h": "ticket OPS-12, reviewer dana",
        "amount capped at 100": "amount 10.0 checked by the pipeline"}
-M = dict(pressure=0.2, velocity=0.3, capacity=1.0, authority=0.9, context_fit=0.9,
+M = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0, authority=0.9, context_fit=0.9,
          evidence_quality=0.9, option_space=0.9)
 
 
@@ -194,7 +194,7 @@ def test_acknowledgement_survives_a_restart(tmp_path):
 def test_sdk_passes_the_acknowledgement_through():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        client = DualKernelCompositionClient(policy=CompositionPolicy(flag_conditions=CONDITIONS))
+        client = DualKernelCompositionClient(policy=CompositionPolicy(flag_conditions=CONDITIONS, hold_tau_k_seconds=3600.0, hold_tau_k_source="test fixture: one hour, not an SLA"))
     client.register_agent(Agent(agent_id="alice", authority_score=0.9))
     client.register_resource(Resource(resource_id="budget", capacity=100.0))
     p = Passage(agent_id="alice", action_type="payment", amount=10.0)
@@ -209,7 +209,9 @@ def test_unmeasured_option_space_is_held_not_admitted():
     gov, state = _gov(CompositionPolicy(flag_conditions=CONDITIONS))
     p, r = _admit(gov, option_space=None)
     assert r["scoring_decision"] == Decision.HOLD.value
-    assert "option_space unmeasured" in r["scoring_rationale"]
+    # 5.7.7 candidate (R7): an unknown option space takes the insufficient-
+    # evidence path, like every other unknown measure.
+    assert "absent measure(s) option_space" in r["scoring_rationale"]
     assert r["composed_decision"] == Decision.HOLD.value
     assert r["operation_state"] == OperationState.HOLD.value
     assert "option_space" in r["declared_unmeasured"]
@@ -221,7 +223,7 @@ def test_unmeasured_option_space_is_held_not_admitted():
 
 def test_unmeasured_option_space_masks_no_conclusive_veto():
     gov, _ = _gov(CompositionPolicy(flag_conditions=CONDITIONS))
-    p, r = _admit(gov, option_space=None, pressure=1.0, velocity=1.0, capacity=0.1)  # TAU breach
+    p, r = _admit(gov, option_space=None, irreversibility_materiality=0.0, pressure=1.0, velocity=1.0, capacity=0.1)  # TAU breach
     assert r["scoring_decision"] == Decision.HARD_VETO.value
     assert r["composed_decision"] == Decision.HARD_VETO.value
 

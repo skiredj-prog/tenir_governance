@@ -73,10 +73,19 @@ class CompositionPolicy:
     hold_tau_k_source: str = ""
     flag_conditions: tuple[str, ...] = ()
     revalidate_mandate_at_dispatch: bool = True
+    # Full verification of the decision ledger (every entry, every link, from
+    # GENESIS) before every dispatch. The per-decision `ledger_valid` is
+    # incremental since the 5.7.7 candidate; this one closes its declared
+    # limit at the only step with an external effect (author's decision of
+    # 2026-11-23). Linear in the ledger, once per dispatch. False leaves the
+    # full verification to the caller (verify_ledger()).
+    ledger_full_verification_at_dispatch: bool = True
 
     def validate(self) -> None:
         if not isinstance(self.revalidate_mandate_at_dispatch, bool):
             raise ValueError("revalidate_mandate_at_dispatch must be a bool")
+        if not isinstance(self.ledger_full_verification_at_dispatch, bool):
+            raise ValueError("ledger_full_verification_at_dispatch must be a bool")
         assert 0.0 <= self.budget_escalation_threshold <= 1.0, (
             "budget_escalation_threshold must be in [0.0, 1.0]"
         )

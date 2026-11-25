@@ -299,7 +299,7 @@ class TestHoldLifecycle:
         gov.scoring = BrokenScoring()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = gov.adjudicate(
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
 
@@ -315,7 +315,7 @@ class TestHoldLifecycle:
         gov, state = _setup_governor()
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         result = gov.adjudicate(
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         # If the decision is HOLD, check the state
@@ -729,14 +729,14 @@ class TestGovernorHoldLifecycle:
         p = Passage(agent_id="alice", action_type="payment", amount=10.0)
         # Register the operation (CREATED state)
         gov.adjudicate(
-            p, pressure=0.2, velocity=0.3, capacity=1.0,
+            p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         # The operation is now in RESERVED (PASS/FLAG). To test HOLD lifecycle,
         # create a fresh operation and use HoldManager to enter HOLD.
         p2 = Passage(agent_id="alice", action_type="payment", amount=10.0)
         gov.adjudicate(
-            p2, pressure=0.2, velocity=0.3, capacity=1.0,
+            p2, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             resource_id="budget", amount=10.0,
         )
         # Use HoldManager to put p2 into HOLD from CREATED
@@ -757,7 +757,7 @@ class TestGovernorHoldLifecycle:
         r2 = gov.resolve_hold(
             "op-hold-test-1",
             passage=p3,
-            pressure=0.1, velocity=0.1, capacity=0.9,
+            irreversibility_materiality=0.0, pressure=0.1, velocity=0.1, capacity=0.9,
             authority=0.9, context_fit=1.0, evidence_quality=1.0, option_space=0.9,
             resource_id="budget", amount=10.0,
         )
@@ -783,7 +783,7 @@ class TestGovernorHoldLifecycle:
         )
         result = gov.resolve_hold(
             key, passage=passage,
-            pressure=0.2, velocity=0.2, capacity=0.9,
+            irreversibility_materiality=0.0, pressure=0.2, velocity=0.2, capacity=0.9,
             authority=0.0, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
             resource_id="budget", amount=10.0,
         )
@@ -807,7 +807,7 @@ class TestGovernorHoldLifecycle:
         )
         result = gov.resolve_hold(
             "op-hold-identity", passage=passage,
-            pressure=0.1, velocity=0.1, capacity=0.9,
+            irreversibility_materiality=0.0, pressure=0.1, velocity=0.1, capacity=0.9,
             resource_id="budget", amount=5.0,
         )
         assert result["hold_resolved"] is False

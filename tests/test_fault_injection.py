@@ -140,7 +140,7 @@ class TestCrashAfterReserve:
     def test_crash_after_reserve_recovery(self):
         gov, state = _setup_governor()
         p = Passage(agent_id="alice", action_type="payment", amount=25.0)
-        r = _adjudicate(gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
+        r = _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                            resource_id="budget", amount=25.0)
         assert r["composed_decision"] in (Decision.PASS.value, Decision.FLAG.value)
         assert r["operation_state"] == OperationState.RESERVED.value
@@ -176,7 +176,7 @@ class TestCrashAfterDispatchClaim:
     def test_crash_after_dispatch_recovery_reconciles_not_resends(self):
         gov, state = _setup_governor()
         p = Passage(agent_id="alice", action_type="payment", amount=25.0)
-        r = _adjudicate(gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
+        r = _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                            resource_id="budget", amount=25.0)
         assert r["composed_decision"] in (Decision.PASS.value, Decision.FLAG.value)
 
@@ -194,7 +194,7 @@ class TestCrashAfterDispatchClaim:
         # A retry with the same key must be blocked
         p2 = Passage(agent_id="alice", action_type="payment", amount=25.0,
                      idempotency_key=p.idempotency_key)
-        r2 = _adjudicate(gov, p2, pressure=0.2, velocity=0.3, capacity=1.0,
+        r2 = _adjudicate(gov, p2, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                             resource_id="budget", amount=25.0)
         assert r2["composed_decision"] == Decision.HARD_VETO.value
         assert "Duplicate" in r2["composed_rationale"]
@@ -207,7 +207,7 @@ class TestCrashAfterDispatchClaim:
         Exactly one should succeed."""
         gov, state = _setup_governor()
         p = Passage(agent_id="alice", action_type="payment", amount=25.0)
-        r = _adjudicate(gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
+        r = _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                            resource_id="budget", amount=25.0)
         assert r["composed_decision"] in (Decision.PASS.value, Decision.FLAG.value)
 
@@ -244,7 +244,7 @@ class TestCrashAfterExternalAcceptance:
     def test_reconciliation_confirms_effect(self):
         gov, state = _setup_governor()
         p = Passage(agent_id="alice", action_type="payment", amount=25.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                        resource_id="budget", amount=25.0)
         gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0, flag_conditions_met=TEST_FLAG_ACK)
 
@@ -259,7 +259,7 @@ class TestCrashAfterExternalAcceptance:
         # A retry after confirmation is blocked
         p2 = Passage(agent_id="alice", action_type="payment", amount=25.0,
                      idempotency_key=p.idempotency_key)
-        r2 = _adjudicate(gov, p2, pressure=0.2, velocity=0.3, capacity=1.0,
+        r2 = _adjudicate(gov, p2, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                             resource_id="budget", amount=25.0)
         assert r2["composed_decision"] == Decision.HARD_VETO.value
 
@@ -268,7 +268,7 @@ class TestCrashAfterExternalAcceptance:
         the operation. Transition to FAILED, release reservation."""
         gov, state = _setup_governor()
         p = Passage(agent_id="alice", action_type="payment", amount=25.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                        resource_id="budget", amount=25.0)
         gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0, flag_conditions_met=TEST_FLAG_ACK)
         assert state.resources["budget"].consumed == 25.0
@@ -295,7 +295,7 @@ class TestCrashAfterExternalAcceptance:
         Per review 3 §1: UNKNOWN requires human review, not resend."""
         gov, state = _setup_governor()
         p = Passage(agent_id="alice", action_type="payment", amount=25.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                        resource_id="budget", amount=25.0)
         gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0, flag_conditions_met=TEST_FLAG_ACK)
 
@@ -312,7 +312,7 @@ class TestCrashAfterExternalAcceptance:
         # Retry is blocked
         p2 = Passage(agent_id="alice", action_type="payment", amount=25.0,
                      idempotency_key=p.idempotency_key)
-        r2 = _adjudicate(gov, p2, pressure=0.2, velocity=0.3, capacity=1.0,
+        r2 = _adjudicate(gov, p2, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                             resource_id="budget", amount=25.0)
         assert r2["composed_decision"] == Decision.HARD_VETO.value
 
@@ -328,7 +328,7 @@ class TestCrashBeforeConfirmation:
     def test_crash_before_confirmation_then_reconcile(self):
         gov, state = _setup_governor()
         p = Passage(agent_id="alice", action_type="payment", amount=25.0)
-        _adjudicate(gov, p, pressure=0.2, velocity=0.3, capacity=1.0,
+        _adjudicate(gov, p, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                        resource_id="budget", amount=25.0)
         gov.dispatch(p.idempotency_key, resource_id="budget", amount=25.0, flag_conditions_met=TEST_FLAG_ACK)
 
@@ -345,7 +345,7 @@ class TestCrashBeforeConfirmation:
         # No duplicate
         p2 = Passage(agent_id="alice", action_type="payment", amount=25.0,
                      idempotency_key=p.idempotency_key)
-        r2 = _adjudicate(gov, p2, pressure=0.2, velocity=0.3, capacity=1.0,
+        r2 = _adjudicate(gov, p2, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
                             resource_id="budget", amount=25.0)
         assert r2["composed_decision"] == Decision.HARD_VETO.value
         assert state.resources["budget"].consumed == 25.0  # not doubled

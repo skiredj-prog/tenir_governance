@@ -20,11 +20,11 @@ from tenir_governance.sdk import DualKernelCompositionClient
 # their acknowledgement is required at dispatch. The test deployment declares one.
 TEST_FLAG_CONDITIONS = ("test supervision",)
 TEST_FLAG_ACK = {"test supervision": "acknowledged by the test"}
-TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS)
+TEST_POLICY_KW = dict(flag_conditions=TEST_FLAG_CONDITIONS, hold_tau_k_seconds=3600.0, hold_tau_k_source="test fixture: one hour, not an SLA")
 # 5.7.6: the key the reconciling component signs its attestations with.
 KEY_ID, SECRET = "reconciliation", b"test-reconciliation-key-0123456789"
 
-M = dict(pressure=0.2, velocity=0.3, capacity=1.0,
+M = dict(irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
          authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9)
 
 

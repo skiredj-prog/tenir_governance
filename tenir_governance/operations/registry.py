@@ -528,6 +528,12 @@ class DurableOperationRegistry:
         In production, replace this with a database transaction (which
         handles all of this internally).
         """
+        # Declared limit (5.7.7 candidate, author's decision of 2026-11-23,
+        # 11:22 UTC): the file store is rewritten in full at every transition,
+        # so the cost of a transition grows with the number of records
+        # (measured 2026-11-23: 0.95 s per HOLD at 1000 records, 1.38 MB).
+        # Declared in 5.7.7, to be corrected in 5.8.0 (incremental or
+        # append-only store); no change here.
         if self._store_path:
             data = {k: v.to_dict() for k, v in self._records.items()}
             directory = os.path.dirname(os.path.abspath(self._store_path))

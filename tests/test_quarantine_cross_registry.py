@@ -229,7 +229,7 @@ def test_admission_and_quarantine_activation_are_atomically_ordered(tmp_path, mo
     )
     def run_adjudication():
         outcome.update(worker.adjudicate(
-            passage, pressure=0.2, velocity=0.3, capacity=1.0,
+            passage, irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
             authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
         ))
     attempt = threading.Thread(target=run_adjudication, daemon=True)
@@ -250,7 +250,7 @@ def test_admission_and_quarantine_activation_are_atomically_ordered(tmp_path, mo
     assert owner.registry.quarantine_is_active() is True
     late = worker.adjudicate(
         Passage(agent_id="alice", action_type="read_only", idempotency_key="late"),
-        pressure=0.2, velocity=0.3, capacity=1.0,
+        irreversibility_materiality=0.0, pressure=0.2, velocity=0.3, capacity=1.0,
         authority=0.9, context_fit=0.9, evidence_quality=0.9, option_space=0.9,
     )
     assert late["composed_decision"] == "HARD_VETO"
