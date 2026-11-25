@@ -17,6 +17,8 @@ services:
       dockerfile: Dockerfile
     container_name: tenir-middleware
     ports:
+      # Host publish stays on loopback. The cockpit is GET / on this same origin.
+      # 0.0.0.0 below is the container interface Docker publishes, not a public bind.
       - "127.0.0.1:${TENIR_HOST_PORT:-8000}:8000"
     environment:
       TENIR_POLICY_PROFILE: ${TENIR_POLICY_PROFILE:-default}

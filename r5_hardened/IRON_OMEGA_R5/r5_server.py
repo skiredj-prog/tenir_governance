@@ -8,8 +8,9 @@ Integrates all four R5 components into the V42CIron API:
   R5.3 WebSocket VPS   → /ws/vps broadcasts live trajectory to 3D VPS engine
   R5.4 Distributed Crypto → Merkle ledger with consensus broadcast
 
-Usage:
-  uvicorn r5_server:app --host 127.0.0.1 --port 8000
+Usage (loopback only — the cockpit is served from this same origin):
+  uvicorn r5_hardened.IRON_OMEGA_R5.r5_server:app --host 127.0.0.1 --port 8000
+  Then open http://127.0.0.1:8000/
 
 Environment variables:
   NEO4J_URI          bolt://localhost:7687
@@ -27,16 +28,19 @@ Environment variables:
 import os
 import json
 import logging
+import base64
 import hashlib
 import hmac
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional, List
 from uuid import uuid4
 
 from fastapi import FastAPI, WebSocket, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from tenir_kernel import KernelPolicy, TenirKernel
 from tenir_kernel.schema import validate_runtime_object
@@ -111,14 +115,16 @@ async def lifespan(app: FastAPI):
     get_inference_engine(nsl_config)
     logger.info(f"[R5] NSL inference: {'grammar-only' if grammar_only else f'LLM={ollama_model}'}")
 
-    # Initialize policy first — runtime depends on a validated shared policy contract
-    policy_profile = os.getenv("TENIR_POLICY_PROFILE", "um6p_shadow_v4").strip().lower()
-    if policy_profile in {"partner_b", "ocp_sovereign", "ocp_sovereign_pilot"}:
-        app.state.policy = PolicyEngine.ocp_sovereign_pilot()
-    elif policy_profile in {"default", "canonical"}:
-        app.state.policy = PolicyEngine.default()
-    else:
-        app.state.policy = PolicyEngine.um6p_shadow_v4()
+    # Kernel 5.7.6 exposes PolicyEngine.default() only. Older profile names
+    # (um6p_shadow_v4, ocp_sovereign_pilot) are not factories on this package.
+    # Docker Compose already defaults TENIR_POLICY_PROFILE to "default".
+    policy_profile = os.getenv("TENIR_POLICY_PROFILE", "default").strip().lower()
+    if policy_profile not in {"default", "canonical"}:
+        raise RuntimeError(
+            "TENIR_POLICY_PROFILE must be 'default' or 'canonical' on kernel 5.7.6. "
+            f"Received {policy_profile!r}."
+        )
+    app.state.policy = PolicyEngine.default()
     app.state.policy.validate()
     logger.info(f"[R5] Governance policy: {app.state.policy.version}")
 
@@ -211,6 +217,69 @@ async def require_operator(operator_id: str) -> None:
     configured = getattr(app.state, "operator_id", "") or os.getenv("TENIR_OPERATOR_ID", "")
     if not configured or not hmac.compare_digest(operator_id, configured):
         raise HTTPException(status_code=403, detail="Operator identity is not authorized")
+
+
+# The cockpit is one static file. It is not a directory mount, so the API
+# process cannot be asked to read arbitrary paths out of the repository.
+_COCKPIT_PATH = (
+    Path(__file__).resolve().parents[2] / "interface" / "TENIR_Interface_2cIronOmega_v1.html"
+)
+
+
+def _cockpit_file() -> FileResponse:
+    if not _COCKPIT_PATH.is_file():
+        raise HTTPException(status_code=404, detail="Operator cockpit HTML is not installed")
+    return FileResponse(
+        str(_COCKPIT_PATH),
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/", include_in_schema=False)
+async def operator_cockpit():
+    """Operator cockpit, forensics, and ceremony UI. Same origin as the API."""
+    return _cockpit_file()
+
+
+@app.get("/cockpit", include_in_schema=False)
+async def operator_cockpit_alias():
+    return _cockpit_file()
+
+
+def _decode_b64url_token(raw: str) -> str:
+    """Decode a token carried in a WebSocket subprotocol.
+
+    Browsers cannot set an Authorization header on WebSocket, and a raw
+    secret is not always a legal subprotocol token. base64url (no padding)
+    stays inside the RFC 6455 token alphabet. The decoded value is still
+    compared with the configured bearer secret.
+    """
+    padded = raw + ("=" * (-len(raw) % 4))
+    try:
+        return base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+    except (ValueError, UnicodeError):
+        return ""
+
+
+def _websocket_credentials(ws: WebSocket) -> tuple[str, Optional[str]]:
+    """Return the supplied bearer secret and the subprotocol to echo, if any."""
+    scheme, _, header_token = (ws.headers.get("authorization") or "").partition(" ")
+    if scheme.lower() == "bearer" and header_token:
+        return header_token, None
+    supplied = ""
+    selected: Optional[str] = None
+    for protocol in (ws.headers.get("sec-websocket-protocol") or "").split(","):
+        protocol = protocol.strip()
+        if protocol.startswith("bearer.b64url."):
+            supplied = _decode_b64url_token(protocol[len("bearer.b64url."):])
+            selected = protocol
+            break
+        if protocol.startswith("bearer."):
+            supplied = protocol[len("bearer."):]
+            selected = protocol
+            break
+    return supplied, selected
 
 
 # ─── REQUEST / RESPONSE MODELS ────────────────────────────────────────────────
@@ -718,23 +787,17 @@ async def health():
 @app.websocket("/ws/vps")
 async def vps_websocket(ws: WebSocket):
     """
-    Live WebSocket endpoint for the 3D VPS engine.
-    All kernel events are streamed here in real-time.
+    Live WebSocket endpoint for the operator cockpit and the 3D VPS engine.
+    Browsers authenticate with the ``bearer.b64url.<token>`` subprotocol
+    because they cannot set an Authorization header on WebSocket.
     """
     expected = getattr(app.state, "api_token", "") or os.getenv("TENIR_API_TOKEN", "")
-    scheme, _, supplied = (ws.headers.get("authorization", "")).partition(" ")
-    if scheme.lower() != "bearer":
-        supplied = ""
-        for protocol in ws.headers.get("sec-websocket-protocol", "").split(","):
-            protocol = protocol.strip()
-            if protocol.startswith("bearer."):
-                supplied = protocol[7:]
-                break
-    if len(expected) < 32 or not hmac.compare_digest(supplied, expected):
+    supplied, selected = _websocket_credentials(ws)
+    if len(expected) < 32 or not supplied or not hmac.compare_digest(supplied, expected):
         await ws.close(code=1008, reason="Bearer token required")
         return
     hub = get_hub()
-    await handle_client(ws, hub)
+    await handle_client(ws, hub, subprotocol=selected)
 
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────

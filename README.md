@@ -326,9 +326,11 @@ or:
 
 ```bash
 uvicorn r5_hardened.IRON_OMEGA_R5.r5_server:app \
-  --host 0.0.0.0 \
+  --host 127.0.0.1 \
   --port 8000
 ```
+
+The operator cockpit is served at `http://127.0.0.1:8000/`. Setup, the required token and operator id, and the smoke test are in [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md). Bind the process to loopback. Do not publish the page.
 
 | Endpoint                          | Method | Purpose                                    |
 | --------------------------------- | ------ | ------------------------------------------ |
@@ -359,8 +361,10 @@ Endpoint availability depends on the selected runtime/profile.
 | Profile     | Factory                              | Purpose                  |
 | ----------- | ------------------------------------ | ------------------------ |
 | `default`   | `PolicyEngine.default()`             | Canonical baseline       |
-| `partner_a` | `PolicyEngine.um6p_shadow_v4()`      | Shadow-monitor profile   |
-| `partner_b` | `PolicyEngine.ocp_sovereign_pilot()` | Industrial pilot profile |
+| `partner_a` | `PolicyEngine.um6p_shadow_v4()`      | Historical name; not a 5.7.6 factory |
+| `partner_b` | `PolicyEngine.ocp_sovereign_pilot()` | Historical name; not a 5.7.6 factory |
+
+The hardened R5 server accepts `TENIR_POLICY_PROFILE=default` or `canonical` and loads `PolicyEngine.default()`. Any other name refuses to start.
 
 Default policy fingerprint:
 

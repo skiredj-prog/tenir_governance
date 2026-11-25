@@ -199,8 +199,8 @@ class WebSocketHub:
     def connection_count(self) -> int:
         return len(self._connections)
 
-    async def connect(self, ws: WebSocket) -> None:
-        await ws.accept()
+    async def connect(self, ws: WebSocket, subprotocol: Optional[str] = None) -> None:
+        await ws.accept(subprotocol=subprotocol)
         async with self._lock:
             self._connections.add(ws)
         logger.info(f"[R5-WS] Client connected. Total: {len(self._connections)}")
@@ -295,12 +295,14 @@ class WebSocketHub:
 
 # ─── WEBSOCKET ENDPOINT HANDLER ───────────────────────────────────────────────
 
-async def handle_client(ws: WebSocket, hub: "WebSocketHub") -> None:
+async def handle_client(
+    ws: WebSocket, hub: "WebSocketHub", subprotocol: Optional[str] = None
+) -> None:
     """
     Handles the lifecycle of a single WebSocket client connection.
     Attach to FastAPI with: @app.websocket("/ws/vps")
     """
-    await hub.connect(ws)
+    await hub.connect(ws, subprotocol=subprotocol)
     try:
         while True:
             raw = await ws.receive_text()
