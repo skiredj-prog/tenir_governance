@@ -7,8 +7,9 @@
 <style>
 /*
   TENIR Interface 2cIronOmega v1
-  Backend: http://localhost:8000 (r5_server.py · Iron Omega R5 · 2C Full Stack)
-  Auth: JWT in Authorization header — service invocation only, no UI gating
+  Served by the hardened kernel on the same loopback origin (GET /).
+  Auth: shared Bearer TENIR_API_TOKEN plus TENIR_OPERATOR_ID. Both are required.
+  API and WebSocket bases are configurable and must stay on localhost or 127.0.0.1.
   Surfaces: Operator Cockpit · Forensics Console · Authority Ceremony
   Backlog: Board Workbench (OPI/ESI/Value Plane), AI Journal, BFF layer
 */
@@ -110,6 +111,17 @@ body {
 }
 .tok-inp:focus { border-color:var(--blue); }
 .tok-inp::placeholder { color:var(--dim); }
+
+.conn-bar {
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  padding:8px 14px;
+  background:#090d16;
+  border-bottom:1px solid var(--border);
+  font-size:10px; color:var(--muted);
+}
+.conn-bar label { display:flex; align-items:center; gap:6px; letter-spacing:.06em; text-transform:uppercase; }
+.conn-hint { font-size:11px; color:var(--amber); letter-spacing:0; text-transform:none; }
+.adj-note { padding:0 14px 12px; font-size:11px; color:var(--muted); line-height:1.55; }
 
 /* ── PANELS ─────────────────────────────────────────────── */
 .main { padding:14px; }
@@ -238,7 +250,7 @@ input[type=range].sl::-webkit-slider-thumb {
   transition:transform .1s;
 }
 input[type=range].sl::-webkit-slider-thumb:hover { transform:scale(1.25); }
-.sl-val { font:600 12px var(--mono); width:30px; text-align:right; color:var(--txt); }
+.sl-val { font:600 12px var(--mono); width:42px; text-align:right; color:var(--txt); }
 
 .adj-foot {
   display:flex; align-items:center; gap:10px;
@@ -282,6 +294,10 @@ input[type=range].sl::-webkit-slider-thumb:hover { transform:scale(1.25); }
   font-size:11px; color:var(--teal);
   background:var(--teal-bg); border:1px solid rgba(0,200,150,.2);
   border-radius:4px; padding:5px 9px; line-height:1.6;
+  white-space:pre-line;
+}
+.tl-empty {
+  text-align:center; color:var(--dim); font-size:11px; padding:32px;
 }
 .warn-box {
   font-size:11px; color:var(--amber);
@@ -410,14 +426,27 @@ select.inp {
   <div class="hdr-r">
     <div class="ws-pill">
       <div class="ws-dot" id="wsDot"></div>
-      <span id="wsLbl">localhost:8000</span>
-    </div>
-    <div class="tok-wrap">
-      <span>Bearer</span>
-      <input type="password" class="tok-inp" id="jwtInp" placeholder="JWT (optional)">
+      <span id="wsLbl">not connected</span>
     </div>
   </div>
 </header>
+
+<div class="conn-bar" id="connBar">
+  <label>API
+    <input class="tok-inp" id="apiBase" placeholder="same origin" style="width:230px;text-transform:none" spellcheck="false" autocomplete="off">
+  </label>
+  <label>WS
+    <input class="tok-inp" id="wsBase" placeholder="derived from API" style="width:230px;text-transform:none" spellcheck="false" autocomplete="off">
+  </label>
+  <label>Operator
+    <input class="tok-inp" id="opSession" placeholder="TENIR_OPERATOR_ID" style="width:160px;text-transform:none" spellcheck="false" autocomplete="off">
+  </label>
+  <label>Bearer
+    <input type="password" class="tok-inp" id="jwtInp" placeholder="TENIR_API_TOKEN" style="width:190px;text-transform:none" autocomplete="off">
+  </label>
+  <button class="btn btn-ghost" id="btnApplyConn" type="button">APPLY</button>
+  <span class="conn-hint" id="connHint">Paste the local API token and operator id. The token stays in memory for this page only and is cleared on reload.</span>
+</div>
 
 <main class="main">
 
@@ -505,7 +534,7 @@ select.inp {
   <div class="adj-panel">
     <div class="ch" style="padding:9px 14px">
       <span>Adjudication</span>
-      <span class="ch-r">POST /api/v1/adjudicate</span>
+      <span class="ch-r">POST /api/v1/adjudicate · schema 1.2 runtime_object</span>
     </div>
     <div class="adj-sliders">
       <div class="sl-grp">
@@ -532,19 +561,23 @@ select.inp {
       <div class="sl-grp">
         <div class="sl-lbl">O — Options</div>
         <div class="sl-row">
-          <input type="range" class="sl" id="slO" min="0" max="10" step="0.5" value="3.0">
-          <span class="sl-val" id="vO">3.0</span>
+          <input type="range" class="sl" id="slO" min="0" max="1" step="0.01" value="0.75">
+          <span class="sl-val" id="vO">0.75</span>
         </div>
       </div>
     </div>
     <div class="adj-foot">
-      <input class="inp inp-sm" id="opId" placeholder="operator_id (optional)" style="max-width:180px">
       <button class="btn btn-blue" id="adjBtn">ADJUDICATE</button>
       <div class="adj-res">
         <span class="adj-res-hint" id="adjHint">Submit to see verdict</span>
         <span class="badge" id="adjBadge" style="display:none"></span>
         <span id="adjDetail" style="font-size:11px;color:var(--muted)"></span>
       </div>
+    </div>
+    <div class="adj-note" id="adjNote">
+      The cockpit sends a canonical TENIR 2.0 schema 1.2 runtime_object.
+      SHADOW_PASSIVE records that object. ENFORCE rejects raw_input and accepts only this schema.
+      SHADOW_OFF does not record the submission. Scores stay in [0, 1]; option space is not a count.
     </div>
   </div>
 
@@ -582,17 +615,15 @@ select.inp {
     <div class="cer-card">
       <div class="cer-head">
         <h3>Sign Oath</h3>
-        <p>POST /api/v1/oath/sign?operator_id=…</p>
+        <p>POST /api/v1/oath/sign</p>
       </div>
       <div class="cer-body">
         <div class="warn-box">
-          This endpoint will sign any operator_id without verifying the caller's identity.
-          Cryptographic integrity is real; identity assurance is not yet enforced.
-          See G-R5-001 in release tracker.
+          Local demo only. The ceremony checks the shared TENIR_API_TOKEN and the configured TENIR_OPERATOR_ID. It does not prove a personal identity. ENFORCE here is this R5 process only: it does not grant authority on the 5.7.x governance kernel. Submit the returned nonce and timestamp unchanged. ENFORCE is accepted only after a recorded transition through SHADOW_CRITICAL.
         </div>
         <div class="fg">
           <label class="fl">Operator ID</label>
-          <input class="inp" id="oathOp" placeholder="e.g. aziz.skiredj">
+          <input class="inp" id="oathOp" placeholder="must match TENIR_OPERATOR_ID">
         </div>
         <button class="btn btn-blue" id="btnOath" style="align-self:flex-start">REQUEST OATH</button>
         <div class="fg" id="oathTxtGrp" style="display:none">
@@ -618,11 +649,10 @@ select.inp {
         <div class="fg">
           <label class="fl">Target Mode</label>
           <select class="inp" id="tMode">
-            <option value="SHADOW_PASSIVE">SHADOW_PASSIVE — observation, no block (default)</option>
-            <option value="SHADOW">SHADOW — shadow mode</option>
-            <option value="SHADOW_CRITICAL">SHADOW_CRITICAL — critical posture</option>
-            <option value="ENFORCE">ENFORCE — enforcement active</option>
-            <option value="SHADOW_OFF">SHADOW_OFF — shadow disabled</option>
+            <option value="SHADOW_OFF">SHADOW_OFF — evaluation disabled</option>
+            <option value="SHADOW_PASSIVE" selected>SHADOW_PASSIVE — observation, no block</option>
+            <option value="SHADOW_CRITICAL">SHADOW_CRITICAL — required before ENFORCE</option>
+            <option value="ENFORCE">ENFORCE — canonical runtime_object only</option>
           </select>
         </div>
         <div class="fg">
@@ -631,16 +661,19 @@ select.inp {
         </div>
         <div class="fg">
           <label class="fl">Oath Text</label>
-          <textarea class="inp inp-mono" id="tOathTxt" rows="2" placeholder="pre-filled from Sign Oath"></textarea>
+          <textarea class="inp inp-mono" id="tOathTxt" rows="2" readonly placeholder="filled by Sign Oath"></textarea>
         </div>
         <div class="fg">
           <label class="fl">Oath Signature</label>
-          <textarea class="inp inp-mono" id="tOathSig" rows="2" placeholder="pre-filled from Sign Oath"></textarea>
+          <textarea class="inp inp-mono" id="tOathSig" rows="2" readonly placeholder="filled by Sign Oath"></textarea>
         </div>
         <div class="fg">
-          <label class="fl">Nonce <span class="fn">— auto-generated, single-use</span></label>
-          <input class="inp inp-mono" id="tNonce" readonly>
-          <button class="btn btn-ghost" id="btnNonce" style="align-self:flex-start;margin-top:4px">REGENERATE</button>
+          <label class="fl">Nonce <span class="fn">— issued with the signature, single-use</span></label>
+          <input class="inp inp-mono" id="tNonce" readonly placeholder="filled by Sign Oath">
+        </div>
+        <div class="fg">
+          <label class="fl">Timestamp <span class="fn">— the signed timestamp, not the clock at submit</span></label>
+          <input class="inp inp-mono" id="tTimestamp" readonly placeholder="filled by Sign Oath">
         </div>
         <button class="btn btn-red" id="btnTrans">SUBMIT TRANSITION</button>
         <div id="transRes"></div>
@@ -655,33 +688,112 @@ select.inp {
 <script>
 /* ============================================================
    TENIR Interface 2cIronOmega v1 — Runtime
-   Backend: http://localhost:8000 (r5_server.py · Iron Omega R5 · 2C Full Stack)
-   WS:      ws://localhost:8000/ws/vps
-   Auth:    JWT Bearer in Authorization header (service-level only)
+   Same-origin by default. API and WS bases stay on loopback.
+   Auth: Bearer TENIR_API_TOKEN (required) and TENIR_OPERATOR_ID.
    ============================================================ */
 
-const API = 'http://localhost:8000';
-const WS_URL = 'ws://localhost:8000/ws/vps';
 const S_BLOCK = 0.75, S_ALERT = 0.90, TAU = 0.42, S_MAX = 3.0;
 const BUF = 60; // trajectory buffer size
+const STORE = {
+  api: 'tenir.cockpit.apiBase',
+  ws: 'tenir.cockpit.wsBase',
+  op: 'tenir.cockpit.operatorId'
+};
+const LEGACY_TOKEN_KEY = 'tenir.cockpit.token';
 
 // ── STATE ──────────────────────────────────────────────────
 const st = {
-  ws: null, wsDelay: 1200,
+  ws: null, wsDelay: 1200, wsTimer: null,
   buf: [],          // [{p,v,k,s,t}]
   evCount: 0,
   entries: [],      // forensics ledger
-  s: null
+  s: null,
+  mode: null
 };
 
-// ── AUTH ───────────────────────────────────────────────────
+function isLoopbackHost(hostname) {
+  const host = String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
+
+function pageLock() {
+  if (location.protocol === 'file:') {
+    return 'Open this cockpit from the local server (http://127.0.0.1:8000/). file:// is not a supported origin.';
+  }
+  if ((location.protocol === 'http:' || location.protocol === 'https:') && !isLoopbackHost(location.hostname)) {
+    return 'This cockpit only runs on localhost or 127.0.0.1. Refusing to use a non-loopback page.';
+  }
+  return '';
+}
+
+function parseBase(raw, kind) {
+  const value = (raw || '').trim().replace(/\/+$/, '');
+  if (!value) return '';
+  let url;
+  try { url = new URL(value); }
+  catch (_) { throw new Error(kind + ' base is not a valid URL.'); }
+  const allowed = kind === 'WS' ? ['ws:', 'wss:'] : ['http:', 'https:'];
+  if (!allowed.includes(url.protocol)) {
+    throw new Error(kind + ' base must use ' + allowed.join(' or ') + '.');
+  }
+  if (!isLoopbackHost(url.hostname)) {
+    throw new Error(kind + ' base must be localhost or 127.0.0.1.');
+  }
+  return url.origin;
+}
+
+function defaultApiBase() {
+  if ((location.protocol === 'http:' || location.protocol === 'https:') && isLoopbackHost(location.hostname)) {
+    return location.origin;
+  }
+  return '';
+}
+
+function apiBase() {
+  const typed = document.getElementById('apiBase').value;
+  const chosen = parseBase(typed, 'API') || defaultApiBase();
+  if (!chosen) throw new Error('Set an API base on localhost or 127.0.0.1.');
+  return chosen;
+}
+
+function wsBase() {
+  const typed = document.getElementById('wsBase').value;
+  const explicit = parseBase(typed, 'WS');
+  if (explicit) return explicit;
+  const api = apiBase();
+  return api.replace(/^http/i, 'ws');
+}
+
 const jwt = () => document.getElementById('jwtInp').value.trim();
-const hdrs = (extra={}) => {
-  const h = { 'Content-Type':'application/json', ...extra };
-  const t = jwt();
-  if (t) h['Authorization'] = `Bearer ${t}`;
-  return h;
-};
+const operatorId = () => document.getElementById('opSession').value.trim();
+
+function sessionError() {
+  const lock = pageLock();
+  if (lock) return lock;
+  if (location.search.includes('token=') || location.search.includes('api_token=')) {
+    return 'Do not put the API token in the URL. Paste it into the Bearer field.';
+  }
+  if (!jwt()) return 'API token required. Paste TENIR_API_TOKEN (Bearer, at least 32 characters).';
+  if (!operatorId()) return 'Operator id required. It must match TENIR_OPERATOR_ID.';
+  try { apiBase(); wsBase(); }
+  catch (e) { return e.message; }
+  return '';
+}
+
+function hdrs() {
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + jwt()
+  };
+}
+
+function wsProtocol(token) {
+  const bytes = new TextEncoder().encode(token);
+  let binary = '';
+  bytes.forEach(b => { binary += String.fromCharCode(b); });
+  const b64 = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  return 'bearer.b64url.' + b64;
+}
 
 // ── TABS ───────────────────────────────────────────────────
 document.querySelectorAll('.tab').forEach(b => {
@@ -694,16 +806,32 @@ document.querySelectorAll('.tab').forEach(b => {
 });
 
 // ── API ────────────────────────────────────────────────────
+function detailText(detail) {
+  if (typeof detail === 'string') return detail;
+  if (detail && typeof detail === 'object' && typeof detail.message === 'string') return detail.message;
+  if (detail == null) return 'request failed';
+  return JSON.stringify(detail);
+}
+
 async function call(method, path, body=null) {
+  const blocked = sessionError();
+  if (blocked) throw new Error(blocked);
   const opts = { method, headers: hdrs() };
   if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(API + path, opts);
+  const r = await fetch(apiBase() + path, opts);
   const d = await r.json().catch(() => ({ detail: r.statusText }));
   if (!r.ok) {
-    const msg = d.detail || JSON.stringify(d);
-    if (r.status === 403) throw new Error(`403 — Insufficient credentials: ${msg}`);
-    if (r.status === 401) throw new Error('401 — Authentication required');
-    throw new Error(`${r.status} — ${msg}`);
+    const msg = detailText(d.detail);
+    if (r.status === 401) {
+      throw new Error('401 — Bearer token required. Paste TENIR_API_TOKEN (at least 32 characters).');
+    }
+    if (r.status === 403) {
+      throw new Error('403 — Operator identity is not authorized. The operator id must match TENIR_OPERATOR_ID. ' + msg);
+    }
+    if (r.status === 422 && /runtime_object|ENFORCE|schema 1\.2/i.test(msg)) {
+      throw new Error('422 — ENFORCE accepts only a canonical TENIR 2.0 schema 1.2 runtime_object. raw_input is rejected. ' + msg);
+    }
+    throw new Error(r.status + ' — ' + msg);
   }
   return d;
 }
@@ -723,17 +851,44 @@ function sColor(s) {
 }
 const CES_CLASS = {
   REST:'b-teal', METABOLIZING:'b-blue', TENSION:'b-amber',
-  SIGNAL_CONFLICT:'b-orange', COLLAPSE:'b-red'
+  SIGNAL_CONFLICT:'b-orange', COLLAPSE:'b-red', SCHIZOPHRENIA:'b-orange'
 };
-const MEM_CLASS = { PASS:'b-teal', FLAG:'b-amber', BLOCK:'b-red' };
+const MEM_CLASS = {
+  PASS:'b-teal', FLAG:'b-amber', BLOCK:'b-red',
+  allow:'b-teal', allow_with_alert:'b-amber',
+  allow_with_intended_block:'b-orange', block:'b-red',
+  NOT_EVALUATED:'b-dim'
+};
 const CES_COLOR = {
   REST:'var(--teal)', METABOLIZING:'var(--blue)', TENSION:'var(--amber)',
   SIGNAL_CONFLICT:'var(--orange)', COLLAPSE:'var(--red)'
 };
 
 // ── UPDATE POSTURE BAR ─────────────────────────────────────
-function updateBar(d) {
-  st.s = d.s_score;
+function asView(d) {
+  if (!d || typeof d !== 'object') return {};
+  const view = (d.payload && typeof d.payload === 'object') ? Object.assign({}, d, d.payload) : Object.assign({}, d);
+  if (!view.operating_mode && view.mode) view.operating_mode = view.mode;
+  if (view.current_epoch != null && view.epoch_id == null) view.epoch_id = String(view.current_epoch);
+  if (view.entry_hash && !view.latest_hash) view.latest_hash = view.entry_hash;
+  return view;
+}
+
+function asText(value) {
+  if (value == null) return '';
+  return typeof value === 'string' ? value : String(value);
+}
+
+function asNumber(value) {
+  if (typeof value === 'boolean' || value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function updateBar(raw) {
+  const d = asView(raw);
+  if (d.operating_mode) st.mode = asText(d.operating_mode);
+  st.s = asNumber(d.s_score);
   const p = posture(st.s);
 
   const pb = document.getElementById('pbPosture');
@@ -741,7 +896,7 @@ function updateBar(d) {
   pb.className = 'badge ' + (p==='NORMAL'?'b-teal':p==='CAUTION'?'b-amber':'b-red');
 
   const pc = document.getElementById('pbCES');
-  const cv = d.ces_state || '—';
+  const cv = asText(d.ces_state) || '—';
   pc.textContent = cv;
   pc.className = 'badge ' + (CES_CLASS[cv] || 'b-dim');
 
@@ -749,17 +904,19 @@ function updateBar(d) {
   document.getElementById('pbS').style.color = sColor(st.s);
 
   const pm = document.getElementById('pbMem');
-  const mv = d.membrane_decision || '—';
+  const mv = asText(d.membrane_decision) || '—';
   pm.textContent = mv;
   pm.className = 'badge ' + (MEM_CLASS[mv] || 'b-dim');
 
-  document.getElementById('pbMode').textContent = d.operating_mode || '—';
+  document.getElementById('pbMode').textContent = asText(d.operating_mode) || '—';
 
-  if (d.latest_hash) document.getElementById('pbHash').textContent = d.latest_hash.slice(0,18) + '…';
-  if (d.epoch_id) document.getElementById('epochLbl').textContent = 'epoch · ' + d.epoch_id.slice(0,8);
+  if (d.latest_hash) document.getElementById('pbHash').textContent = asText(d.latest_hash).slice(0, 18) + '…';
+  if (d.epoch_id != null && d.epoch_id !== '') {
+    document.getElementById('epochLbl').textContent = 'epoch · ' + asText(d.epoch_id).slice(0, 8);
+  }
 
   drawGauge(st.s);
-  updateDerivs(d.ds_de, d.d2s_de2);
+  updateDerivs(asNumber(d.ds_de), asNumber(d.d2s_de2));
 }
 
 // ── GAUGE (canvas arc) ─────────────────────────────────────
@@ -936,60 +1093,121 @@ function addEvent(d, type='EVENT') {
   const t = new Date();
   const ts = t.toTimeString().split(' ')[0];
   const ces = d.ces_state || type;
-  const col = CES_COLOR[ces] || 'var(--txt)';
+  const col = Object.prototype.hasOwnProperty.call(CES_COLOR, ces) ? CES_COLOR[ces] : 'var(--txt)';
   const h = d.hash || d.entry_hash || '';
   const mem = d.membrane_decision || '';
 
   const div = document.createElement('div');
   div.className = 'ev';
-  div.innerHTML = `
-    <div class="ev-t">${ts}</div>
-    <div class="ev-b">
-      <div class="ev-type" style="color:${col}">${ces}</div>
-      <div class="ev-meta">S=${d.s_score!=null?d.s_score.toFixed(3):'—'}${mem?' · '+mem:''}</div>
-      ${h?`<div class="ev-hash">${h.slice(0,22)}…</div>`:''}
-    </div>`;
+  const timeEl = document.createElement('div');
+  timeEl.className = 'ev-t';
+  timeEl.textContent = ts;
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'ev-b';
+  const typeEl = document.createElement('div');
+  typeEl.className = 'ev-type';
+  typeEl.style.color = col;
+  typeEl.textContent = String(ces);
+  const metaEl = document.createElement('div');
+  metaEl.className = 'ev-meta';
+  const score = (d.s_score != null && Number.isFinite(Number(d.s_score))) ? Number(d.s_score).toFixed(3) : '—';
+  metaEl.textContent = 'S=' + score + (mem ? ' · ' + String(mem) : '');
+  bodyEl.append(typeEl, metaEl);
+  if (h) {
+    const hashEl = document.createElement('div');
+    hashEl.className = 'ev-hash';
+    hashEl.textContent = String(h).slice(0, 22) + '…';
+    bodyEl.appendChild(hashEl);
+  }
+  div.append(timeEl, bodyEl);
   stream.insertBefore(div, stream.firstChild);
   while (stream.children.length > 50) stream.removeChild(stream.lastChild);
 }
 
 // ── WEBSOCKET ──────────────────────────────────────────────
+function closeWS() {
+  if (st.wsTimer) { clearTimeout(st.wsTimer); st.wsTimer = null; }
+  if (!st.ws) return;
+  const sock = st.ws;
+  st.ws = null;
+  sock.onclose = null;
+  sock.onerror = null;
+  sock.onmessage = null;
+  try { sock.close(); } catch (_) {}
+}
+
 function connectWS() {
   const dot = document.getElementById('wsDot');
   const lbl = document.getElementById('wsLbl');
-  dot.className = 'ws-dot'; lbl.textContent = 'Connecting…';
-  try { st.ws = new WebSocket(WS_URL); } catch(e) { schedRetry(); return; }
+  closeWS();
+  const blocked = sessionError();
+  if (blocked) {
+    dot.className = 'ws-dot';
+    lbl.textContent = 'token required';
+    return;
+  }
+  let url;
+  try { url = wsBase() + '/ws/vps'; }
+  catch (e) {
+    dot.className = 'ws-dot fail';
+    lbl.textContent = 'bad ws url';
+    return;
+  }
+  dot.className = 'ws-dot';
+  lbl.textContent = 'Connecting…';
+  try { st.ws = new WebSocket(url, [wsProtocol(jwt())]); }
+  catch (e) { schedRetry(); return; }
 
   st.ws.onopen = () => {
-    dot.className = 'ws-dot live'; lbl.textContent = 'ws://localhost:8000/ws/vps';
+    dot.className = 'ws-dot live';
+    lbl.textContent = url.replace(/^wss?:\/\//, '');
     st.wsDelay = 1200;
   };
   st.ws.onmessage = e => {
     try {
-      const d = JSON.parse(e.data);
-      updateBar(d); pushPoint(d); addEvent(d);
-    } catch(_) {}
+      const d = asView(JSON.parse(e.data));
+      if (d.type === 'CONNECTED' || d.type === 'PONG') return;
+      if (d.type === 'LEDGER_APPEND' || d.s_score == null) {
+        addEvent(d, d.type || 'EVENT');
+        return;
+      }
+      updateBar(d); pushPoint(d); addEvent(d, d.type || 'EVENT');
+    } catch (_) {}
   };
-  st.ws.onclose = () => { dot.className='ws-dot fail'; lbl.textContent='Disconnected'; schedRetry(); };
-  st.ws.onerror = () => { dot.className='ws-dot fail'; };
+  st.ws.onclose = () => {
+    dot.className = 'ws-dot fail';
+    lbl.textContent = 'Disconnected';
+    schedRetry();
+  };
+  st.ws.onerror = () => { dot.className = 'ws-dot fail'; };
 }
 function schedRetry() {
-  setTimeout(connectWS, st.wsDelay);
-  st.wsDelay = Math.min(st.wsDelay*1.8, 30000);
+  if (sessionError()) return;
+  st.wsTimer = setTimeout(connectWS, st.wsDelay);
+  st.wsDelay = Math.min(st.wsDelay * 1.8, 30000);
 }
 
 // ── POLL FALLBACK (every 5s) ───────────────────────────────
 async function poll() {
+  const hint = document.getElementById('connHint');
+  const blocked = sessionError();
+  if (blocked) {
+    hint.textContent = blocked;
+    return;
+  }
   try {
     const d = await call('GET','/api/v1/state');
     updateBar(d);
+    hint.textContent = 'Connected · ' + (st.mode || d.mode || 'mode unknown') + ' · loopback only';
     const wsLive = st.ws && st.ws.readyState === WebSocket.OPEN;
     if (!wsLive) { pushPoint(d); addEvent(d, 'POLL'); }
-  } catch(_) {}
+  } catch (e) {
+    hint.textContent = e.message;
+  }
 }
 
 // ── SLIDERS ───────────────────────────────────────────────
-[['slP','vP',2],['slV','vV',2],['slK','vK',2],['slO','vO',1]].forEach(([sid,vid,dp]) => {
+[['slP','vP',2],['slV','vV',2],['slK','vK',2],['slO','vO',2]].forEach(([sid,vid,dp]) => {
   document.getElementById(sid).addEventListener('input', function() {
     document.getElementById(vid).textContent = parseFloat(this.value).toFixed(dp);
   });
@@ -1006,28 +1224,30 @@ document.getElementById('adjBtn').addEventListener('click', async () => {
   hint.style.display='none'; badge.style.display='none'; detail.textContent='';
 
   try {
-    // AdjudicationRequest takes raw_input: str (natural language OR JSON EventSample)
-    // The NSL engine extracts: pressure, velocity, capacity, option_space
-    const params = {
-      pressure:     parseFloat(document.getElementById('slP').value),
-      velocity:     parseFloat(document.getElementById('slV').value),
-      capacity:     parseFloat(document.getElementById('slK').value),
-      option_space: parseFloat(document.getElementById('slO').value),
+    const op = operatorId();
+    const runtime = buildRuntimeObject(op);
+    const body = {
+      runtime_object: runtime,
+      actor_ref: op,
+      case_id: runtime.trace.trace_id
     };
-    const op = document.getElementById('opId').value.trim();
-    const body = { raw_input: JSON.stringify(params) };
-    if (op) body.actor_ref = op;
-
-    const r = await call('POST','/api/v1/adjudicate',body);
+    const r = await call('POST','/api/v1/adjudicate', body);
     const v = r.membrane_decision || r.decision || '—';
     badge.textContent = v;
     badge.className = 'badge ' + (MEM_CLASS[v]||'b-dim');
     badge.style.display = 'inline-flex';
-    detail.textContent = `S=${r.s_score?.toFixed(4)||'—'} · ${r.ces_state||'—'} · ${r.event_id?.slice(0,10)||''}`;
+    const score = r.s_score != null ? Number(r.s_score).toFixed(4) : '—';
+    detail.textContent = `S=${score} · ${r.ces_state||'—'} · ${r.operating_mode||st.mode||''} · ${(r.entry_id||'').slice(0,10)}`;
 
-    updateBar(r); pushPoint(r); addEvent({...r,type:'ADJUDICATION'});
+    updateBar(Object.assign({ pressure: runtime.scores.pressure, velocity: runtime.scores.velocity, capacity: runtime.scores.capacity }, r));
+    pushPoint(Object.assign({ pressure: runtime.scores.pressure, velocity: runtime.scores.velocity, capacity: runtime.scores.capacity }, r));
+    addEvent(Object.assign({}, r, { type:'ADJUDICATION' }));
   } catch(e) {
-    detail.innerHTML = `<span class="err-box">${e.message}</span>`;
+    detail.replaceChildren();
+    const box = document.createElement('span');
+    box.className = 'err-box';
+    box.textContent = e.message;
+    detail.appendChild(box);
   } finally {
     btn.disabled=false; btn.textContent='ADJUDICATE';
   }
@@ -1038,11 +1258,17 @@ document.getElementById('btnLoad').addEventListener('click', async () => {
   const btn=document.getElementById('btnLoad');
   btn.disabled=true; btn.textContent='LOADING…';
   try {
-    const d = await call('GET','/api/v1/ledger/recent?limit=100');
-    st.entries = d.entries || d || [];
+    const d = await call('GET','/api/v1/ledger/recent?n=100');
+    st.entries = Array.isArray(d) ? d : (d.entries || []);
     renderTL(st.entries);
   } catch(e) {
-    document.getElementById('timeline').innerHTML = `<div class="err-box" style="margin:16px">${e.message}</div>`;
+    const tl = document.getElementById('timeline');
+    tl.replaceChildren();
+    const box = document.createElement('div');
+    box.className = 'err-box';
+    box.style.margin = '16px';
+    box.textContent = e.message;
+    tl.appendChild(box);
   } finally { btn.disabled=false; btn.textContent='LOAD ENTRIES'; }
 });
 
@@ -1055,7 +1281,7 @@ document.getElementById('btnVerify').addEventListener('click', async () => {
     document.getElementById('chainDot').className = 'chdot ' + (ok?'ok':'bad');
     document.getElementById('chainLbl').textContent = ok
       ? `Chain valid · ${r.entry_count||''} entries`
-      : `Chain INVALID · ${r.error||'hash mismatch'}`;
+      : `Chain INVALID · ${r.broken_links != null ? r.broken_links + ' broken links' : (r.error || 'hash mismatch')}`;
     document.getElementById('chainBadge').style.borderColor = ok?'rgba(0,200,150,.25)':'rgba(232,64,64,.25)';
   } catch(e) {
     document.getElementById('chainDot').className='chdot bad';
@@ -1077,48 +1303,95 @@ document.getElementById('fSearch').addEventListener('input', () => {
   renderTL(q ? st.entries.filter(e=>JSON.stringify(e).toLowerCase().includes(q)) : st.entries);
 });
 
+function chip(text, className) {
+  const span = document.createElement('span');
+  span.className = 'badge ' + className;
+  span.style.fontSize = '9px';
+  span.textContent = text;
+  return span;
+}
+
 function renderTL(entries) {
   const tl = document.getElementById('timeline');
+  tl.replaceChildren();
   if (!entries.length) {
-    tl.innerHTML = '<div style="text-align:center;color:var(--dim);font-size:11px;padding:32px">No entries match.</div>';
+    const empty = document.createElement('div');
+    empty.className = 'tl-empty';
+    empty.textContent = 'No entries match.';
+    tl.appendChild(empty);
     return;
   }
-  tl.innerHTML = '';
-  [...entries].reverse().forEach((entry,idx) => {
-    const type = entry.entry_type || entry.type || 'UNKNOWN';
-    const ts = entry.timestamp ? new Date(entry.timestamp*1000) : new Date();
+  [...entries].reverse().forEach((entry, idx) => {
+    const type = String(entry.entry_type || entry.type || 'UNKNOWN');
+    const ts = entryDate(entry.timestamp);
     const rel = relTime(ts);
-    const hash = entry.hash || entry.entry_hash || '';
-    const parentHash = entry.parent_hash || '';
-    const op = entry.operator_id || entry.actor || '';
-    const ces = entry.ces_state || '';
-    const dec = entry.membrane_decision || entry.decision || '';
-
-    const typeClass = {ADJUDICATION:'b-blue',TRANSITION:'b-purple',OATH:'b-amber',GENESIS:'b-dim'}[type]||'b-dim';
-    const dotClass  = {ADJUDICATION:'td-ADJ',TRANSITION:'td-TRANS',OATH:'td-OATH',GENESIS:'td-GEN'}[type]||'td-GEN';
+    const hash = String(entry.hash || entry.entry_hash || '');
+    const parentHash = String(entry.previous_hash || entry.parent_hash || '');
+    const op = String(entry.override_operator || entry.operator_id || entry.actor || '');
+    const ces = String(entry.ces_state || '');
+    const dec = String(entry.membrane_decision || entry.decision || '');
+    const known = { ADJUDICATION:'b-blue', TRANSITION:'b-purple', OATH:'b-amber', GENESIS:'b-dim',
+      observation:'b-blue', control_transition:'b-purple' };
+    const dots = { ADJUDICATION:'td-ADJ', TRANSITION:'td-TRANS', OATH:'td-OATH', GENESIS:'td-GEN',
+      observation:'td-ADJ', control_transition:'td-TRANS' };
 
     const row = document.createElement('div');
-    row.className='tl-row';
-    row.innerHTML = `
-      <div class="tl-t">
-        <div class="tl-rel">${rel}</div>
-        <div class="tl-tabs">${ts.toTimeString().split(' ')[0]}</div>
-      </div>
-      <div class="tl-dot-col"><div class="tl-dot ${dotClass}"></div></div>
-      <div class="tl-card" id="tlc${idx}">
-        <div class="tl-head" onclick="togTL(${idx})">
-          <span class="badge ${typeClass}" style="font-size:9px">${type}</span>
-          ${ces?`<span class="badge ${CES_CLASS[ces]||'b-dim'}" style="font-size:9px">${ces}</span>`:''}
-          ${dec?`<span class="badge ${MEM_CLASS[dec]||'b-dim'}" style="font-size:9px">${dec}</span>`:''}
-          ${op?`<span class="tl-op">${op}</span>`:''}
-          ${hash?`<span class="tl-hp">${hash.slice(0,14)}…</span>`:''}
-          <div class="tl-int ${hash?'ok':'nd'}"></div>
-        </div>
-        <div class="tl-detail" id="tld${idx}">
-          <pre class="json-pre">${JSON.stringify(entry,null,2)}</pre>
-          ${parentHash?`<div style="font-size:10px;color:var(--dim);margin-top:8px">← parent: ${parentHash.slice(0,22)}…</div>`:''}
-        </div>
-      </div>`;
+    row.className = 'tl-row';
+    const timeCol = document.createElement('div');
+    timeCol.className = 'tl-t';
+    const relEl = document.createElement('div');
+    relEl.className = 'tl-rel';
+    relEl.textContent = rel;
+    const absEl = document.createElement('div');
+    absEl.className = 'tl-tabs';
+    absEl.textContent = ts.toTimeString().split(' ')[0];
+    timeCol.append(relEl, absEl);
+    const dotCol = document.createElement('div');
+    dotCol.className = 'tl-dot-col';
+    const dot = document.createElement('div');
+    dot.className = 'tl-dot ' + (dots[type] || 'td-GEN');
+    dotCol.appendChild(dot);
+    const card = document.createElement('div');
+    card.className = 'tl-card';
+    card.id = 'tlc' + idx;
+    const head = document.createElement('div');
+    head.className = 'tl-head';
+    head.addEventListener('click', () => togTL(idx));
+    head.appendChild(chip(type, known[type] || 'b-dim'));
+    if (ces) head.appendChild(chip(ces, CES_CLASS[ces] || 'b-dim'));
+    if (dec) head.appendChild(chip(dec, MEM_CLASS[dec] || 'b-dim'));
+    if (op) {
+      const opEl = document.createElement('span');
+      opEl.className = 'tl-op';
+      opEl.textContent = op;
+      head.appendChild(opEl);
+    }
+    if (hash) {
+      const hp = document.createElement('span');
+      hp.className = 'tl-hp';
+      hp.textContent = hash.slice(0, 14) + '…';
+      head.appendChild(hp);
+    }
+    const mark = document.createElement('div');
+    mark.className = 'tl-int ' + (hash ? 'ok' : 'nd');
+    head.appendChild(mark);
+    const detail = document.createElement('div');
+    detail.className = 'tl-detail';
+    detail.id = 'tld' + idx;
+    const pre = document.createElement('pre');
+    pre.className = 'json-pre';
+    pre.textContent = JSON.stringify(entry, null, 2);
+    detail.appendChild(pre);
+    if (parentHash) {
+      const parent = document.createElement('div');
+      parent.style.fontSize = '10px';
+      parent.style.color = 'var(--dim)';
+      parent.style.marginTop = '8px';
+      parent.textContent = '← parent: ' + parentHash.slice(0, 22) + '…';
+      detail.appendChild(parent);
+    }
+    card.append(head, detail);
+    row.append(timeCol, dotCol, card);
     tl.appendChild(row);
   });
 }
@@ -1126,6 +1399,105 @@ function renderTL(entries) {
 function togTL(idx) {
   document.getElementById(`tlc${idx}`).classList.toggle('exp');
   document.getElementById(`tld${idx}`).classList.toggle('open');
+}
+
+function entryDate(ts) {
+  if (ts == null || ts === '') return new Date();
+  if (typeof ts === 'number') return new Date(ts < 1e12 ? ts * 1000 : ts);
+  const parsed = new Date(ts);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function unitScore(name, value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0 || n > 1) {
+    throw new Error(name + ' must be between 0 and 1. ENFORCE rejects raw_input and requires a schema 1.2 runtime_object.');
+  }
+  return n;
+}
+
+function buildRuntimeObject(op) {
+  const pressure = unitScore('pressure', document.getElementById('slP').value);
+  const velocity = unitScore('velocity', document.getElementById('slV').value);
+  const capacity = unitScore('capacity', document.getElementById('slK').value);
+  const optionSpace = unitScore('option_space', document.getElementById('slO').value);
+  const stability = capacity / ((pressure * velocity) + 1e-6);
+  const now = new Date().toISOString();
+  const structural = {
+    pressure: pressure,
+    velocity: velocity,
+    capacity: capacity,
+    option_space: optionSpace,
+    tau_integrity: 'intact',
+    stability: stability
+  };
+  return {
+    engine_spec_version: 'TENIR-2.0',
+    rubric_version: 'operator-cockpit-1.0',
+    timestamp_utc: now,
+    identity: {
+      unit_name: op || 'operator-cockpit',
+      entity_class: 'organization',
+      declared_scale: 'team'
+    },
+    tau: {
+      tau_hypothesis: 'Preserve accountable human authority.',
+      tau_integrity: 'intact'
+    },
+    epistemic: {
+      status: 'ok',
+      evidence_quality: 0.85,
+      manipulation_risk: 0.05,
+      drift: 0.05,
+      epistemic_surrender_risk: 0.05,
+      confidence_ceiling: 'high'
+    },
+    scores: {
+      pressure: pressure,
+      velocity: velocity,
+      capacity: capacity,
+      option_space: optionSpace,
+      stability: stability,
+      cooperative_control_score: 0.8,
+      trajectory_risk_score: Math.min(1, pressure * 0.5),
+      irreversible_pathway_materiality: 0.1
+    },
+    collapse_flags: [],
+    posture: 'NORMAL',
+    compliance_class: 'illustrative',
+    degraded_mode: ['none'],
+    active_profiles: [],
+    suppressed_profiles: [],
+    profile_conflicts: [],
+    narrative_distortion_summary: {},
+    irreversible_pathway_assessment: {
+      materially_affects_irreversible_pathway: false,
+      raw_data_human_verification_required: false,
+      human_verified_raw_data: false
+    },
+    assumptions: [],
+    trace: {
+      trace_id: 'cockpit-' + Date.now(),
+      stages: []
+    },
+    synthesis: {
+      structural_core: structural,
+      epistemic_state: {},
+      final_posture: 'NORMAL',
+      rationale: ['Operator cockpit slider submission.'],
+      degraded_inputs: []
+    },
+    schema_version: '1.2',
+    constraint_geometry: {
+      geometry_id: 'tenir-2.0-reference',
+      coordinates: {
+        authority: 0.95,
+        context_fit: 0.95,
+        authority_source: 'operator cockpit local session',
+        context_source: 'operator cockpit slider submission'
+      }
+    }
+  };
 }
 
 function relTime(ts) {
@@ -1137,22 +1509,83 @@ function relTime(ts) {
 }
 
 // ── CEREMONY ───────────────────────────────────────────────
-const mkNonce = () => 'nonce-'+Date.now()+'-'+Math.random().toString(36).slice(2,9);
-document.getElementById('tNonce').value = mkNonce();
-document.getElementById('btnNonce').addEventListener('click', () => {
-  document.getElementById('tNonce').value = mkNonce();
+function showBox(parent, kind, text) {
+  parent.replaceChildren();
+  const box = document.createElement('div');
+  box.className = kind;
+  box.textContent = text;
+  parent.appendChild(box);
+}
+
+function syncOperatorFields() {
+  const op = operatorId();
+  if (!op) return;
+  document.getElementById('oathOp').value = op;
+  document.getElementById('tOp').value = op;
+}
+
+function storageGet(key) {
+  try { return sessionStorage.getItem(key) || ''; }
+  catch (_) { return ''; }
+}
+
+function storageSet(key, value) {
+  try { sessionStorage.setItem(key, value); }
+  catch (_) {}
+}
+
+function purgeStoredToken() {
+  try { sessionStorage.removeItem(LEGACY_TOKEN_KEY); }
+  catch (_) {}
+}
+
+function rememberSession() {
+  // The bearer token is memory-only. A reload must ask for it again.
+  purgeStoredToken();
+  [
+    ['apiBase', STORE.api],
+    ['wsBase', STORE.ws],
+    ['opSession', STORE.op]
+  ].forEach(([id, key]) => storageSet(key, document.getElementById(id).value));
+  syncOperatorFields();
+}
+
+function loadSession() {
+  purgeStoredToken();
+  const query = new URLSearchParams(location.search);
+  document.getElementById('apiBase').value = query.get('api') || storageGet(STORE.api);
+  document.getElementById('wsBase').value = query.get('ws') || storageGet(STORE.ws);
+  document.getElementById('opSession').value = storageGet(STORE.op);
+  document.getElementById('jwtInp').value = '';
+  if (query.has('token') || query.has('api_token')) {
+    document.getElementById('connHint').textContent = 'Do not put the API token in the URL. Paste it into the Bearer field.';
+  }
+  syncOperatorFields();
+}
+
+function applySession() {
+  rememberSession();
+  closeWS();
+  connectWS();
+  poll();
+}
+
+document.getElementById('btnApplyConn').addEventListener('click', applySession);
+['apiBase','wsBase','opSession','jwtInp'].forEach(id => {
+  document.getElementById(id).addEventListener('change', applySession);
 });
 
 document.getElementById('btnOath').addEventListener('click', async () => {
   const btn = document.getElementById('btnOath');
   const res = document.getElementById('oathRes');
-  const op = document.getElementById('oathOp').value.trim();
-  if (!op) { res.innerHTML='<div class="err-box">operator_id required</div>'; return; }
-  btn.disabled=true; btn.textContent='REQUESTING…'; res.innerHTML='';
+  syncOperatorFields();
+  const op = document.getElementById('oathOp').value.trim() || operatorId();
+  if (!op) { showBox(res, 'err-box', 'operator_id required'); return; }
+  btn.disabled=true; btn.textContent='REQUESTING…'; res.replaceChildren();
   try {
-    const r = await call('POST', `/api/v1/oath/sign?operator_id=${encodeURIComponent(op)}`);
+    const r = await call('POST', '/api/v1/oath/sign', { operator_id: op });
     const txt = r.oath_text || '';
-    const sig = r.oath_signature || r.signature || '';
+    const sig = r.signature || r.oath_signature || '';
     document.getElementById('oathTxt').value = txt;
     document.getElementById('oathSig').value = sig;
     document.getElementById('oathTxtGrp').style.display='flex';
@@ -1161,13 +1594,14 @@ document.getElementById('btnOath').addEventListener('click', async () => {
     document.getElementById('oathSigGrp').style.display='flex';
     document.getElementById('oathSigGrp').style.flexDirection='column';
     document.getElementById('oathSigGrp').style.gap='4px';
-    // pre-fill transition
     document.getElementById('tOp').value = op;
     document.getElementById('tOathTxt').value = txt;
     document.getElementById('tOathSig').value = sig;
-    res.innerHTML='<div class="ok-box">Oath signed. Transition form pre-filled.</div>';
+    document.getElementById('tNonce').value = r.nonce || '';
+    document.getElementById('tTimestamp').value = r.timestamp || '';
+    showBox(res, 'ok-box', 'Oath signed. Nonce and timestamp were copied into the transition form. Submit them unchanged.');
   } catch(e) {
-    res.innerHTML=`<div class="err-box">${e.message}</div>`;
+    showBox(res, 'err-box', e.message);
   } finally { btn.disabled=false; btn.textContent='REQUEST OATH'; }
 });
 
@@ -1180,30 +1614,38 @@ document.getElementById('btnCopySig').addEventListener('click', () => {
 document.getElementById('btnTrans').addEventListener('click', async () => {
   const btn=document.getElementById('btnTrans');
   const res=document.getElementById('transRes');
-  btn.disabled=true; btn.textContent='SUBMITTING…'; res.innerHTML='';
+  btn.disabled=true; btn.textContent='SUBMITTING…'; res.replaceChildren();
   try {
+    const nonce = document.getElementById('tNonce').value.trim();
+    const timestamp = document.getElementById('tTimestamp').value.trim();
+    if (!nonce || !timestamp) {
+      throw new Error('Sign an oath first. The nonce and timestamp come from the signature and must not be invented locally.');
+    }
     const body = {
       target_mode:    document.getElementById('tMode').value,
       operator_id:    document.getElementById('tOp').value.trim(),
       oath_text:      document.getElementById('tOathTxt').value.trim(),
       oath_signature: document.getElementById('tOathSig').value.trim(),
-      nonce:          document.getElementById('tNonce').value.trim(),
-      timestamp:      String(Math.floor(Date.now()/1000))
+      nonce:          nonce,
+      timestamp:      timestamp
     };
-    const r = await call('POST','/api/v1/transition',body);
-    res.innerHTML=`<div class="ok-box">
-      Transition committed.<br>
-      Mode: <b>${r.new_mode||r.operating_mode||'—'}</b><br>
-      Entry: <span style="font-family:var(--mono);font-size:10px">${r.event_id||r.entry_id||'—'}</span>
-    </div>`;
-    document.getElementById('tNonce').value = mkNonce(); // consume nonce
+    const r = await call('POST','/api/v1/transition', body);
+    const mode = r.to_mode || r.new_mode || r.operating_mode || '—';
+    const entry = r.ledger_entry_id || r.entry_id || r.event_id || '—';
+    showBox(res, 'ok-box', 'Transition committed.\nMode: ' + mode + '\nEntry: ' + entry + '\nSign a new oath before the next transition.\nThis R5 mode does not grant authority on the 5.7.x governance kernel.');
+    document.getElementById('tNonce').value = '';
+    document.getElementById('tTimestamp').value = '';
+    document.getElementById('tOathSig').value = '';
     poll();
   } catch(e) {
-    res.innerHTML=`<div class="err-box">${e.message}</div>`;
+    showBox(res, 'err-box', e.message);
   } finally { btn.disabled=false; btn.textContent='SUBMIT TRANSITION'; }
 });
 
 // ── BOOT ───────────────────────────────────────────────────
+loadSession();
+const initialLock = pageLock();
+if (initialLock) document.getElementById('connHint').textContent = initialLock;
 connectWS();
 poll();
 setInterval(poll, 5000);

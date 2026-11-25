@@ -135,6 +135,8 @@ jobs:
           pytest \
             r5_hardened/IRON_OMEGA_R5/test_r5_all.py \
             r5_hardened/IRON_OMEGA_R5/test_institutional_hardening.py \
+            tests/test_operator_cockpit_smoke.py \
+            tests/test_oath_freshness.py \
             -v --tb=short
 
       - name: Run R5 wired integration tests

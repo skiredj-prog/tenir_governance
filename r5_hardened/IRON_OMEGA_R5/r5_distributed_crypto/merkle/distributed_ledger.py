@@ -28,6 +28,7 @@ import hashlib
 import hmac
 import json
 import math
+import os
 import logging
 import time
 import asyncio
@@ -36,7 +37,7 @@ from urllib.parse import urlparse
 import urllib.error
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any, Tuple
+from typing import Callable, List, Optional, Dict, Any, Tuple
 from uuid import uuid4
 from pathlib import Path
 
@@ -917,8 +918,20 @@ class KeyCeremony:
 
     OATH_TEXT = "J'assume la friction. Je préserve le TAU."
     OATH_TEXT_FR = "J'assume la friction. Je préserve le TAU."
+    # A signed oath is usable only inside this window. The age bound stops an
+    # unused oath from staying valid for the rest of the epoch. The skew bound
+    # absorbs a fast signer clock. Both edges are inclusive.
+    DEFAULT_MAX_AGE_SECONDS = 300.0
+    DEFAULT_FUTURE_SKEW_SECONDS = 30.0
 
-    def __init__(self, deploy_secret: str, used_nonces: Optional[set] = None):
+    def __init__(
+        self,
+        deploy_secret: str,
+        used_nonces: Optional[set] = None,
+        max_age_seconds: Optional[float] = None,
+        future_skew_seconds: Optional[float] = None,
+        now: Optional[Callable[[], datetime]] = None,
+    ):
         if not deploy_secret or not deploy_secret.strip():
             raise ValueError(
                 "KeyCeremony requires a non-empty deploy_secret. "
@@ -926,8 +939,21 @@ class KeyCeremony:
                 "secret allows forged oath signatures for SHADOW->ENFORCE "
                 "transitions, defeating human-sovereignty over mode changes."
             )
+        if max_age_seconds is None or future_skew_seconds is None:
+            env_age, env_skew = parse_oath_freshness_limits()
+            if max_age_seconds is None:
+                max_age_seconds = env_age
+            if future_skew_seconds is None:
+                future_skew_seconds = env_skew
+        self.max_age_seconds = _require_oath_limit(
+            "max_age_seconds", max_age_seconds, minimum=0.0, allow_zero=False
+        )
+        self.future_skew_seconds = _require_oath_limit(
+            "future_skew_seconds", future_skew_seconds, minimum=0.0, allow_zero=True
+        )
         self._secret = deploy_secret.encode("utf-8")
         self._used_nonces = used_nonces or set()
+        self._now = now or (lambda: datetime.now(timezone.utc))
 
     def _epoch_key(self, epoch_id: int) -> bytes:
         """Derives epoch-specific HMAC key from deploy secret + epoch ID."""
@@ -973,22 +999,46 @@ class KeyCeremony:
         nonce: str,
         timestamp: str,
     ) -> bool:
-        """Verifies an oath signature. Returns True if valid."""
+        """Verify an oath. Consume the nonce only after HMAC and freshness pass.
+
+        A stale, future, or malformed timestamp is rejected without adding the
+        nonce to the used set. A replay of an already accepted nonce is
+        rejected and does not extend that set.
+        """
         if nonce in self._used_nonces:
-            logger.warning(f"[R5-Crypto] Replay attack detected: nonce {nonce} already used.")
+            logger.warning("[R5-Crypto] Replay attack detected: nonce already used.")
             return False
-            
+
+        signed_at = _parse_oath_timestamp(timestamp)
         payload = f"{oath_text}|{epoch_id}|{operator_id}|{nonce}|{timestamp}"
         expected = hmac.new(
             self._epoch_key(epoch_id),
             payload.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        
-        is_valid = hmac.compare_digest(signature, expected)
-        if is_valid:
-            self._used_nonces.add(nonce)
-        return is_valid
+        if not hmac.compare_digest(signature, expected):
+            return False
+        if signed_at is None or not self._timestamp_is_fresh(signed_at):
+            logger.warning("[R5-Crypto] Oath timestamp is missing, malformed, or outside the freshness window.")
+            return False
+        self._used_nonces.add(nonce)
+        return True
+
+    def _timestamp_is_fresh(self, signed_at: datetime) -> bool:
+        """True when signed_at is not older than max age and not further ahead than skew.
+
+        Both instants are UTC. Age is the POSIX-second difference, so the
+        comparison does not depend on a local timezone or a calendar fold.
+        """
+        current = self._now()
+        if not isinstance(current, datetime) or current.tzinfo is None or current.utcoffset() is None:
+            return False
+        age_seconds = current.astimezone(timezone.utc).timestamp() - signed_at.timestamp()
+        if age_seconds > self.max_age_seconds:
+            return False
+        if age_seconds < -self.future_skew_seconds:
+            return False
+        return True
 
     def compute_charter_hash(self, charter_path: str) -> str:
         """Computes SHA-256 of the founding charter (for Genesis Block binding)."""
@@ -1010,6 +1060,68 @@ def get_ledger(path: str = "ledger/tenir_ledger.jsonl") -> DistributedLedger:
     if _ledger is None:
         _ledger = DistributedLedger(ledger_path=path)
     return _ledger
+
+
+def _parse_oath_timestamp(timestamp: object) -> Optional[datetime]:
+    """Parse an oath timestamp as an aware UTC instant, or return None."""
+    if not isinstance(timestamp, str):
+        return None
+    text = timestamp.strip()
+    if not text:
+        return None
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _require_oath_limit(name: str, value: object, minimum: float, allow_zero: bool) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a real number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be finite")
+    if allow_zero:
+        if number < minimum:
+            raise ValueError(f"{name} must be >= {minimum}")
+    elif number <= minimum:
+        raise ValueError(f"{name} must be > {minimum}")
+    return number
+
+
+def parse_oath_freshness_limits(
+    max_age_raw: Optional[str] = None,
+    future_skew_raw: Optional[str] = None,
+) -> Tuple[float, float]:
+    """Read oath freshness limits. Blank means the safe default.
+
+    TENIR_OATH_MAX_AGE_SECONDS defaults to 300.
+    TENIR_OATH_FUTURE_SKEW_SECONDS defaults to 30.
+    A non-numeric, non-finite, non-positive max age, or a negative skew,
+    raises ValueError so the process refuses to start.
+    """
+    if max_age_raw is None:
+        max_age_raw = os.getenv("TENIR_OATH_MAX_AGE_SECONDS")
+    if future_skew_raw is None:
+        future_skew_raw = os.getenv("TENIR_OATH_FUTURE_SKEW_SECONDS")
+
+    def _pick(raw: Optional[str], default: float, name: str, allow_zero: bool) -> float:
+        if raw is None or not str(raw).strip():
+            return default
+        try:
+            return _require_oath_limit(name, float(str(raw).strip()), 0.0, allow_zero)
+        except ValueError as exc:
+            raise ValueError(f"{name} is not a safe oath freshness limit: {raw!r}") from exc
+
+    return (
+        _pick(max_age_raw, KeyCeremony.DEFAULT_MAX_AGE_SECONDS, "TENIR_OATH_MAX_AGE_SECONDS", False),
+        _pick(future_skew_raw, KeyCeremony.DEFAULT_FUTURE_SKEW_SECONDS, "TENIR_OATH_FUTURE_SKEW_SECONDS", True),
+    )
 
 
 def get_ceremony(secret: str | None = None, used_nonces: Optional[set] = None) -> KeyCeremony:
