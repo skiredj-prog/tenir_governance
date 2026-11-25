@@ -1,8 +1,10 @@
 """Headless Chrome coverage for the local operator cockpit.
 
-Skips when Playwright or a Chrome binary is missing, so the kernel suite
-stays green without a browser. The security case feeds ledger, WebSocket,
-and error bodies that contain markup and checks that the page shows them
+Without TENIR_REQUIRE_BROWSER=1 the module skips when Playwright or a
+system Chrome binary is missing, so a plain kernel run stays green.
+The CI job sets that variable, installs Playwright Chromium, and fails
+if any case is skipped. The security case feeds ledger, WebSocket, and
+error bodies that contain markup and checks that the page shows them
 as text.
 """
 
@@ -19,9 +21,20 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("fastapi")
-playwright_sync = pytest.importorskip("playwright.sync_api")
-from playwright.sync_api import sync_playwright
+REQUIRE_BROWSER = os.environ.get("TENIR_REQUIRE_BROWSER") == "1"
+try:
+    import fastapi  # noqa: F401
+except ImportError:
+    if REQUIRE_BROWSER:
+        raise
+    pytest.importorskip("fastapi")
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    if REQUIRE_BROWSER:
+        raise
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright
 
 TOKEN = "cockpit-browser-token-0123456789abcdef"
 OPERATOR = "operator-1"
@@ -29,7 +42,7 @@ SECRET = "cockpit-browser-oath-secret-0123456789"
 XSS = "<script>window.__xss=1</script><img src=x onerror=\"window.__xss=2\">\"'><svg/onload=window.__xss=3>"
 REPO = Path(__file__).resolve().parents[1]
 R5_ROOT = REPO / "r5_hardened" / "IRON_OMEGA_R5"
-ARTIFACTS = Path("/opt/cursor/artifacts")
+ARTIFACTS = Path(os.environ.get("COCKPIT_ARTIFACT_DIR", "/opt/cursor/artifacts"))
 CHROME = next(
     (
         candidate
@@ -44,7 +57,11 @@ CHROME = next(
     "",
 )
 
-pytestmark = pytest.mark.skipif(not CHROME, reason="Chrome is not installed")
+if not REQUIRE_BROWSER and not CHROME:
+    pytest.skip(
+        "system Chrome is not installed; CI sets TENIR_REQUIRE_BROWSER=1 and uses Playwright Chromium",
+        allow_module_level=True,
+    )
 
 
 def _free_port() -> int:
@@ -117,10 +134,11 @@ def cockpit_origin(tmp_path_factory):
 @pytest.fixture(scope="module")
 def browser():
     with sync_playwright() as playwright:
-        launched = playwright.chromium.launch(
-            executable_path=CHROME,
-            args=["--no-sandbox", "--disable-gpu"],
-        )
+        args = ["--no-sandbox", "--disable-gpu"]
+        if CHROME:
+            launched = playwright.chromium.launch(executable_path=CHROME, args=args)
+        else:
+            launched = playwright.chromium.launch(args=args)
         try:
             yield launched
         finally:

@@ -69,7 +69,7 @@ Run the server with the command above. Use a fresh ledger. Expected results belo
 9. Request a new oath, set the target to `SHADOW_CRITICAL`, Submit. The green box names `SHADOW_CRITICAL`. Request another oath, set the target to `ENFORCE`, Submit. The green box names `ENFORCE` and says this R5 mode does not grant authority on the 5.7.x governance kernel. Cockpit Adjudicate still returns a verdict, now under `ENFORCE`.
 10. In the browser console, `buildRuntimeObject` is the normal path. A hand-built `fetch` of `/api/v1/adjudicate` with `{ "raw_input": "query the research project status" }` while the mode is `ENFORCE` returns `422` and names `runtime_object`. The page itself always sends a schema 1.2 object, so its Adjudicate button does not take that path.
 
-Browser coverage of the same steps, including a ledger and WebSocket payload that contains `<script>` and `<img onerror>`, is `tests/test_operator_cockpit_browser.py`. It needs Playwright and a local Chrome. Without them, pytest skips it. The API smoke test does not need a browser:
+Browser coverage of the same steps, including a ledger and WebSocket payload that contains `<script>` and `<img onerror>`, is `tests/test_operator_cockpit_browser.py`. Locally it uses system Chrome when that binary exists, and skips when it does not. The pull-request job `Operator cockpit browser (Playwright + Chromium)` checks out the exact PR head, installs Playwright Chromium, sets `TENIR_REQUIRE_BROWSER=1`, and fails if either case is skipped. The API smoke test does not need a browser:
 
 ```sh
 python -m pytest tests/test_operator_cockpit_smoke.py tests/test_operator_cockpit_browser.py -q

@@ -1,0 +1,70 @@
+name: Operator cockpit browser
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+
+jobs:
+  operator-cockpit-browser:
+    name: Operator cockpit browser (Playwright + Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Record the checked-out commit
+        run: |
+          echo "checked_out=$(git rev-parse HEAD)"
+          echo "github_sha=${{ github.sha }}"
+          echo "pr_head=${{ github.event.pull_request.head.sha }}"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the R5 runtime and Playwright Chromium
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[r5,test]"
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Run the cockpit browser suite with zero skips
+        env:
+          TENIR_REQUIRE_BROWSER: "1"
+          COCKPIT_ARTIFACT_DIR: cockpit-browser-artifacts
+        run: |
+          python -m pytest tests/test_operator_cockpit_browser.py -q --tb=short --junitxml=cockpit-browser.xml
+          python - << 'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("cockpit-browser.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          tests = int(suite.attrib.get("tests", "0"))
+          skipped = int(suite.attrib.get("skipped", "0"))
+          failures = int(suite.attrib.get("failures", "0"))
+          errors = int(suite.attrib.get("errors", "0"))
+          print(
+              f"browser tests={tests} skipped={skipped} "
+              f"failures={failures} errors={errors}"
+          )
+          if tests < 2 or skipped or failures or errors:
+              raise SystemExit(
+                  "browser suite must execute both cases with zero skips"
+              )
+          PY
+
+      - name: Upload browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operator-cockpit-browser
+          path: cockpit-browser-artifacts
+          if-no-files-found: ignore
