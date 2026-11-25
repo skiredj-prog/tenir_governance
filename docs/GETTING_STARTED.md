@@ -54,6 +54,8 @@ Open http://127.0.0.1:8000/ . Paste `TENIR_API_TOKEN` into Bearer and `TENIR_OPE
 
 The ceremony is a limited local demo. It checks that shared `TENIR_API_TOKEN` and the single configured `TENIR_OPERATOR_ID`. It does not prove an independent personal identity, and it is not an account system. `ENFORCE` on this server is the R5 process mode (`app.state.mode` in `r5_hardened/IRON_OMEGA_R5/r5_server.py`, advanced only after `ledger.append_control_transition`). That handler does not call `DualKernelGovernor`, the operation registry, or `tenir_governance.sdk`. A mode change here grants no admission, dispatch, budget, or attestation authority on the 5.7.x governance kernel.
 
+An oath is fresh only when its timestamp is an aware UTC instant and `now - signed_at` is between `-TENIR_OATH_FUTURE_SKEW_SECONDS` and `TENIR_OATH_MAX_AGE_SECONDS`, both edges included. The defaults are 30 seconds of future skew and 300 seconds of age. A missing, naive, or unparseable timestamp is rejected. The nonce is recorded only after the HMAC and the freshness check both succeed, so a stale oath does not burn the nonce. `TENIR_OATH_MAX_AGE_SECONDS` must be a finite number greater than 0. `TENIR_OATH_FUTURE_SKEW_SECONDS` must be a finite number greater than or equal to 0. Any other value refuses to start.
+
 ## Operator cockpit — manual checks
 
 Run the server with the command above. Use a fresh ledger. Expected results below are what the page shows, not a certification of the kernel.

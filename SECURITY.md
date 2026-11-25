@@ -147,6 +147,7 @@ Maintainers should enable **Trusted Publishing** (OIDC) from GitHub Actions to P
 - Requires `TENIR_API_TOKEN`, `OATH_SECRET`, and `TENIR_OPERATOR_ID` at startup.
 - API token is a shared bearer credential, not per-user IAM.
 - Mode transitions are operator- and oath-bound, ordered through `SHADOW_CRITICAL` before `ENFORCE`, and recorded in the local ledger before the live mode changes.
+- A hardened-server oath is also time-bound. `KeyCeremony.verify_oath` accepts it only when the signed timestamp is an aware UTC instant and its age is within `TENIR_OATH_MAX_AGE_SECONDS` (default 300, inclusive) and not further in the future than `TENIR_OATH_FUTURE_SKEW_SECONDS` (default 30, inclusive). The nonce is stored only after the HMAC and that window both succeed. This does not change who may transition, or what `ENFORCE` authorizes: the mode remains the R5 process flag.
 - Docker bindings default to localhost. Production deployments must not expose the service directly to untrusted networks.
 - Legacy R5 "wired" mode can accept `ENFORCE` transitions; treat it with the same operator, oath, and network controls as the hardened surface.
 

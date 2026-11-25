@@ -141,7 +141,12 @@ async def lifespan(app: FastAPI):
         )
     ledger = get_ledger(ledger_path)
     used_nonces = ledger.recover_used_nonces()
-    get_ceremony(oath_secret, used_nonces=used_nonces)
+    ceremony = get_ceremony(oath_secret, used_nonces=used_nonces)
+    logger.info(
+        "[R5] Oath freshness: max_age=%ss future_skew=%ss",
+        ceremony.max_age_seconds,
+        ceremony.future_skew_seconds,
+    )
     logger.info(f"[R5] Distributed ledger: {ledger_path}")
 
     # Initialize peer nodes for consensus
